@@ -1,7 +1,12 @@
-//! Statement-import boundary. Parsed transactions remain pending until reviewed.
+//! Statement-import boundary. Parsers produce inert, reviewable values and never
+//! receive a repository or construct domain transactions.
 
-#[derive(Debug)]
-pub struct PendingImport {
-    pub source_name: String,
-    pub row_count: usize,
-}
+pub mod csv;
+pub mod csv_mapping;
+pub mod deduplication;
+pub mod ofx;
+pub mod preview;
+pub mod source;
+
+#[allow(unused_imports)]
+pub use source::{ImportError, ImportedStatement, ImportedTransaction};
