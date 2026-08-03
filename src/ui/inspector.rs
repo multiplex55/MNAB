@@ -4,6 +4,70 @@ use crate::app::{
 };
 use crate::calculation::credit_card::CreditCardResult;
 use crate::domain::{Money, Reconciliation, ReconciliationState, TransactionId};
+use crate::{
+    domain::{ScheduledOccurrence, TargetRecommendation, TargetStatus},
+    service::assignment_service::AutoAssignPreview,
+};
+
+/// A recommendation is explanatory and deliberately has no "apply automatically" path.
+pub fn show_target_recommendation(ui: &mut egui::Ui, value: &TargetRecommendation) {
+    ui.heading("Target recommendation");
+    egui::Grid::new("target-recommendation").show(ui, |ui| {
+        for (label, amount) in [
+            ("Target", value.target_amount),
+            ("Funded", value.funded_amount),
+            ("Remaining", value.remaining_amount),
+            ("Suggested this month", value.monthly_recommendation),
+        ] {
+            ui.label(label);
+            ui.strong(amount.to_string());
+            ui.end_row();
+        }
+    });
+    if let Some(due) = value.due_date {
+        ui.label(format!("Due {due}"));
+    }
+    ui.label(if value.status == TargetStatus::Funded {
+        "Funded"
+    } else {
+        "Underfunded"
+    });
+    ui.label(&value.rationale);
+    ui.small("Recommendations never move money. Enter or approve an assignment yourself.");
+}
+
+pub fn show_occurrences(ui: &mut egui::Ui, occurrences: &[ScheduledOccurrence]) {
+    ui.heading("Upcoming scheduled items");
+    for item in occurrences {
+        ui.horizontal(|ui| {
+            ui.strong(item.date.to_string());
+            ui.label(item.amount.to_string());
+            let _ = ui.button("Enter now");
+            let _ = ui.button("Skip");
+            let _ = ui.button("Modify");
+            let _ = ui.button("Dismiss");
+        });
+    }
+}
+
+/// Returns true only when the user accepts the reviewed proposal.
+pub fn show_auto_assign_preview(ui: &mut egui::Ui, preview: &AutoAssignPreview) -> bool {
+    ui.heading("Auto-assign preview");
+    for change in &preview.changes {
+        ui.label(format!(
+            "{}: {} → {} ({})",
+            change.category_id, change.before, change.after, change.delta
+        ));
+    }
+    ui.separator();
+    ui.strong(format!("Total assignment: {}", preview.total_assignment));
+    ui.label(format!("Ready to Assign after: {}", preview.remaining_rta));
+    for warning in &preview.warnings {
+        ui.colored_label(ui.visuals().warn_fg_color, warning);
+    }
+    ui.horizontal(|ui| ui.button("Apply assignments").clicked())
+        .inner
+}
 
 /// Render only values produced by the domain calculator; no card budgeting rule lives in UI code.
 pub fn show_credit_card(ui: &mut egui::Ui, result: &CreditCardResult) {

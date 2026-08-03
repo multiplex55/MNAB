@@ -30,5 +30,6 @@ ids!(
     ReconciliationId,
     ImportBatchId,
     TargetId,
-    ScheduledTransactionId
+    ScheduledTransactionId,
+    ScheduledOccurrenceId
 );
