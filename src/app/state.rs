@@ -35,8 +35,30 @@ pub enum InspectorContext {
 }
 #[derive(Clone, Debug)]
 pub struct Notification {
+    pub kind: NotificationKind,
     pub title: String,
     pub detail: String,
+    pub persistent: bool,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NotificationKind {
+    Information,
+    Warning,
+    Error,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum RequestPurpose {
+    Accounts,
+    BudgetMonth(BudgetMonth),
+    AccountRegister(AccountId),
+    AllAccountRegisters,
+    Inbox,
+    Reports,
+    Targets,
+    Schedules,
+    Search,
+    Inspector,
 }
 #[derive(Clone, Debug)]
 pub enum OperationStatus {
@@ -69,7 +91,8 @@ pub struct AppState {
     pub dialog: Option<DialogState>,
     pub notifications: Vec<Notification>,
     pub operations: BTreeMap<RequestId, BackgroundOperation>,
-    pub latest_request: Option<RequestId>,
+    latest_by_purpose: BTreeMap<RequestPurpose, RequestId>,
+    purpose_by_request: BTreeMap<RequestId, RequestPurpose>,
     pub generation: Generation,
     pub inspector_context: InspectorContext,
     pub inspector_visible: bool,
@@ -93,7 +116,8 @@ impl Default for AppState {
             dialog: None,
             notifications: vec![],
             operations: BTreeMap::new(),
-            latest_request: None,
+            latest_by_purpose: BTreeMap::new(),
+            purpose_by_request: BTreeMap::new(),
             generation: Generation { budget: 0, view: 0 },
             inspector_context: InspectorContext::Budget,
             inspector_visible: true,
@@ -126,7 +150,11 @@ impl AppState {
     }
     /// Applies only correlated responses; stale work cannot alter the current view.
     pub fn apply_worker_message(&mut self, message: WorkerMessage) -> bool {
-        if Some(message.request_id) != self.latest_request || message.generation != self.generation
+        let Some(purpose) = self.purpose_by_request.get(&message.request_id) else {
+            return false;
+        };
+        if self.latest_by_purpose.get(purpose) != Some(&message.request_id)
+            || message.generation != self.generation
         {
             return false;
         }
@@ -139,6 +167,19 @@ impl AppState {
         }
         true
     }
+    pub fn track_request(&mut self, purpose: RequestPurpose, request_id: RequestId) {
+        if let Some(old) = self.latest_by_purpose.insert(purpose.clone(), request_id) {
+            self.purpose_by_request.remove(&old);
+        }
+        self.purpose_by_request.insert(request_id, purpose);
+    }
+    pub fn complete_request(&mut self, request_id: RequestId) {
+        if let Some(purpose) = self.purpose_by_request.remove(&request_id)
+            && self.latest_by_purpose.get(&purpose) == Some(&request_id)
+        {
+            self.latest_by_purpose.remove(&purpose);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -147,7 +188,7 @@ mod tests {
     #[test]
     fn stale_response_does_not_replace_navigation() {
         let mut s = AppState::default();
-        s.latest_request = Some(2);
+        s.track_request(RequestPurpose::Accounts, 2);
         let before = s.navigation;
         assert!(!s.apply_worker_message(WorkerMessage {
             request_id: 1,
@@ -162,7 +203,7 @@ mod tests {
         let context = egui::Context::default();
         let mut state = AppState::default();
         context.memory_mut(|memory| memory.request_focus(state.search_id));
-        state.latest_request = Some(7);
+        state.track_request(RequestPurpose::Search, 7);
         assert!(state.apply_worker_message(WorkerMessage {
             request_id: 7,
             generation: state.generation,
@@ -172,5 +213,28 @@ mod tests {
             context.memory(|memory| memory.focused()),
             Some(state.search_id)
         );
+    }
+
+    #[test]
+    fn unrelated_requests_remain_current() {
+        let mut state = AppState::default();
+        state.track_request(RequestPurpose::Accounts, 1);
+        state.track_request(RequestPurpose::Reports, 2);
+        assert!(state.apply_worker_message(WorkerMessage {
+            request_id: 1,
+            generation: state.generation,
+            payload: WorkerPayload::Loaded
+        }));
+        state.track_request(RequestPurpose::Accounts, 3);
+        assert!(!state.apply_worker_message(WorkerMessage {
+            request_id: 1,
+            generation: state.generation,
+            payload: WorkerPayload::Loaded
+        }));
+        assert!(state.apply_worker_message(WorkerMessage {
+            request_id: 2,
+            generation: state.generation,
+            payload: WorkerPayload::Loaded
+        }));
     }
 }

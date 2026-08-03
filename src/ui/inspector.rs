@@ -1,5 +1,6 @@
 use crate::app::{
     command::AppCommand,
+    dispatcher::ActionCollector,
     state::{AppState, InspectorContext, OperationStatus},
 };
 use crate::calculation::credit_card::CreditCardResult;
@@ -134,11 +135,11 @@ pub fn show_reconciliation(ui: &mut egui::Ui, model: &ReconciliationInspector<'_
         ));
     }
 }
-pub fn show(ui: &mut egui::Ui, state: &mut AppState, commands: &mut Vec<AppCommand>) {
+pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollector) {
     ui.horizontal(|ui| {
         ui.heading("Inspector");
         if ui.button("Collapse (Cmd/Ctrl+\\)").clicked() {
-            commands.push(AppCommand::ToggleInspector);
+            actions.push(AppCommand::ToggleInspector);
         }
     });
     match &state.inspector_context {
@@ -171,13 +172,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, commands: &mut Vec<AppComma
                     ui.spinner();
                 }
                 if ui.button("Cancel operation").clicked() {
-                    commands.push(AppCommand::CancelOperation);
+                    actions.push(AppCommand::CancelOperation);
                 }
             }
             OperationStatus::Failed(error) => {
                 ui.colored_label(ui.visuals().error_fg_color, format!("{error:?}"));
                 if ui.button("Retry").clicked() {
-                    commands.push(AppCommand::RetryOperation);
+                    actions.push(AppCommand::RetryOperation);
                 }
             }
         }

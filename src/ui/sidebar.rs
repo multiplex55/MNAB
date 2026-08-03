@@ -1,6 +1,7 @@
 use crate::{
     app::{
         command::AppCommand,
+        dispatcher::ActionCollector,
         navigation::Workspace,
         state::{AccountSummary, AppState},
     },
@@ -19,7 +20,7 @@ fn account_row(ui: &mut egui::Ui, account: &AccountSummary, selected: bool) -> e
         ),
     )
 }
-pub fn show(ui: &mut egui::Ui, state: &mut AppState, commands: &mut Vec<AppCommand>) {
+pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollector) {
     ui.heading("MNAB");
     ui.label(&state.budget_name);
     ui.small(
@@ -62,7 +63,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, commands: &mut Vec<AppComma
         }
     }
     if ui.button("＋ Add Account").clicked() {
-        commands.push(AppCommand::AddAccount);
+        actions.push(AppCommand::AddAccount);
     }
 }
 #[allow(dead_code)]

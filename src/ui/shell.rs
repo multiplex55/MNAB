@@ -1,7 +1,10 @@
-use crate::app::{command::AppCommand, navigation::Workspace, state::AppState};
-pub fn show(ctx: &egui::Context, state: &mut AppState, commands: &mut Vec<AppCommand>) {
+use crate::app::{
+    command::AppCommand, dispatcher::ActionCollector, navigation::Workspace, state::AppState,
+};
+pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionCollector) {
     let modal = state.dialog.is_some();
     let editor = ctx.memory(|m| m.focused().is_some_and(|id| id == state.search_id));
+    let mut keyboard_commands = Vec::new();
     super::keyboard::route(
         ctx,
         super::keyboard::Scope {
@@ -9,8 +12,11 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, commands: &mut Vec<AppCom
             text_editor: editor,
             command_enabled: true,
         },
-        commands,
+        &mut keyboard_commands,
     );
+    for command in keyboard_commands {
+        actions.push(command);
+    }
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.heading("MNAB — Multi Needs A Budget");
@@ -19,7 +25,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, commands: &mut Vec<AppCom
                     .hint_text("Search (Cmd/Ctrl+F)")
                     .id(state.search_id),
             );
-            if commands.contains(&AppCommand::FocusSearch) {
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
                 response.request_focus();
             }
         });
@@ -28,14 +34,14 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, commands: &mut Vec<AppCom
         .resizable(true)
         .default_width(state.sidebar_width)
         .min_width(160.0)
-        .show(ctx, |ui| super::sidebar::show(ui, state, commands));
+        .show(ctx, |ui| super::sidebar::show(ui, state, actions));
     state.sidebar_width = left.response.rect.width();
     if state.inspector_visible {
         let right = egui::SidePanel::right("inspector")
             .resizable(true)
             .default_width(state.inspector_width)
             .min_width(190.0)
-            .show(ctx, |ui| super::inspector::show(ui, state, commands));
+            .show(ctx, |ui| super::inspector::show(ui, state, actions));
         state.inspector_width = right.response.rect.width();
     }
     egui::CentralPanel::default().show(ctx, |ui| {
@@ -52,28 +58,18 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, commands: &mut Vec<AppCom
         if state.active_budget.is_none() {
             ui.label("Open or create a budget to begin.");
             if ui.button("Create budget").clicked() {
-                commands.push(AppCommand::CreateBudget);
+                actions.push(AppCommand::CreateBudget);
             }
         } else if state.accounts.is_empty() {
             ui.label("No rows yet. Use the actions below from the keyboard or mouse.");
             if ui.button("Add account").clicked() {
-                commands.push(AppCommand::AddAccount);
+                actions.push(AppCommand::AddAccount);
             }
             if ui.button("Import transactions").clicked() {
-                commands.push(AppCommand::Import);
+                actions.push(AppCommand::Import);
             }
         }
     });
-    // Global actions are executed here, never by individual widgets. Consuming the
-    // toggle also prevents a queued command from being replayed next frame.
-    let toggles = commands
-        .iter()
-        .filter(|command| **command == AppCommand::ToggleInspector)
-        .count();
-    if toggles % 2 == 1 {
-        state.inspector_visible = !state.inspector_visible;
-    }
-    commands.retain(|command| *command != AppCommand::ToggleInspector);
 }
 
 #[cfg(test)]
@@ -91,12 +87,12 @@ mod tests {
         });
         let mut s = AppState::default();
         s.inspector_width = 237.0;
-        show(&ctx, &mut s, &mut vec![]);
+        show(&ctx, &mut s, &mut ActionCollector::default());
         let _ = ctx.end_pass();
         let saved = s.inspector_width;
         s.inspector_visible = false;
         ctx.begin_pass(Default::default());
-        show(&ctx, &mut s, &mut vec![]);
+        show(&ctx, &mut s, &mut ActionCollector::default());
         let _ = ctx.end_pass();
         assert_eq!(s.inspector_width, saved);
     }
