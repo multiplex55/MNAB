@@ -1,7 +1,7 @@
 use super::{connection::open_primary, migration::MigrationError};
 use rusqlite::Connection;
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -74,16 +74,21 @@ pub struct StorageWorker {
 }
 impl StorageWorker {
     pub fn start(path: &Path, repaint: impl Fn() + Send + 'static) -> Result<Self, MigrationError> {
-        // Establish configuration before returning, then transfer sole ownership to the worker.
-        let connection = open_primary(&path)?;
         let (tx, rx) = mpsc::channel();
         let (response_tx, responses) = mpsc::channel();
+        let (startup_tx, startup_rx) = mpsc::sync_channel(1);
         let stopping = Arc::new(AtomicBool::new(false));
         let thread_stopping = stopping.clone();
+        let path = path.to_owned();
         let handle = thread::Builder::new()
             .name("mnab-storage".into())
-            .spawn(move || run(connection, rx, response_tx, thread_stopping, repaint))
+            .spawn(move || run(path, rx, response_tx, startup_tx, thread_stopping, repaint))
             .map_err(MigrationError::Backup)?;
+        startup_rx.recv().map_err(|_| {
+            MigrationError::Backup(std::io::Error::other(
+                "storage worker terminated during startup",
+            ))
+        })??;
         Ok(Self {
             sender: tx,
             responses,
@@ -123,12 +128,23 @@ impl Drop for StorageWorker {
 
 #[allow(clippy::needless_pass_by_value)] // Values are moved to, and owned by, this thread.
 fn run(
-    connection: Connection,
+    path: PathBuf,
     rx: mpsc::Receiver<Message>,
     tx: mpsc::Sender<StorageResponse>,
+    startup: mpsc::SyncSender<Result<(), MigrationError>>,
     stopping: Arc<AtomicBool>,
     repaint: impl Fn(),
 ) {
+    let connection = match open_primary(&path) {
+        Ok(connection) => {
+            let _ = startup.send(Ok(()));
+            connection
+        }
+        Err(error) => {
+            let _ = startup.send(Err(error));
+            return;
+        }
+    };
     while let Ok(message) = rx.recv() {
         match message {
             Message::Shutdown => break,

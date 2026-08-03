@@ -1,4 +1,6 @@
 //! Semantic commands emitted by the single global keyboard/router layer.
+use crate::domain::{AccountId, BudgetMonth, CategoryId, Money, TransactionId};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AppCommand {
     ContextualNew,
@@ -24,6 +26,50 @@ pub enum AppCommand {
     RetryOperation,
     CancelOperation,
     Exit,
+}
+
+/// A persistence-facing command. Payloads deliberately consist only of domain
+/// identifiers and owned domain values, keeping storage and UI implementation
+/// details on their respective sides of the dispatcher boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FinancialCommand {
+    Assign {
+        category_id: CategoryId,
+        month: BudgetMonth,
+        amount: Money,
+    },
+    DeleteTransaction {
+        transaction_id: TransactionId,
+        account_id: AccountId,
+        month: BudgetMonth,
+    },
+    AddAccount {
+        name: String,
+    },
+    Import {
+        account_id: AccountId,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ApplicationAction {
+    Ui(AppCommand),
+    Financial(FinancialCommand),
+}
+
+pub type CommandId = u64;
+pub type CorrelationId = u64;
+pub type ConfirmationToken = u64;
+pub type FocusRestorationId = u64;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandEnvelope {
+    pub command_id: CommandId,
+    pub correlation_id: CorrelationId,
+    pub budget_generation: u64,
+    pub payload: ApplicationAction,
+    pub confirmation_token: Option<ConfirmationToken>,
+    pub focus_restoration_id: Option<FocusRestorationId>,
 }
 
 /// Bounded active-session history. A successful command supplies both redo and inverse payloads;
