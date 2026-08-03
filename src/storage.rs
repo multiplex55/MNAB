@@ -3,6 +3,7 @@
 pub mod connection;
 pub mod diagnostics;
 pub mod migration;
+pub mod repair;
 pub mod repository;
 pub mod worker;
 

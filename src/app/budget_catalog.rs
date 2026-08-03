@@ -253,6 +253,17 @@ impl BudgetCatalog {
         selected: &Path,
         repaint: impl Fn() + Send + 'static,
     ) -> Result<PreparedBudget, CatalogError> {
+        self.prepare_open_checked(paths, selected, false, repaint)
+    }
+
+    #[allow(clippy::unused_self)] // Kept as a catalog operation for one lifecycle API.
+    pub fn prepare_open_checked(
+        &self,
+        paths: &PortablePaths,
+        selected: &Path,
+        thorough: bool,
+        repaint: impl Fn() + Send + 'static,
+    ) -> Result<PreparedBudget, CatalogError> {
         let root = fs::canonicalize(&paths.budgets)?;
         let path = managed_file(&root, selected)?; // 1: managed path
         let info = inspect(&path)?
@@ -264,7 +275,7 @@ impl BudgetCatalog {
                 supported: LATEST_SCHEMA_VERSION,
             });
         } // 4
-        let findings = diagnostics::all(&validation, false)?; // 5
+        let findings = diagnostics::all(&validation, thorough)?; // 5
         if findings
             .iter()
             .any(|f| f.severity == diagnostics::Severity::Error)

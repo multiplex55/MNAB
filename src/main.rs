@@ -13,12 +13,13 @@ mod service;
 mod storage;
 mod ui;
 
-use std::{fs, path::Path};
+use std::fs;
 
 use app::{
     MnabApp,
     portable_paths::PortablePaths,
     settings::{SettingsSession, WindowBounds, clamp_window, platform},
+    startup::StartupContext,
 };
 use tracing_subscriber::prelude::*;
 
@@ -58,14 +59,19 @@ fn main() {
             }
             let clean_marker = paths.data.join(".clean-shutdown");
             tracing::info!(version = env!("CARGO_PKG_VERSION"), profile = if cfg!(debug_assertions) { "debug" } else { "release" }, executable = %paths.executable.display(), data = %paths.data.display(), "starting MNAB");
-            if !clean_marker.exists() {
-                tracing::warn!("previous session did not record a clean shutdown");
-            }
-            let _ = fs::remove_file(&clean_marker);
             // Settings must be read before any native window options are built.
             let settings = SettingsSession::load(&paths.settings);
+            let startup = StartupContext::capture(&clean_marker, &settings);
+            if startup.marker_was_absent {
+                tracing::warn!("previous session did not record a clean shutdown");
+            }
+            if let Err(error) = fs::remove_file(&clean_marker)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::error!(%error, "could not consume clean marker");
+            }
             let window = clamp_window(settings.value().window, &platform::available_work_areas());
-            (MnabApp::ready(paths, settings), window)
+            (MnabApp::ready(paths, settings, startup), window)
         }
         Err(error) => {
             eprintln!("MNAB startup failure: {error:#}");
@@ -80,9 +86,6 @@ fn launch(
     window: WindowBounds,
     guard: Option<tracing_appender::non_blocking::WorkerGuard>,
 ) {
-    let marker = app
-        .paths_for_shutdown()
-        .map(|path| path.join(".clean-shutdown"));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(TITLE)
@@ -93,12 +96,7 @@ fn launch(
         ..Default::default()
     };
     let result = eframe::run_native(TITLE, options, Box::new(move |_| Ok(Box::new(app))));
-    if result.is_ok() {
-        if let Some(path) = marker {
-            let _ = write_clean_marker(&path);
-        }
-        tracing::info!("clean shutdown");
-    } else if let Err(error) = &result {
+    if let Err(error) = &result {
         tracing::error!(error = %error, "window initialization failed; shutdown is unclean");
         present_window_failure(&error.to_string());
     }
@@ -123,11 +121,6 @@ fn application_icon() -> egui::IconData {
         width: SIDE,
         height: SIDE,
     }
-}
-
-fn write_clean_marker(path: &Path) -> std::io::Result<()> {
-    fs::write(path, b"clean")?;
-    std::fs::File::open(path)?.sync_all()
 }
 
 fn present_window_failure(detail: &str) {

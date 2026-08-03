@@ -70,7 +70,7 @@ pub struct StorageWorker {
     sender: mpsc::Sender<Message>,
     responses: mpsc::Receiver<StorageResponse>,
     stopping: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
+    handle: Option<JoinHandle<Result<(), WorkerError>>>,
 }
 impl StorageWorker {
     pub fn start(path: &Path, repaint: impl Fn() + Send + 'static) -> Result<Self, MigrationError> {
@@ -115,7 +115,7 @@ impl StorageWorker {
             let _ = self.sender.send(Message::Shutdown);
         }
         if let Some(h) = self.handle.take() {
-            h.join().map_err(|_| WorkerError::Terminated)?;
+            h.join().map_err(|_| WorkerError::Terminated)??;
         }
         Ok(())
     }
@@ -134,7 +134,7 @@ fn run(
     startup: mpsc::SyncSender<Result<(), MigrationError>>,
     stopping: Arc<AtomicBool>,
     repaint: impl Fn(),
-) {
+) -> Result<(), WorkerError> {
     let connection = match open_primary(&path) {
         Ok(connection) => {
             let _ = startup.send(Ok(()));
@@ -142,7 +142,7 @@ fn run(
         }
         Err(error) => {
             let _ = startup.send(Err(error));
-            return;
+            return Ok(());
         }
     };
     while let Ok(message) = rx.recv() {
@@ -154,27 +154,30 @@ fn run(
                 } else {
                     execute(&connection, &request.operation)
                 };
+                repaint();
                 let _ = tx.send(StorageResponse::Completed {
                     id: request.id,
                     generation: request.generation,
                     result,
                 });
-                repaint();
             }
         }
     }
     while let Ok(Message::Work(r)) = rx.try_recv() {
+        repaint();
         let _ = tx.send(StorageResponse::Completed {
             id: r.id,
             generation: r.generation,
             result: Err(WorkerError::Cancelled),
         });
-        repaint();
     }
-    let _ = connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .map_err(|e| WorkerError::Repository(format!("WAL checkpoint failed: {e}")))?;
     drop(connection);
     let _ = tx.send(StorageResponse::Terminated);
     repaint();
+    Ok(())
 }
 fn execute(c: &Connection, op: &StorageOperation) -> Result<StorageResult, WorkerError> {
     match op {
