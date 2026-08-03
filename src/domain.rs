@@ -1,11 +1,13 @@
 //! Persistence-independent budgeting model and validation.
 
+mod account;
 mod entities;
 mod id;
 mod money;
 mod month;
 mod transaction;
 
+pub use account::*;
 pub use entities::*;
 pub use id::*;
 pub use money::*;

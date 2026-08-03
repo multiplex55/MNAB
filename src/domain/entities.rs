@@ -16,24 +16,6 @@ impl Budget {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum AccountType {
-    Checking,
-    Savings,
-    Cash,
-    CreditCard,
-    Loan,
-    Asset,
-    Liability,
-}
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Account {
-    pub id: AccountId,
-    pub budget_id: BudgetId,
-    pub name: String,
-    pub account_type: AccountType,
-    pub closed: bool,
-}
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CategoryGroup {
     pub id: CategoryGroupId,
@@ -62,6 +44,22 @@ pub struct Payee {
     pub id: PayeeId,
     pub budget_id: BudgetId,
     pub name: String,
+    pub hidden: bool,
+    pub default_category_id: Option<CategoryId>,
+    pub last_used_category_id: Option<CategoryId>,
+}
+impl Payee {
+    #[must_use]
+    pub fn new(budget_id: BudgetId, name: impl Into<String>) -> Self {
+        Self {
+            id: PayeeId::new(),
+            budget_id,
+            name: name.into(),
+            hidden: false,
+            default_category_id: None,
+            last_used_category_id: None,
+        }
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BudgetAssignment {
@@ -165,13 +163,8 @@ mod tests {
     #[test]
     fn policies_and_history() {
         let bid = BudgetId::new();
-        let a = Account {
-            id: AccountId::new(),
-            budget_id: bid,
-            name: "x".into(),
-            account_type: AccountType::Checking,
-            closed: true,
-        };
+        let mut a = Account::new(bid, "x", AccountType::Checking);
+        a.closed = true;
         assert_eq!(
             a.permit_transaction(None),
             Err(MutationError::ClosedAccount)
