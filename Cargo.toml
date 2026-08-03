@@ -22,10 +22,12 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 
+[dev-dependencies]
+proptest = "1"
+
 [lints.rust]
 unsafe_code = "forbid"
 
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
-
