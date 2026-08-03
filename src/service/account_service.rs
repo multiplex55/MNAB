@@ -11,6 +11,65 @@ pub struct Ledger {
     pub reconciliation_changes: Vec<ReconciliationChange>,
     pub audit: Vec<String>,
     pub hide_closed: bool,
+    /// Managed payment categories are keyed by immutable account identity, never account name.
+    pub payment_categories: HashMap<AccountId, ManagedPaymentCategory>,
+    /// Earliest ledger date invalidated by a transaction mutation; recalculation continues forward.
+    pub recalculation_from: Option<TransactionDate>,
+}
+
+#[cfg(test)]
+mod credit_card_tests {
+    use super::*;
+    fn date() -> TransactionDate {
+        TransactionDate(time::Date::from_calendar_date(2026, time::Month::January, 1).unwrap())
+    }
+    #[test]
+    fn managed_category_lifecycle_uses_account_identity() {
+        let mut ledger = Ledger::default();
+        let mut service = AccountService::new(&mut ledger);
+        let account = service
+            .create(
+                BudgetId::new(),
+                "Card",
+                AccountType::CreditCard,
+                Money::ZERO,
+                date(),
+            )
+            .unwrap();
+        let category_id = service.payment_category(account.id).unwrap().category_id;
+        service.rename(account.id, "Renamed").unwrap();
+        assert_eq!(
+            service.payment_category(account.id).unwrap().category_id,
+            category_id
+        );
+        service.close(account.id, None, date()).unwrap();
+        assert!(service.payment_category(account.id).unwrap().archived);
+        service.reopen(account.id).unwrap();
+        assert!(!service.payment_category(account.id).unwrap().archived);
+    }
+    #[test]
+    fn failed_creation_is_atomic() {
+        let mut ledger = Ledger::default();
+        let before = ledger.clone();
+        let result = AccountService::new(&mut ledger).create(
+            BudgetId::new(),
+            "Card",
+            AccountType::CreditCard,
+            Money::from_minor_units(i64::MIN),
+            date(),
+        );
+        assert_eq!(result, Err(AccountServiceError::Overflow));
+        assert_eq!(ledger.accounts, before.accounts);
+        assert_eq!(ledger.payment_categories, before.payment_categories);
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedPaymentCategory {
+    pub category_id: CategoryId,
+    pub account_id: AccountId,
+    pub name: String,
+    pub archived: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,6 +126,17 @@ impl<'a> AccountService<'a> {
             .opening_amount(opening_magnitude)
             .map_err(|_| AccountServiceError::Overflow)?;
         staged.accounts.insert(account.id, account.clone());
+        if account_type == AccountType::CreditCard {
+            staged.payment_categories.insert(
+                account.id,
+                ManagedPaymentCategory {
+                    category_id: CategoryId::new(),
+                    account_id: account.id,
+                    name: format!("{} Payment", account.name),
+                    archived: false,
+                },
+            );
+        }
         if amount != Money::ZERO {
             let transaction = Transaction {
                 id: TransactionId::new(),
@@ -98,7 +168,11 @@ impl<'a> AccountService<'a> {
         id: AccountId,
         name: impl Into<String>,
     ) -> Result<(), AccountServiceError> {
-        self.account_mut(id)?.name = name.into();
+        let name = name.into();
+        self.account_mut(id)?.name.clone_from(&name);
+        if let Some(category) = self.ledger.payment_categories.get_mut(&id) {
+            category.name = format!("{name} Payment");
+        }
         Ok(())
     }
     pub fn annotate(
@@ -122,6 +196,9 @@ impl<'a> AccountService<'a> {
     }
     pub fn reopen(&mut self, id: AccountId) -> Result<(), AccountServiceError> {
         self.account_mut(id)?.closed = false;
+        if let Some(category) = self.ledger.payment_categories.get_mut(&id) {
+            category.archived = false;
+        }
         Ok(())
     }
     pub fn change_type(
@@ -208,6 +285,9 @@ impl<'a> AccountService<'a> {
             .get_mut(&id)
             .ok_or(AccountServiceError::NotFound)?
             .closed = true;
+        if let Some(category) = staged.payment_categories.get_mut(&id) {
+            category.archived = true;
+        }
         *self.ledger = staged;
         Ok(())
     }
@@ -224,6 +304,12 @@ impl<'a> AccountService<'a> {
             .accounts
             .remove(&id)
             .ok_or(AccountServiceError::NotFound)?;
+        self.ledger.payment_categories.remove(&id);
         Ok(())
+    }
+
+    #[must_use]
+    pub fn payment_category(&self, account_id: AccountId) -> Option<&ManagedPaymentCategory> {
+        self.ledger.payment_categories.get(&account_id)
     }
 }

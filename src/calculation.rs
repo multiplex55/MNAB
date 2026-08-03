@@ -2,6 +2,7 @@
 
 pub mod balances;
 pub mod budget_month;
+pub mod credit_card;
 
 use crate::domain::Money;
 

@@ -2,7 +2,26 @@ use crate::app::{
     command::AppCommand,
     state::{AppState, InspectorContext, OperationStatus},
 };
+use crate::calculation::credit_card::CreditCardResult;
 use crate::domain::{Money, Reconciliation, ReconciliationState, TransactionId};
+
+/// Render only values produced by the domain calculator; no card budgeting rule lives in UI code.
+pub fn show_credit_card(ui: &mut egui::Ui, result: &CreditCardResult) {
+    let c = &result.contributions;
+    egui::Grid::new("credit-card-explanation").show(ui, |ui| {
+        for (label, value) in [
+            ("Funded spending moved", c.funded_spending_moved),
+            ("Debt created", c.debt_created),
+            ("Payments made", c.payments_made),
+            ("Manual assignment", c.manual_assignment),
+            ("Payment available", result.payment_available),
+        ] {
+            ui.label(label);
+            ui.strong(value.to_string());
+            ui.end_row();
+        }
+    });
+}
 
 pub struct ReconciliationInspector<'a> {
     pub statement_balance: Money,

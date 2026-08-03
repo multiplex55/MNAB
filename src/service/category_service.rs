@@ -1,6 +1,7 @@
 //! Transaction-friendly category organization commands.
 
-use crate::domain::{CategoryGroupId, CategoryId};
+use crate::domain::{AccountId, CategoryGroupId, CategoryId};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Group {
@@ -24,6 +25,8 @@ pub struct Category {
 pub struct CategoryCatalog {
     pub groups: Vec<Group>,
     pub categories: Vec<Category>,
+    /// Immutable account/category linkage for system-managed card payment categories.
+    pub managed_payment_categories: HashMap<AccountId, CategoryId>,
 }
 #[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
 pub enum CategoryCommandError {
@@ -33,6 +36,8 @@ pub enum CategoryCommandError {
     EmptyName,
     #[error("category is historically used and was archived")]
     Archived,
+    #[error("credit-card payment categories are managed with their account")]
+    Managed,
 }
 
 impl CategoryCatalog {
@@ -146,6 +151,13 @@ impl CategoryCatalog {
         id: CategoryId,
         name: &str,
     ) -> Result<(), CategoryCommandError> {
+        if self
+            .managed_payment_categories
+            .values()
+            .any(|managed| *managed == id)
+        {
+            return Err(CategoryCommandError::Managed);
+        }
         if name.trim().is_empty() {
             return Err(CategoryCommandError::EmptyName);
         }
@@ -162,6 +174,13 @@ impl CategoryCatalog {
         group_id: CategoryGroupId,
         position: usize,
     ) -> Result<(), CategoryCommandError> {
+        if self
+            .managed_payment_categories
+            .values()
+            .any(|managed| *managed == id)
+        {
+            return Err(CategoryCommandError::Managed);
+        }
         if !self.groups.iter().any(|g| g.id == group_id) {
             return Err(CategoryCommandError::NotFound);
         }
@@ -176,6 +195,13 @@ impl CategoryCatalog {
         Ok(())
     }
     pub fn set_hidden(&mut self, id: CategoryId, value: bool) -> Result<(), CategoryCommandError> {
+        if self
+            .managed_payment_categories
+            .values()
+            .any(|managed| *managed == id)
+        {
+            return Err(CategoryCommandError::Managed);
+        }
         self.categories
             .iter_mut()
             .find(|c| c.id == id)
@@ -184,6 +210,13 @@ impl CategoryCatalog {
         Ok(())
     }
     pub fn delete_if_unused(&mut self, id: CategoryId) -> Result<(), CategoryCommandError> {
+        if self
+            .managed_payment_categories
+            .values()
+            .any(|managed| *managed == id)
+        {
+            return Err(CategoryCommandError::Managed);
+        }
         let i = self
             .categories
             .iter()
