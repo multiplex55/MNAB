@@ -1,31 +1,11 @@
-//! `SQLite` repository implementations. Connection details remain private to this module.
+//! `SQLite` persistence. SQL details and row representations do not escape this module.
 
-use std::path::Path;
+pub mod connection;
+pub mod migration;
+pub mod repository;
+pub mod worker;
 
-use rusqlite::Connection;
-
-use crate::{domain::Budget, error::ServiceError, service::BudgetRepository};
-
-pub struct SqliteBudgetRepository {
-    connection: Connection,
-}
-
-impl SqliteBudgetRepository {
-    pub fn open(path: &Path) -> Result<Self, rusqlite::Error> {
-        Connection::open(path).map(|connection| Self { connection })
-    }
-}
-
-impl BudgetRepository for SqliteBudgetRepository {
-    fn create(&mut self, budget: &Budget) -> Result<(), ServiceError> {
-        self.connection
-            .execute(
-                "INSERT INTO budgets (id, name) VALUES (?1, ?2)",
-                (budget.id.to_string(), &budget.name),
-            )
-            .map(|_| ())
-            .map_err(|source| ServiceError::Failed {
-                source: Box::new(source),
-            })
-    }
-}
+#[allow(unused_imports)]
+pub use connection::open_primary;
+#[allow(unused_imports)]
+pub use migration::{LATEST_SCHEMA_VERSION, MigrationError, migrate};
