@@ -42,6 +42,21 @@ pub enum EditField {
     Amount,
 }
 
+/// Non-transaction rows retained in register ordering for historical inspection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationSeparator {
+    pub reconciliation_id: ReconciliationId,
+    pub statement_date: StatementDate,
+    pub ending_balance: Money,
+    pub state: ReconciliationState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RegisterRow {
+    Transaction(TransactionId),
+    Reconciliation(ReconciliationSeparator),
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TransactionDraft {
     pub date: Option<TransactionDate>,

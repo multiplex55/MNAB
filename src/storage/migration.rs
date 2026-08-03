@@ -5,8 +5,9 @@ use std::{
 };
 use thiserror::Error;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 1;
+pub const LATEST_SCHEMA_VERSION: i64 = 2;
 const INITIAL_SQL: &str = include_str!("migrations/0001_initial.sql");
+const RECONCILIATION_SQL: &str = include_str!("migrations/0002_reconciliation_history.sql");
 const INITIAL_CHECKSUM: &str = "0001-initial-v1";
 
 #[derive(Debug, Error)]
@@ -69,8 +70,14 @@ pub fn migrate(connection: &mut Connection, path: &Path) -> Result<(), Migration
     }
     let transaction = connection.transaction()?;
     transaction.execute_batch("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, identifier TEXT NOT NULL UNIQUE, checksum TEXT NOT NULL, applied_at TEXT NOT NULL);")?;
-    transaction.execute_batch(INITIAL_SQL)?;
-    transaction.execute("INSERT INTO schema_migrations(version,identifier,checksum,applied_at) VALUES(?1,?2,?3,datetime('now'))", (1_i64, "0001_initial", INITIAL_CHECKSUM))?;
+    if version < 1 {
+        transaction.execute_batch(INITIAL_SQL)?;
+        transaction.execute("INSERT INTO schema_migrations(version,identifier,checksum,applied_at) VALUES(?1,?2,?3,datetime('now'))", (1_i64, "0001_initial", INITIAL_CHECKSUM))?;
+    }
+    if version < 2 {
+        transaction.execute_batch(RECONCILIATION_SQL)?;
+        transaction.execute("INSERT INTO schema_migrations(version,identifier,checksum,applied_at) VALUES(?1,?2,?3,datetime('now'))", (2_i64, "0002_reconciliation_history", "0002-reconciliation-v1"))?;
+    }
     transaction.commit()?;
     Ok(())
 }
