@@ -2,6 +2,7 @@
 //!
 //! All values are inputs or results; in particular Ready to Assign is never persisted.
 
+use super::credit_card::{CreditCardError, CreditCardInput, CreditCardResult};
 use crate::domain::{AccountId, BudgetMonth, CategoryId, Money, MoneyError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,6 +88,19 @@ pub struct BudgetMonthResult {
 pub enum CalculationError {
     #[error("money arithmetic overflow")]
     Overflow,
+}
+impl From<CreditCardError> for CalculationError {
+    fn from(_: CreditCardError) -> Self {
+        Self::Overflow
+    }
+}
+
+/// The single integration boundary used by UI/reporting code. Card rules remain in
+/// `credit_card`; this layer only combines their documented RTA effects.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BudgetWithCardsResult {
+    pub budget: BudgetMonthResult,
+    pub credit_cards: Vec<CreditCardResult>,
 }
 impl From<MoneyError> for CalculationError {
     fn from(_: MoneyError) -> Self {
@@ -188,6 +202,31 @@ pub fn calculate(input: &BudgetMonthInput) -> Result<BudgetMonthResult, Calculat
         categories: results,
         ready_to_assign: rta,
         credit_card_debt_created: card_debt,
+    })
+}
+
+pub fn calculate_with_credit_cards(
+    input: &BudgetMonthInput,
+    cards: &[CreditCardInput],
+) -> Result<BudgetWithCardsResult, CalculationError> {
+    let mut budget = calculate(input)?;
+    let credit_cards = cards
+        .iter()
+        .map(super::credit_card::calculate)
+        .collect::<Result<Vec<_>, _>>()?;
+    for card in &credit_cards {
+        budget.ready_to_assign = add(
+            budget.ready_to_assign,
+            card.contributions.ready_to_assign_change,
+        )?;
+        budget.credit_card_debt_created = add(
+            budget.credit_card_debt_created,
+            card.contributions.debt_created,
+        )?;
+    }
+    Ok(BudgetWithCardsResult {
+        budget,
+        credit_cards,
     })
 }
 

@@ -5,9 +5,10 @@ use std::{
 };
 use thiserror::Error;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 2;
+pub const LATEST_SCHEMA_VERSION: i64 = 3;
 const INITIAL_SQL: &str = include_str!("migrations/0001_initial.sql");
 const RECONCILIATION_SQL: &str = include_str!("migrations/0002_reconciliation_history.sql");
+const CREDIT_CARD_SQL: &str = include_str!("migrations/0003_credit_card_payment_categories.sql");
 const INITIAL_CHECKSUM: &str = "0001-initial-v1";
 
 #[derive(Debug, Error)]
@@ -77,6 +78,10 @@ pub fn migrate(connection: &mut Connection, path: &Path) -> Result<(), Migration
     if version < 2 {
         transaction.execute_batch(RECONCILIATION_SQL)?;
         transaction.execute("INSERT INTO schema_migrations(version,identifier,checksum,applied_at) VALUES(?1,?2,?3,datetime('now'))", (2_i64, "0002_reconciliation_history", "0002-reconciliation-v1"))?;
+    }
+    if version < 3 {
+        transaction.execute_batch(CREDIT_CARD_SQL)?;
+        transaction.execute("INSERT INTO schema_migrations(version,identifier,checksum,applied_at) VALUES(?1,?2,?3,datetime('now'))", (3_i64, "0003_credit_card_payment_categories", "0003-credit-card-v1"))?;
     }
     transaction.commit()?;
     Ok(())

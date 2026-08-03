@@ -23,6 +23,13 @@ impl<'a> TransactionService<'a> {
     pub fn new(ledger: &'a mut Ledger) -> Self {
         Self { ledger }
     }
+    fn invalidate_from(&mut self, date: TransactionDate) {
+        self.ledger.recalculation_from = Some(
+            self.ledger
+                .recalculation_from
+                .map_or(date, |old| if old.0 <= date.0 { old } else { date }),
+        );
+    }
     fn check(
         &self,
         transaction: &Transaction,
@@ -62,6 +69,7 @@ impl<'a> TransactionService<'a> {
         confirmed: bool,
     ) -> Result<(), TransactionServiceError> {
         self.check(&transaction, confirmed)?;
+        self.invalidate_from(transaction.date);
         self.ledger.transactions.insert(transaction.id, transaction);
         self.ledger.audit.push("add transaction".into());
         Ok(())
@@ -72,6 +80,7 @@ impl<'a> TransactionService<'a> {
         confirmed: bool,
     ) -> Result<(), TransactionServiceError> {
         self.mutation_check(transaction.id, confirmed)?;
+        let old_date = self.ledger.transactions[&transaction.id].date;
         self.check(&transaction, confirmed)?;
         if matches!(
             self.ledger.transactions[&transaction.id].body,
@@ -85,6 +94,7 @@ impl<'a> TransactionService<'a> {
             );
         }
         self.ledger.transactions.insert(transaction.id, transaction);
+        self.invalidate_from(old_date);
         self.ledger
             .audit
             .push(if confirmed { "confirmed edit" } else { "edit" }.into());
@@ -96,6 +106,7 @@ impl<'a> TransactionService<'a> {
         confirmed: bool,
     ) -> Result<(), TransactionServiceError> {
         self.mutation_check(id, confirmed)?;
+        let date = self.ledger.transactions[&id].date;
         if matches!(
             self.ledger.transactions[&id].body,
             TransactionBody::Transfer { .. }
@@ -103,6 +114,7 @@ impl<'a> TransactionService<'a> {
             return Err(TransactionServiceError::ConfirmationRequired);
         }
         self.ledger.transactions.remove(&id);
+        self.invalidate_from(date);
         self.ledger.audit.push("delete".into());
         Ok(())
     }
@@ -231,6 +243,11 @@ impl<'a> TransactionService<'a> {
     ) -> Result<(TransactionId, TransactionId), TransactionServiceError> {
         let mut staged = self.ledger.clone();
         let result = create_transfer_in(&mut staged, source, destination, date, source_amount)?;
+        staged.recalculation_from = Some(
+            staged
+                .recalculation_from
+                .map_or(date, |old| if old.0 <= date.0 { old } else { date }),
+        );
         *self.ledger = staged;
         Ok(result)
     }
@@ -254,6 +271,7 @@ impl<'a> TransactionService<'a> {
         confirmed: bool,
     ) -> Result<(), TransactionServiceError> {
         let pair = self.pair(id)?;
+        let old_date = self.ledger.transactions[&id].date;
         self.mutation_check(id, confirmed)?;
         self.mutation_check(pair, confirmed)?;
         let opposite = amount
@@ -273,6 +291,7 @@ impl<'a> TransactionService<'a> {
         {
             *other_amount = amount;
         }
+        self.invalidate_from(if old_date.0 <= date.0 { old_date } else { date });
         Ok(())
     }
     pub fn delete_transfer_both(
@@ -281,10 +300,18 @@ impl<'a> TransactionService<'a> {
         confirmed: bool,
     ) -> Result<(), TransactionServiceError> {
         let pair = self.pair(id)?;
+        let date = self.ledger.transactions[&id].date;
+        let pair_date = self.ledger.transactions[&pair].date;
+        let date = if date.0 <= pair_date.0 {
+            date
+        } else {
+            pair_date
+        };
         self.mutation_check(id, confirmed)?;
         self.mutation_check(pair, confirmed)?;
         self.ledger.transactions.remove(&id);
         self.ledger.transactions.remove(&pair);
+        self.invalidate_from(date);
         Ok(())
     }
     /// Unlinked sides become ordinary uncategorized adjustments (represented by opening/adjustment body).
