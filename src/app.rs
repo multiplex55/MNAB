@@ -7,11 +7,13 @@ pub mod portable_paths;
 pub mod runtime;
 pub mod search;
 pub mod session;
+pub mod settings;
 pub mod state;
 pub mod view_invalidation;
 
 use crate::{app::runtime::ApplicationRuntime, error::UserFacingError};
 use portable_paths::PortablePaths;
+use settings::{LoadStatus, SettingsSession};
 
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
@@ -21,17 +23,18 @@ pub struct MnabApp {
 }
 
 impl MnabApp {
-    pub fn ready(paths: PortablePaths) -> Self {
+    pub fn ready(paths: PortablePaths, settings: SettingsSession) -> Self {
+        let malformed = matches!(settings.status(), LoadStatus::Malformed);
         Self {
             startup_error: None,
-            runtime: ApplicationRuntime::new(Some(paths)),
+            runtime: ApplicationRuntime::new(Some(paths), Some(settings), malformed),
         }
     }
 
     pub fn fatal(error: crate::error::StartupError) -> Self {
         Self {
             startup_error: Some(error),
-            runtime: ApplicationRuntime::new(None),
+            runtime: ApplicationRuntime::new(None, None, false),
         }
     }
 
@@ -58,6 +61,9 @@ impl eframe::App for MnabApp {
             });
             return;
         }
+        if let Some(rect) = ctx.input(|input| input.viewport().outer_rect) {
+            self.runtime.record_window(rect);
+        }
         // Responses are always exhausted before input or rendering.  This makes the
         // immutable view snapshot used by this frame internally consistent.
         self.runtime.drain_worker_responses();
@@ -69,6 +75,12 @@ impl eframe::App for MnabApp {
         }
         #[cfg(debug_assertions)]
         self.diagnostics(ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Err(error) = self.runtime.save_settings() {
+            tracing::error!(%error, "could not save settings during shutdown");
+        }
     }
 }
 

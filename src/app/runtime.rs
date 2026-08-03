@@ -8,6 +8,7 @@ use crate::{
         dispatcher::{ActionCollector, validate_confirmation},
         portable_paths::PortablePaths,
         session::BudgetSession,
+        settings::SettingsSession,
         state::{AppState, Notification, NotificationKind},
         view_invalidation::ViewInvalidations,
     },
@@ -27,10 +28,27 @@ pub struct ApplicationRuntime {
     history: CommandHistory<FinancialCommand>,
     invalidations: ViewInvalidations,
     pending_commands: BTreeMap<u64, CommandEnvelope>,
+    settings: Option<SettingsSession>,
 }
 
 impl ApplicationRuntime {
-    pub fn new(paths: Option<PortablePaths>) -> Self {
+    pub fn new(
+        paths: Option<PortablePaths>,
+        settings: Option<SettingsSession>,
+        malformed_settings: bool,
+    ) -> Self {
+        let mut view = AppState::default();
+        if let Some(settings) = &settings {
+            view.inspector_visible = settings.value().inspector_visible;
+        }
+        if malformed_settings {
+            view.notifications.push(Notification {
+                kind: NotificationKind::Warning,
+                title: "Settings were reset".into(),
+                detail: "settings.json is malformed or contains invalid supported-version data; defaults are in use.".into(),
+                persistent: true,
+            });
+        }
         Self {
             paths,
             session: None,
@@ -38,10 +56,31 @@ impl ApplicationRuntime {
             next_request: 1,
             next_command: 1,
             generation: Generation { budget: 0, view: 0 },
-            view: AppState::default(),
+            view,
             history: CommandHistory::new(100),
             invalidations: ViewInvalidations::default(),
             pending_commands: BTreeMap::new(),
+            settings,
+        }
+    }
+    pub fn save_settings(&mut self) -> std::io::Result<()> {
+        if let Some(settings) = &mut self.settings {
+            settings.value_mut().inspector_visible = self.view.inspector_visible;
+            if let Some(session) = &self.session {
+                settings.value_mut().last_opened_budget = Some(session.database_path.clone());
+            }
+            settings.save()?;
+        }
+        Ok(())
+    }
+    pub fn record_window(&mut self, rect: egui::Rect) {
+        if let Some(settings) = &mut self.settings {
+            settings.value_mut().window = crate::app::settings::WindowBounds {
+                x: rect.min.x,
+                y: rect.min.y,
+                width: rect.width(),
+                height: rect.height(),
+            };
         }
     }
     pub fn paths(&self) -> Option<&PortablePaths> {
@@ -182,7 +221,7 @@ mod tests {
     use super::*;
     #[test]
     fn request_ids_are_monotonic_and_generations_are_independent() {
-        let mut runtime = ApplicationRuntime::new(None);
+        let mut runtime = ApplicationRuntime::new(None, None, false);
         assert_eq!(
             (runtime.allocate_request(), runtime.allocate_request()),
             (1, 2)
