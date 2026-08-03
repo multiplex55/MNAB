@@ -2,6 +2,55 @@ use crate::app::{
     command::AppCommand,
     state::{AppState, InspectorContext, OperationStatus},
 };
+use crate::domain::{Money, Reconciliation, ReconciliationState, TransactionId};
+
+pub struct ReconciliationInspector<'a> {
+    pub statement_balance: Money,
+    pub cleared_balance: Money,
+    pub difference: Money,
+    pub eligible: &'a [TransactionId],
+    pub history: &'a [Reconciliation],
+}
+
+/// Reconciliation actions are buttons as well as shortcuts, so none require a pointer.
+pub fn show_reconciliation(ui: &mut egui::Ui, model: &ReconciliationInspector<'_>) {
+    egui::Grid::new("reconciliation-totals").show(ui, |ui| {
+        ui.label("Statement balance");
+        ui.strong(model.statement_balance.to_string());
+        ui.end_row();
+        ui.label("Cleared balance");
+        ui.strong(model.cleared_balance.to_string());
+        ui.end_row();
+        ui.label("Difference");
+        ui.strong(model.difference.to_string());
+        ui.end_row();
+    });
+    ui.label(format!("{} eligible register rows", model.eligible.len()));
+    ui.horizontal(|ui| {
+        let _ = ui.button("Clear selected (Space)");
+        let _ = ui.button("Correct selected (Enter)");
+        let _ = ui.button("Preview adjustment (A)");
+        ui.add_enabled(
+            model.difference == Money::ZERO,
+            egui::Button::new("Complete (Cmd/Ctrl+Enter)"),
+        );
+    });
+    ui.separator();
+    ui.heading("Reconciliation history");
+    for record in model.history {
+        let warning = if record.state == ReconciliationState::PotentiallyInvalid {
+            " ⚠ potentially invalid"
+        } else {
+            ""
+        };
+        ui.label(format!(
+            "{} · {} · {} transaction(s){warning}",
+            record.statement_date.0,
+            record.ending_balance,
+            record.included_transaction_ids.len()
+        ));
+    }
+}
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, commands: &mut Vec<AppCommand>) {
     ui.horizontal(|ui| {
         ui.heading("Inspector");

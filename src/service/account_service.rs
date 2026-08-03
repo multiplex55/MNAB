@@ -7,8 +7,20 @@ pub struct Ledger {
     pub accounts: HashMap<AccountId, Account>,
     pub transactions: HashMap<TransactionId, Transaction>,
     pub payees: HashMap<PayeeId, Payee>,
+    pub reconciliations: HashMap<ReconciliationId, Reconciliation>,
+    pub reconciliation_changes: Vec<ReconciliationChange>,
     pub audit: Vec<String>,
     pub hide_closed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationChange {
+    pub reconciliation_id: ReconciliationId,
+    pub transaction_id: TransactionId,
+    pub operation: String,
+    pub before: Option<Transaction>,
+    pub after: Option<Transaction>,
+    pub changed_at: time::OffsetDateTime,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

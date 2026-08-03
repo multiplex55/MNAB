@@ -83,13 +83,6 @@ pub struct ScheduledTransaction {
     pub amount: Money,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Reconciliation {
-    pub id: ReconciliationId,
-    pub account_id: AccountId,
-    pub statement_date: StatementDate,
-    pub balance: Money,
-}
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ImportBatch {
     pub id: ImportBatchId,
     pub account_id: AccountId,

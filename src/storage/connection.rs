@@ -45,7 +45,7 @@ mod tests {
         );
         assert_eq!(
             super::super::migration::current_version(&connection).unwrap(),
-            1
+            super::super::migration::LATEST_SCHEMA_VERSION
         );
         assert!(path.with_file_name("budget.sqlite3-wal").exists());
         assert!(path.with_file_name("budget.sqlite3-shm").exists());
