@@ -1,14 +1,15 @@
-//! Core budgeting types. This module must remain independent of persistence and UI crates.
+//! Persistence-independent budgeting model and validation.
 
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+mod entities;
+mod id;
+mod money;
+mod month;
+mod transaction;
 
-/// An amount in integer USD cents.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Money(pub i64);
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Budget {
-    pub id: Uuid,
-    pub name: String,
-}
+pub use entities::*;
+pub use id::*;
+pub use money::*;
+pub use month::*;
+#[allow(unused_imports)]
+// This binary does not consume every part of its public domain surface yet.
+pub use transaction::*;

@@ -22,10 +22,7 @@ impl<R: BudgetRepository> BudgetService<R> {
     }
 
     pub fn create_budget(&mut self, name: String) -> Result<Budget, ServiceError> {
-        let budget = Budget {
-            id: uuid::Uuid::new_v4(),
-            name,
-        };
+        let budget = Budget::new(name);
         self.repository.create(&budget)?;
         Ok(budget)
     }
