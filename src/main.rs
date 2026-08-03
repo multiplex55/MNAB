@@ -15,7 +15,11 @@ mod ui;
 
 use std::{fs, path::Path};
 
-use app::{MnabApp, portable_paths::PortablePaths};
+use app::{
+    MnabApp,
+    portable_paths::PortablePaths,
+    settings::{SettingsSession, WindowBounds, clamp_window, platform},
+};
 use tracing_subscriber::prelude::*;
 
 const TITLE: &str = "MNAB — Multi Needs A Budget";
@@ -40,7 +44,7 @@ fn init_logging(
 fn main() {
     let startup = PortablePaths::discover();
     let mut guard = None;
-    let app = match startup {
+    let (app, window) = match startup {
         Ok(paths) => {
             match init_logging(&paths) {
                 Ok(value) => guard = Some(value),
@@ -49,7 +53,7 @@ fn main() {
                         path: paths.logs.clone(),
                         source,
                     };
-                    return launch(MnabApp::fatal(error), guard);
+                    return launch(MnabApp::fatal(error), WindowBounds::default(), guard);
                 }
             }
             let clean_marker = paths.data.join(".clean-shutdown");
@@ -58,24 +62,32 @@ fn main() {
                 tracing::warn!("previous session did not record a clean shutdown");
             }
             let _ = fs::remove_file(&clean_marker);
-            MnabApp::ready(paths)
+            // Settings must be read before any native window options are built.
+            let settings = SettingsSession::load(&paths.settings);
+            let window = clamp_window(settings.value().window, &platform::available_work_areas());
+            (MnabApp::ready(paths, settings), window)
         }
         Err(error) => {
             eprintln!("MNAB startup failure: {error:#}");
-            MnabApp::fatal(error)
+            (MnabApp::fatal(error), WindowBounds::default())
         }
     };
-    launch(app, guard);
+    launch(app, window, guard);
 }
 
-fn launch(app: MnabApp, guard: Option<tracing_appender::non_blocking::WorkerGuard>) {
+fn launch(
+    app: MnabApp,
+    window: WindowBounds,
+    guard: Option<tracing_appender::non_blocking::WorkerGuard>,
+) {
     let marker = app
         .paths_for_shutdown()
         .map(|path| path.join(".clean-shutdown"));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(TITLE)
-            .with_inner_size([1280.0, 800.0])
+            .with_position([window.x, window.y])
+            .with_inner_size([window.width, window.height])
             .with_min_inner_size([900.0, 600.0])
             .with_icon(std::sync::Arc::new(application_icon())),
         ..Default::default()
