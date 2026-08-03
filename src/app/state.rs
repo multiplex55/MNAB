@@ -130,6 +130,19 @@ impl Default for AppState {
     }
 }
 impl AppState {
+    /// Remove state whose identity belongs to the previous budget.
+    pub fn clear_budget_state(&mut self) {
+        self.active_budget = None;
+        self.budget_name = "No budget open".into();
+        self.database_path = None;
+        self.selected_account = None;
+        self.selected_report = None;
+        self.accounts.clear();
+        self.operations.clear();
+        self.latest_by_purpose.clear();
+        self.purpose_by_request.clear();
+    }
+
     pub fn open_dialog(&mut self, dialog: Dialog, initiating: Id, fallback: Id) {
         self.dialog = Some(DialogState {
             dialog,

@@ -32,6 +32,26 @@ pub struct ApplicationRuntime {
 }
 
 impl ApplicationRuntime {
+    /// Deletion is non-financial lifecycle work and is intentionally never recorded
+    /// in command history. The active worker is closed (and checkpoints WAL) first.
+    pub fn delete_budget(
+        &mut self,
+        catalog: &mut crate::app::budget_catalog::BudgetCatalog,
+        id: crate::domain::BudgetId,
+        confirmation: &str,
+    ) -> Result<crate::app::budget_catalog::DeletionResult, crate::app::budget_catalog::CatalogError>
+    {
+        catalog.confirm_name(id, confirmation)?;
+        let is_active = self.session.as_ref().is_some_and(|s| s.budget_id == id);
+        if is_active {
+            self.close_session();
+        }
+        let paths = self
+            .paths
+            .as_ref()
+            .ok_or(crate::app::budget_catalog::CatalogError::UnmanagedPath)?;
+        catalog.delete(paths, id, confirmation)
+    }
     pub fn new(
         paths: Option<PortablePaths>,
         settings: Option<SettingsSession>,
@@ -112,9 +132,14 @@ impl ApplicationRuntime {
         self.view.generation = self.generation;
     }
     pub fn commit_session(&mut self, session: BudgetSession, worker: StorageWorker) {
+        // Callers fully initialize the candidate before committing it. Thus the
+        // old worker remains usable if candidate preparation fails.
         if let Some(mut old) = self.worker.take() {
             let _ = old.shutdown();
         }
+        let budget_id = session.budget_id;
+        let database_path = session.database_path.clone();
+        let budget_name = session.summary.budget_name.clone();
         self.session = Some(session);
         self.worker = Some(worker);
         self.generation.budget = self
@@ -124,6 +149,12 @@ impl ApplicationRuntime {
             .expect("budget generation exhausted");
         self.generation.view = 0;
         self.view.generation = self.generation;
+        self.history.clear();
+        self.pending_commands.clear();
+        self.view.clear_budget_state();
+        self.view.active_budget = Some(budget_id);
+        self.view.database_path = Some(database_path);
+        self.view.budget_name = budget_name;
     }
     pub fn close_session(&mut self) {
         if let Some(mut worker) = self.worker.take() {
@@ -133,6 +164,9 @@ impl ApplicationRuntime {
         self.generation.budget = self.generation.budget.saturating_add(1);
         self.generation.view = 0;
         self.view.generation = self.generation;
+        self.history.clear();
+        self.pending_commands.clear();
+        self.view.clear_budget_state();
     }
     pub fn drain_worker_responses(&mut self) {
         while let Some(response) = self.worker.as_ref().and_then(StorageWorker::try_response) {
@@ -230,5 +264,74 @@ mod tests {
         runtime.bump_view_generation();
         assert_eq!(runtime.generation().budget, before.budget);
         assert_eq!(runtime.generation().view, before.view + 1);
+    }
+
+    #[test]
+    fn invalid_replacement_leaves_old_session_worker_usable() {
+        use crate::{
+            app::budget_catalog::BudgetCatalog,
+            domain::BudgetId,
+            storage::worker::{StorageOperation, StorageRequest},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let paths = PortablePaths::from_executable(&dir.path().join("mnab.exe")).unwrap();
+        let database = paths.budgets.join("old.sqlite3");
+        let worker = StorageWorker::start(&database, || {}).unwrap();
+        let mut runtime = ApplicationRuntime::new(Some(paths.clone()), None, false);
+        runtime.commit_session(
+            BudgetSession {
+                budget_id: BudgetId::new(),
+                database_path: database,
+                schema_version: 3,
+                summary: crate::app::session::SessionSummary {
+                    budget_name: "Old".into(),
+                    account_count: 0,
+                },
+            },
+            worker,
+        );
+        let invalid = paths.budgets.join("invalid.sqlite3");
+        std::fs::write(&invalid, b"not sqlite").unwrap();
+        assert!(
+            BudgetCatalog::default()
+                .prepare_open(&paths, &invalid, || {})
+                .is_err()
+        );
+        runtime
+            .worker
+            .as_ref()
+            .unwrap()
+            .submit(StorageRequest {
+                id: 1,
+                generation: runtime.generation,
+                operation: StorageOperation::Health,
+            })
+            .unwrap();
+        assert!(
+            runtime
+                .worker
+                .as_ref()
+                .unwrap()
+                .response_timeout(std::time::Duration::from_secs(2))
+                .is_some()
+        );
+        assert_eq!(runtime.session().unwrap().summary.budget_name, "Old");
+    }
+
+    #[test]
+    fn prior_generation_response_cannot_complete_new_session_operation() {
+        let mut runtime = ApplicationRuntime::new(None, None, false);
+        runtime.generation = Generation { budget: 2, view: 0 };
+        runtime.view.generation = runtime.generation;
+        let stale = StorageResponse::Completed {
+            id: 7,
+            generation: Generation { budget: 1, view: 0 },
+            result: Ok(crate::storage::worker::StorageResult::Healthy),
+        };
+        assert!(!crate::storage::worker::response_is_current(
+            &stale,
+            7,
+            runtime.generation
+        ));
     }
 }
