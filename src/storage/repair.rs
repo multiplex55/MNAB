@@ -118,8 +118,16 @@ fn reconstruct_copy(
     Ok(())
 }
 
+#[cfg(unix)]
 fn sync_dir(path: &Path) -> std::io::Result<()> {
     fs::File::open(path)?.sync_all()
+}
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> std::io::Result<()> {
+    // `File::open` on a directory fails with ERROR_ACCESS_DENIED on Windows.
+    // Both database files were closed before the rename sequence, which is the
+    // durability boundary available through the portable standard library.
+    Ok(())
 }
 
 #[cfg(test)]

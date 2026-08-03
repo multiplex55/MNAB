@@ -361,8 +361,20 @@ fn write_clean_marker(path: &std::path::Path) -> std::io::Result<()> {
     file.write_all(b"clean")?;
     file.sync_all()?;
     if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)?.sync_all()?;
+        sync_directory(parent)?;
     }
+    Ok(())
+}
+
+// Unix permits opening a directory and syncing its metadata. Windows denies
+// opening a directory through `File::open`; the marker file itself has already
+// been flushed above, so do not turn a clean Windows shutdown into a failure.
+#[cfg(unix)]
+fn sync_directory(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+#[cfg(not(unix))]
+fn sync_directory(_path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
