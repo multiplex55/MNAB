@@ -9,6 +9,7 @@ use crate::{
         portable_paths::PortablePaths,
         session::BudgetSession,
         settings::SettingsSession,
+        startup::StartupContext,
         state::{AppState, Notification, NotificationKind},
         view_invalidation::ViewInvalidations,
     },
@@ -29,6 +30,9 @@ pub struct ApplicationRuntime {
     invalidations: ViewInvalidations,
     pending_commands: BTreeMap<u64, CommandEnvelope>,
     settings: Option<SettingsSession>,
+    accepting_commands: bool,
+    shutdown_complete: bool,
+    shutdown_requested: bool,
 }
 
 impl ApplicationRuntime {
@@ -56,6 +60,7 @@ impl ApplicationRuntime {
         paths: Option<PortablePaths>,
         settings: Option<SettingsSession>,
         malformed_settings: bool,
+        startup: StartupContext,
     ) -> Self {
         let mut view = AppState::default();
         if let Some(settings) = &settings {
@@ -69,7 +74,7 @@ impl ApplicationRuntime {
                 persistent: true,
             });
         }
-        Self {
+        let mut runtime = Self {
             paths,
             session: None,
             worker: None,
@@ -81,7 +86,58 @@ impl ApplicationRuntime {
             invalidations: ViewInvalidations::default(),
             pending_commands: BTreeMap::new(),
             settings,
+            accepting_commands: true,
+            shutdown_complete: false,
+            shutdown_requested: false,
+        };
+        runtime.apply_startup(startup);
+        runtime
+    }
+
+    fn apply_startup(&mut self, startup: StartupContext) {
+        let Some(selected) = startup.last_successfully_opened_budget else {
+            if startup.marker_was_absent {
+                self.startup_notice(NotificationKind::Warning, "Startup checks pending", "The previous shutdown was unclean; select a budget to run complete diagnostics before opening.");
+            }
+            return;
+        };
+        let Some(paths) = self.paths.clone() else {
+            return;
+        };
+        let result = crate::app::budget_catalog::BudgetCatalog::default().prepare_open_checked(
+            &paths,
+            &selected,
+            startup.marker_was_absent,
+            || {},
+        );
+        match result {
+            Ok(prepared) => {
+                self.commit_session(prepared.session, prepared.worker);
+                if startup.marker_was_absent {
+                    self.startup_notice(NotificationKind::Information, "Startup diagnostics passed", "Integrity, foreign-key, and financial diagnostics passed after the unclean shutdown.");
+                }
+            }
+            Err(error) => {
+                let title = if startup.marker_was_absent {
+                    "Startup diagnostics failed"
+                } else {
+                    "Last budget was not opened"
+                };
+                self.startup_notice(
+                    NotificationKind::Error,
+                    title,
+                    &format!("Normal opening was refused: {error}"),
+                );
+            }
         }
+    }
+    fn startup_notice(&mut self, kind: NotificationKind, title: &str, detail: &str) {
+        self.view.notifications.push(Notification {
+            kind,
+            title: title.into(),
+            detail: detail.into(),
+            persistent: true,
+        });
     }
     pub fn save_settings(&mut self) -> std::io::Result<()> {
         if let Some(settings) = &mut self.settings {
@@ -205,11 +261,17 @@ impl ApplicationRuntime {
         }
     }
     fn dispatch(&mut self, action: ApplicationAction) {
+        if !self.accepting_commands {
+            return;
+        }
         if let ApplicationAction::Ui(intent) = action {
             // Global intentions are handled by the application router and are not
             // mistaken for persistence work.
             if intent == crate::app::command::AppCommand::ToggleInspector {
                 self.view.inspector_visible = !self.view.inspector_visible;
+            }
+            if intent == crate::app::command::AppCommand::Exit {
+                self.shutdown_requested = true;
             }
             return;
         }
@@ -248,6 +310,60 @@ impl ApplicationRuntime {
     pub fn history(&self) -> &CommandHistory<FinancialCommand> {
         &self.history
     }
+    pub const fn shutdown_requested(&self) -> bool {
+        self.shutdown_requested
+    }
+    pub fn request_shutdown(&mut self) {
+        self.shutdown_requested = true;
+    }
+
+    /// The sole ordered shutdown state machine. A marker is published only after every
+    /// required durability step has succeeded.
+    pub fn shutdown(&mut self) -> Result<(), String> {
+        if self.shutdown_complete {
+            return Ok(());
+        }
+        self.accepting_commands = false;
+        self.pending_commands.clear(); // queued mutations have not started and are rolled back
+        if !self.view.operations.is_empty() {
+            self.view.operations.clear();
+        }
+        if let Some(mut worker) = self.worker.take() {
+            worker
+                .shutdown()
+                .map_err(|e| Self::shutdown_failed("worker stop/join and WAL checkpoint", e))?;
+        }
+        self.save_settings()
+            .map_err(|e| Self::shutdown_failed("settings persistence", e))?;
+        let paths = self
+            .paths
+            .as_ref()
+            .ok_or_else(|| Self::shutdown_failed("clean marker", "portable paths unavailable"))?;
+        write_clean_marker(&paths.data.join(".clean-shutdown"))
+            .map_err(|e| Self::shutdown_failed("clean marker write/sync", e))?;
+        self.shutdown_complete = true;
+        Ok(())
+    }
+    fn shutdown_failed(step: &str, error: impl std::fmt::Display) -> String {
+        let message = format!("shutdown step '{step}' failed: {error}");
+        tracing::error!(step, error=%error, "required shutdown step failed; clean marker omitted");
+        message
+    }
+}
+
+fn write_clean_marker(path: &std::path::Path) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    file.write_all(b"clean")?;
+    file.sync_all()?;
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -255,7 +371,15 @@ mod tests {
     use super::*;
     #[test]
     fn request_ids_are_monotonic_and_generations_are_independent() {
-        let mut runtime = ApplicationRuntime::new(None, None, false);
+        let mut runtime = ApplicationRuntime::new(
+            None,
+            None,
+            false,
+            StartupContext {
+                marker_was_absent: false,
+                last_successfully_opened_budget: None,
+            },
+        );
         assert_eq!(
             (runtime.allocate_request(), runtime.allocate_request()),
             (1, 2)
@@ -277,7 +401,15 @@ mod tests {
         let paths = PortablePaths::from_executable(&dir.path().join("mnab.exe")).unwrap();
         let database = paths.budgets.join("old.sqlite3");
         let worker = StorageWorker::start(&database, || {}).unwrap();
-        let mut runtime = ApplicationRuntime::new(Some(paths.clone()), None, false);
+        let mut runtime = ApplicationRuntime::new(
+            Some(paths.clone()),
+            None,
+            false,
+            StartupContext {
+                marker_was_absent: false,
+                last_successfully_opened_budget: None,
+            },
+        );
         runtime.commit_session(
             BudgetSession {
                 budget_id: BudgetId::new(),
@@ -320,7 +452,15 @@ mod tests {
 
     #[test]
     fn prior_generation_response_cannot_complete_new_session_operation() {
-        let mut runtime = ApplicationRuntime::new(None, None, false);
+        let mut runtime = ApplicationRuntime::new(
+            None,
+            None,
+            false,
+            StartupContext {
+                marker_was_absent: false,
+                last_successfully_opened_budget: None,
+            },
+        );
         runtime.generation = Generation { budget: 2, view: 0 };
         runtime.view.generation = runtime.generation;
         let stale = StorageResponse::Completed {
@@ -333,5 +473,54 @@ mod tests {
             7,
             runtime.generation
         ));
+    }
+
+    #[test]
+    fn command_exit_and_window_close_use_same_idempotent_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = PortablePaths::from_executable(&dir.path().join("mnab.exe")).unwrap();
+        let settings = SettingsSession::load(&paths.settings);
+        let context = StartupContext {
+            marker_was_absent: false,
+            last_successfully_opened_budget: None,
+        };
+        let mut command =
+            ApplicationRuntime::new(Some(paths.clone()), Some(settings), false, context.clone());
+        command.dispatch(ApplicationAction::Ui(crate::app::command::AppCommand::Exit));
+        assert!(command.shutdown_requested());
+        command.shutdown().unwrap();
+        command.shutdown().unwrap();
+        assert!(paths.data.join(".clean-shutdown").is_file());
+
+        std::fs::remove_file(paths.data.join(".clean-shutdown")).unwrap();
+        let mut window = ApplicationRuntime::new(
+            Some(paths.clone()),
+            Some(SettingsSession::load(&paths.settings)),
+            false,
+            context,
+        );
+        window.request_shutdown();
+        assert_eq!(window.shutdown_requested(), command.shutdown_requested());
+        window.shutdown().unwrap();
+        assert!(paths.data.join(".clean-shutdown").is_file());
+    }
+
+    #[test]
+    fn settings_failure_omits_clean_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = PortablePaths::from_executable(&dir.path().join("mnab.exe")).unwrap();
+        std::fs::create_dir(&paths.settings).unwrap();
+        let settings = SettingsSession::load(&paths.settings);
+        let mut runtime = ApplicationRuntime::new(
+            Some(paths.clone()),
+            Some(settings),
+            false,
+            StartupContext {
+                marker_was_absent: false,
+                last_successfully_opened_budget: None,
+            },
+        );
+        assert!(runtime.shutdown().is_err());
+        assert!(!paths.data.join(".clean-shutdown").exists());
     }
 }

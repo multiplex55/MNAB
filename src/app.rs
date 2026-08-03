@@ -9,12 +9,14 @@ pub mod runtime;
 pub mod search;
 pub mod session;
 pub mod settings;
+pub mod startup;
 pub mod state;
 pub mod view_invalidation;
 
 use crate::{app::runtime::ApplicationRuntime, error::UserFacingError};
 use portable_paths::PortablePaths;
 use settings::{LoadStatus, SettingsSession};
+use startup::StartupContext;
 
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
@@ -24,18 +26,26 @@ pub struct MnabApp {
 }
 
 impl MnabApp {
-    pub fn ready(paths: PortablePaths, settings: SettingsSession) -> Self {
+    pub fn ready(paths: PortablePaths, settings: SettingsSession, startup: StartupContext) -> Self {
         let malformed = matches!(settings.status(), LoadStatus::Malformed);
         Self {
             startup_error: None,
-            runtime: ApplicationRuntime::new(Some(paths), Some(settings), malformed),
+            runtime: ApplicationRuntime::new(Some(paths), Some(settings), malformed, startup),
         }
     }
 
     pub fn fatal(error: crate::error::StartupError) -> Self {
         Self {
             startup_error: Some(error),
-            runtime: ApplicationRuntime::new(None, None, false),
+            runtime: ApplicationRuntime::new(
+                None,
+                None,
+                false,
+                StartupContext {
+                    marker_was_absent: false,
+                    last_successfully_opened_budget: None,
+                },
+            ),
         }
     }
 
@@ -65,12 +75,19 @@ impl eframe::App for MnabApp {
         if let Some(rect) = ctx.input(|input| input.viewport().outer_rect) {
             self.runtime.record_window(rect);
         }
+        if ctx.input(|input| input.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.runtime.request_shutdown();
+        }
         // Responses are always exhausted before input or rendering.  This makes the
         // immutable view snapshot used by this frame internally consistent.
         self.runtime.drain_worker_responses();
         let mut actions = crate::app::dispatcher::ActionCollector::default();
         crate::ui::shell::show(ctx, self.runtime.view_mut(), &mut actions);
         self.runtime.dispatch_collected(actions);
+        if self.runtime.shutdown_requested() && self.runtime.shutdown().is_ok() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         if self.runtime.has_pending_work() || ctx.has_requested_repaint() {
             ctx.request_repaint();
         }
@@ -79,8 +96,8 @@ impl eframe::App for MnabApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if let Err(error) = self.runtime.save_settings() {
-            tracing::error!(%error, "could not save settings during shutdown");
+        if let Err(error) = self.runtime.shutdown() {
+            tracing::error!(%error, "shutdown incomplete");
         }
     }
 }
