@@ -2,6 +2,7 @@
 
 pub mod account_service;
 pub mod assignment_service;
+pub mod backup_service;
 pub mod budget_service;
 pub mod category_service;
 pub mod import_service;

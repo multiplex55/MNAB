@@ -1,6 +1,7 @@
 //! `SQLite` persistence. SQL details and row representations do not escape this module.
 
 pub mod connection;
+pub mod diagnostics;
 pub mod migration;
 pub mod repository;
 pub mod worker;

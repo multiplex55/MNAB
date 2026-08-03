@@ -43,9 +43,32 @@ cargo build --release
 The executable is `target\release\mnab.exe`. Copy it to a writable folder before running it.
 Debug builds retain a console for diagnostics; release builds use the Windows GUI subsystem.
 
+## Network-free and operating-system behavior
+
+MNAB has no HTTP client, update checker, telemetry SDK, or remotely loaded asset. Native Windows
+file dialogs may ask the operating system to enumerate shell locations, mounted/network drives,
+or recent locations according to the user's Windows configuration. That behavior belongs to the
+operating system; MNAB itself reads or writes only paths explicitly selected by the user and its
+portable `mnab-data` tree.
+
+## Manual release checklist
+
+- [ ] Review the complete dependency tree (`cargo tree`) for networking, telemetry, remote assets,
+      and newly introduced native/runtime requirements.
+- [ ] Launch the ZIP on a clean Windows x64 machine without Rust, developer tools, or SQLite.
+- [ ] Confirm the archive contains only `mnab.exe` and `README.txt`.
+- [ ] Create a budget, exit cleanly, and reopen it.
+- [ ] Upgrade a copy of every supported older schema and confirm the pre-migration backup.
+- [ ] Import representative QFX, QBO, and CSV files and review deduplication results.
+- [ ] Reconcile an account and verify its history.
+- [ ] Create, validate, and restore a manual backup.
+- [ ] Interrupt an import/write and verify that its transaction is atomic and the budget reopens.
+- [ ] Exercise a clean shutdown during queued work and confirm the WAL is checkpointed.
+- [ ] Confirm every MNAB-owned file remains below `mnab-data` in the extracted portable directory.
+- [ ] Confirm removing or making the portable directory unwritable produces a clear warning.
+
 ## Architecture
 
 `domain` and `calculation` are platform-independent. `service` coordinates typed commands
 against repository traits, `storage` privately owns SQLite connections, and `ui` only emits
 typed application commands. The source architecture test enforces the key dependency rules.
-
