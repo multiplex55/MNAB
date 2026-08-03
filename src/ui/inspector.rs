@@ -11,7 +11,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, commands: &mut Vec<AppComma
     });
     match &state.inspector_context {
         InspectorContext::Budget => {
-            ui.label("Budget details and assignment summary");
+            ui.label("Assignment inspector");
+            ui.label("Enter assignment amounts in cents, then press Enter to commit.");
+            ui.label("Undo restores the assignment records from before the command.");
         }
         InspectorContext::Transaction(_) => {
             ui.label("Transaction details");

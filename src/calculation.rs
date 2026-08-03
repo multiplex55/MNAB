@@ -1,5 +1,7 @@
 //! Pure budgeting calculations.
 
+pub mod budget_month;
+
 use crate::domain::Money;
 
 #[must_use]
