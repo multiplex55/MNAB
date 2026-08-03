@@ -126,6 +126,10 @@ impl<C: Clone> CommandHistory<C> {
     pub fn redo_len(&self) -> usize {
         self.redo.len()
     }
+    pub fn clear(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

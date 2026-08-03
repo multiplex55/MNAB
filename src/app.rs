@@ -1,3 +1,4 @@
+pub mod budget_catalog;
 pub mod command;
 pub mod dispatcher;
 pub mod message;
