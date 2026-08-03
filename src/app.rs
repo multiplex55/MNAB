@@ -13,12 +13,12 @@ pub mod startup;
 pub mod state;
 pub mod view_invalidation;
 
-use crate::{app::runtime::ApplicationRuntime, error::UserFacingError};
+use crate::{
+    app::runtime::ApplicationRuntime, error::UserFacingError, storage::LATEST_SCHEMA_VERSION,
+};
 use portable_paths::PortablePaths;
 use settings::{LoadStatus, SettingsSession};
 use startup::StartupContext;
-
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
 pub struct MnabApp {
     startup_error: Option<crate::error::StartupError>,
@@ -121,7 +121,7 @@ impl MnabApp {
                         .map(|session| &session.database_path)
                         .map_or_else(|| "none".into(), |p| p.display().to_string())
                 ));
-                ui.label(format!("Supported schema: {SUPPORTED_SCHEMA_VERSION}"));
+                ui.label(format!("Supported schema: {LATEST_SCHEMA_VERSION}"));
                 ui.label(format!(
                     "Active schema: {}",
                     self.runtime

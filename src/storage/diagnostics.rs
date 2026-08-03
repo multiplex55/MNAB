@@ -57,7 +57,7 @@ pub fn all(connection: &Connection, thorough: bool) -> Result<Vec<Finding>, rusq
         &mut findings,
         "managed_card_category",
         "credit_card_payment_categories",
-        "SELECT m.account_id FROM credit_card_payment_categories m LEFT JOIN accounts a ON a.id=m.account_id LEFT JOIN categories c ON c.id=m.category_id WHERE a.id IS NULL OR c.id IS NULL OR a.account_type<>'credit_card'",
+        "SELECT m.account_id FROM credit_card_payment_categories m LEFT JOIN accounts a ON a.id=m.account_id LEFT JOIN categories c ON c.id=m.category_id WHERE a.id IS NULL OR c.id IS NULL OR a.account_type<>'credit_card' OR a.budget_id<>m.budget_id OR c.budget_id<>m.budget_id",
         "A managed payment category is missing or belongs to a non-card account.",
     )?;
     query_entities(
@@ -75,6 +75,54 @@ pub fn all(connection: &Connection, thorough: bool) -> Result<Vec<Finding>, rusq
         "reconciliation_transactions",
         "SELECT rt.transaction_id FROM reconciliation_transactions rt JOIN transactions t ON t.id=rt.transaction_id JOIN reconciliations r ON r.id=rt.reconciliation_id WHERE t.account_id<>r.account_id OR t.reconciliation_id<>r.id",
         "A reconciliation association disagrees with its transaction or account.",
+    )?;
+    query_entities(
+        connection,
+        &mut findings,
+        "invalid_target_recurrence",
+        "targets",
+        "SELECT id FROM targets WHERE (recurrence<>'none' AND target_type<>'upcoming_expense') OR recurrence NOT IN ('none','monthly','yearly')",
+        "A target has a recurrence unsupported by its target kind.",
+    )?;
+    query_entities(
+        connection,
+        &mut findings,
+        "invalid_schedule_interval",
+        "scheduled_transactions",
+        "SELECT id FROM scheduled_transactions WHERE (recurrence='custom_days' AND COALESCE(custom_interval_days,0)<=0) OR (recurrence<>'custom_days' AND custom_interval_days IS NOT NULL)",
+        "A schedule has an invalid custom recurrence interval.",
+    )?;
+    query_entities(
+        connection,
+        &mut findings,
+        "invalid_schedule_dates",
+        "scheduled_transactions",
+        "SELECT id FROM scheduled_transactions WHERE end_date IS NOT NULL AND end_date<start_date",
+        "A schedule ends before it starts.",
+    )?;
+    query_entities(
+        connection,
+        &mut findings,
+        "dangling_occurrence_disposition",
+        "scheduled_occurrences",
+        "SELECT o.id FROM scheduled_occurrences o LEFT JOIN transactions t ON t.id=o.transaction_id WHERE (o.disposition='entered' AND t.id IS NULL) OR (o.disposition<>'entered' AND o.transaction_id IS NOT NULL)",
+        "A scheduled occurrence disposition does not agree with its entered transaction.",
+    )?;
+    query_entities(
+        connection,
+        &mut findings,
+        "incomplete_import_identity",
+        "import_identities",
+        "SELECT id FROM import_identities WHERE normalized_fingerprint='' OR (fitid IS NULL AND (source_id IS NULL OR source_record_id IS NULL))",
+        "An imported transaction is missing a usable source identity or fingerprint.",
+    )?;
+    query_entities(
+        connection,
+        &mut findings,
+        "invalid_manual_match",
+        "import_manual_matches",
+        "SELECT m.candidate_id FROM import_manual_matches m LEFT JOIN staged_import_candidates c ON c.id=m.candidate_id LEFT JOIN import_batches b ON b.id=c.batch_id LEFT JOIN transactions t ON t.id=m.transaction_id LEFT JOIN import_decisions d ON d.candidate_id=m.candidate_id WHERE c.id IS NULL OR t.id IS NULL OR b.account_id<>t.account_id OR d.decision<>'manual_match' OR d.transaction_id<>m.transaction_id",
+        "A manual import match is incomplete or crosses accounts.",
     )?;
     Ok(findings)
 }
