@@ -69,20 +69,6 @@ pub struct BudgetAssignment {
     pub amount: Money,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Target {
-    pub id: TargetId,
-    pub category_id: CategoryId,
-    pub amount: Money,
-    pub month: BudgetMonth,
-}
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ScheduledTransaction {
-    pub id: ScheduledTransactionId,
-    pub account_id: AccountId,
-    pub next_date: TransactionDate,
-    pub amount: Money,
-}
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ImportBatch {
     pub id: ImportBatchId,
     pub account_id: AccountId,
