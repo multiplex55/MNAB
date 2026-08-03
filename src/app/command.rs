@@ -1,0 +1,27 @@
+//! Semantic commands emitted by the single global keyboard/router layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppCommand {
+    ContextualNew,
+    CreateBudget,
+    AddAccount,
+    Import,
+    FocusSearch,
+    Undo,
+    Redo,
+    Commit,
+    Cancel,
+    Edit,
+    Delete,
+    Rename,
+    NavigateBudget,
+    NavigateReports,
+    NavigateAccounts,
+    PreviousMonth,
+    NextMonth,
+    Settings,
+    Backup,
+    ToggleInspector,
+    RetryOperation,
+    CancelOperation,
+    Exit,
+}
