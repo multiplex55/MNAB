@@ -1,8 +1,11 @@
 //! User-operation coordination. Services depend on traits, never concrete storage.
 
+pub mod account_service;
 pub mod assignment_service;
 pub mod budget_service;
 pub mod category_service;
+pub mod payee_service;
+pub mod transaction_service;
 
 use crate::{domain::Budget, error::ServiceError};
 

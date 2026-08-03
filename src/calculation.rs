@@ -1,5 +1,6 @@
 //! Pure budgeting calculations.
 
+pub mod balances;
 pub mod budget_month;
 
 use crate::domain::Money;

@@ -21,6 +21,9 @@ pub struct Subtransaction {
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TransactionBody {
+    OpeningBalance {
+        category_id: Option<CategoryId>,
+    },
     Categorized {
         category_id: CategoryId,
     },
@@ -32,6 +35,15 @@ pub enum TransactionBody {
         other_account_id: AccountId,
         other_amount: Money,
     },
+}
+
+impl Transaction {
+    pub fn validate(&self) -> Result<(), TransactionError> {
+        if let TransactionBody::Split { lines } = &self.body {
+            TransactionBody::split(self.amount, lines.clone())?;
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Transaction {
@@ -45,6 +57,9 @@ pub struct Transaction {
     pub clearance: Clearance,
     pub approval: Approval,
     pub body: TransactionBody,
+    /// Archived and voided records remain auditable but do not affect balances.
+    pub archived: bool,
+    pub voided: bool,
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -79,6 +94,29 @@ impl TransactionBody {
             return Err(TransactionError::SplitTotalMismatch);
         }
         Ok(Self::Split { lines })
+    }
+    pub fn split_remaining(
+        parent: Money,
+        lines: &[Subtransaction],
+    ) -> Result<Money, TransactionError> {
+        lines
+            .iter()
+            .try_fold(parent, |remaining, line| remaining.checked_sub(line.amount))
+            .map_err(|_| TransactionError::SplitOverflow)
+    }
+    pub fn distribute_remainder(
+        parent: Money,
+        lines: &mut [Subtransaction],
+    ) -> Result<(), TransactionError> {
+        if lines.is_empty() {
+            return Err(TransactionError::TooFewSplitLines);
+        }
+        let remainder = Self::split_remaining(parent, lines)?;
+        lines[lines.len() - 1].amount = lines[lines.len() - 1]
+            .amount
+            .checked_add(remainder)
+            .map_err(|_| TransactionError::SplitOverflow)?;
+        Ok(())
     }
     pub fn transfer(
         transfer_id: TransferId,
@@ -120,13 +158,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     fn account(budget_id: BudgetId) -> Account {
-        Account {
-            id: AccountId::new(),
-            budget_id,
-            name: "a".into(),
-            account_type: AccountType::Checking,
-            closed: false,
-        }
+        Account::new(budget_id, "a", AccountType::Checking)
     }
     #[test]
     fn splits_are_consistent_and_checked() {
@@ -212,7 +244,7 @@ mod tests {
                 Subtransaction { category_id, amount: Money::from_minor_units(right), memo: None },
             ];
             let parent = Money::from_minor_units(left + right);
-            let body = TransactionBody::split(parent, lines).unwrap();
+        let body = TransactionBody::split(parent, lines).unwrap();
             if let TransactionBody::Split { lines } = body {
                 let sum = lines.into_iter().try_fold(Money::ZERO, |sum, line| sum.checked_add(line.amount)).unwrap();
                 prop_assert_eq!(sum, parent);
