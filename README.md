@@ -43,10 +43,6 @@ cargo build --release
 The executable is `target\release\mnab.exe`. Copy it to a writable folder before running it.
 Debug builds retain a console for diagnostics; release builds use the Windows GUI subsystem.
 
-The release archive is produced with `scripts/package-windows.ps1`. It contains exactly
-`mnab.exe` and `README.txt`; the bundled SQLite feature means an installed SQLite runtime is not
-required.
-
 ## Network-free and operating-system behavior
 
 MNAB has no HTTP client, update checker, telemetry SDK, or remotely loaded asset. Native Windows
