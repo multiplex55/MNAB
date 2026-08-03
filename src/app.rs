@@ -1,7 +1,9 @@
 pub mod command;
 pub mod message;
 pub mod navigation;
+pub mod palette;
 pub mod portable_paths;
+pub mod search;
 pub mod state;
 
 use std::path::PathBuf;

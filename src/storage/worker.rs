@@ -22,6 +22,11 @@ pub enum StorageOperation {
     Health,
     BudgetCount,
     Delay(Duration),
+    /// An owned immutable snapshot keeps all repository access and calculation off the UI thread.
+    Report {
+        request: crate::domain::ReportRequest,
+        data: Box<crate::domain::OwnedReportData>,
+    },
 }
 #[derive(Debug)]
 pub struct StorageRequest {
@@ -34,6 +39,7 @@ pub enum StorageResult {
     Healthy,
     Count(i64),
     Completed,
+    Report(crate::domain::ReportResult),
 }
 #[derive(Debug)]
 pub enum StorageResponse {
@@ -165,6 +171,9 @@ fn execute(c: &Connection, op: &StorageOperation) -> Result<StorageResult, Worke
             thread::sleep(*d);
             Ok(StorageResult::Completed)
         }
+        StorageOperation::Report { request, data } => Ok(StorageResult::Report(
+            crate::domain::calculate(request, &data.as_data()),
+        )),
     }
 }
 

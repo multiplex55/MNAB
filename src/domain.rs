@@ -6,6 +6,7 @@ mod id;
 mod money;
 mod month;
 mod reconciliation;
+mod report;
 mod schedule;
 mod target;
 mod transaction;
@@ -16,6 +17,7 @@ pub use id::*;
 pub use money::*;
 pub use month::*;
 pub use reconciliation::*;
+pub use report::*;
 pub use schedule::*;
 pub use target::*;
 #[allow(unused_imports)]
