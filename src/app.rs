@@ -1,8 +1,15 @@
+pub mod command;
+pub mod message;
+pub mod navigation;
 pub mod portable_paths;
+pub mod state;
 
 use std::path::PathBuf;
 
-use crate::{error::UserFacingError, service::AppCommand};
+use crate::{
+    app::{command::AppCommand, state::AppState},
+    error::UserFacingError,
+};
 use portable_paths::PortablePaths;
 
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
@@ -12,6 +19,7 @@ pub struct MnabApp {
     startup_error: Option<crate::error::StartupError>,
     commands: Vec<AppCommand>,
     active_database: Option<PathBuf>,
+    state: AppState,
 }
 
 impl MnabApp {
@@ -21,6 +29,7 @@ impl MnabApp {
             startup_error: None,
             commands: Vec::new(),
             active_database: None,
+            state: AppState::default(),
         }
     }
 
@@ -30,6 +39,7 @@ impl MnabApp {
             startup_error: Some(error),
             commands: Vec::new(),
             active_database: None,
+            state: AppState::default(),
         }
     }
 
@@ -56,7 +66,7 @@ impl eframe::App for MnabApp {
             });
             return;
         }
-        crate::ui::shell(ctx, &mut self.commands);
+        crate::ui::shell::show(ctx, &mut self.state, &mut self.commands);
         #[cfg(debug_assertions)]
         self.diagnostics(ctx);
     }

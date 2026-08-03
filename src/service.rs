@@ -6,12 +6,6 @@ pub trait BudgetRepository {
     fn create(&mut self, budget: &Budget) -> Result<(), ServiceError>;
 }
 
-#[derive(Debug)]
-pub enum AppCommand {
-    CreateBudget { name: String },
-    Exit,
-}
-
 pub struct BudgetService<R> {
     repository: R,
 }
