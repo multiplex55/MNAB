@@ -1,5 +1,6 @@
 //! Semantic application commands and their runtime-owned execution record.
 use std::collections::VecDeque;
+use std::path::PathBuf;
 
 use crate::{
     app::inbox::InboxItemId,
@@ -132,7 +133,38 @@ pub enum InboxAction {
 pub enum ApplicationAction {
     RequestExit,
     Ui(AppCommand),
+    /// Non-financial budget lifecycle intent. These actions are deliberately
+    /// distinct from worker commands and never enter undo/redo history.
+    Budget(BudgetAction),
     Financial(FinancialCommand),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BudgetAction {
+    ShowCreate,
+    ShowOpen,
+    ShowRecents,
+    Create(crate::service::budget_service::CreateBudget),
+    Open(PathBuf),
+    Rename {
+        budget_id: crate::domain::BudgetId,
+        name: String,
+    },
+    SetArchived {
+        budget_id: crate::domain::BudgetId,
+        archived: bool,
+    },
+    RemoveRecent(crate::domain::BudgetId),
+    Delete {
+        budget_id: crate::domain::BudgetId,
+        exact_name: String,
+    },
+    Reveal(crate::domain::BudgetId),
+    Validate(crate::domain::BudgetId),
+    Repair {
+        budget_id: crate::domain::BudgetId,
+        request: crate::storage::repair::RepairRequest,
+    },
 }
 
 pub type CommandId = u64;

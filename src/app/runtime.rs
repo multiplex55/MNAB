@@ -70,6 +70,57 @@ impl ApplicationRuntime {
             .ok_or(crate::app::budget_catalog::CatalogError::UnmanagedPath)?;
         catalog.delete(paths, id, confirmation)
     }
+
+    /// Prepares every part of a replacement before touching the current session.
+    /// Catalog and settings timestamps are updated only after the commit point.
+    pub fn open_budget(
+        &mut self,
+        catalog: &mut crate::app::budget_catalog::BudgetCatalog,
+        selected: &std::path::Path,
+        repaint: impl Fn() + Send + 'static,
+    ) -> Result<(), crate::app::budget_catalog::CatalogError> {
+        let paths = self
+            .paths
+            .as_ref()
+            .ok_or(crate::app::budget_catalog::CatalogError::UnmanagedPath)?;
+        let prepared = catalog.prepare_open(paths, selected, repaint)?;
+        self.commit_session(prepared.session, prepared.worker);
+        let committed = self.session.as_ref().expect("session was just committed");
+        catalog.record_successful_open(committed);
+        if let Some(settings) = &mut self.settings {
+            settings.value_mut().last_opened_budget = Some(committed.database_path.clone());
+        }
+        Ok(())
+    }
+
+    pub fn rename_budget(
+        &mut self,
+        catalog: &mut crate::app::budget_catalog::BudgetCatalog,
+        id: crate::domain::BudgetId,
+        name: &str,
+    ) -> Result<(), crate::app::budget_catalog::CatalogError> {
+        let paths = self
+            .paths
+            .as_ref()
+            .ok_or(crate::app::budget_catalog::CatalogError::UnmanagedPath)?;
+        catalog.rename(paths, id, name)?;
+        if let Some(session) = self.session.as_mut().filter(|s| s.budget_id == id) {
+            session.summary.budget_name = name.trim().to_owned();
+            self.view
+                .budget_name
+                .clone_from(&session.summary.budget_name);
+        }
+        Ok(())
+    }
+
+    pub fn archive_budget(
+        &mut self,
+        catalog: &mut crate::app::budget_catalog::BudgetCatalog,
+        id: crate::domain::BudgetId,
+        archived: bool,
+    ) -> Result<(), crate::app::budget_catalog::CatalogError> {
+        catalog.set_archived(id, archived)
+    }
     pub fn new(
         paths: Option<PortablePaths>,
         settings: Option<SettingsSession>,
@@ -146,6 +197,11 @@ impl ApplicationRuntime {
                     NotificationKind::Error,
                     title,
                     &format!("Normal opening was refused: {error}"),
+                );
+                self.view.open_dialog(
+                    crate::app::state::Dialog::RecoveryChoice,
+                    egui::Id::new("startup"),
+                    egui::Id::new("toolbar"),
                 );
             }
         }
@@ -313,6 +369,23 @@ impl ApplicationRuntime {
             // mistaken for persistence work.
             if intent == crate::app::command::AppCommand::ToggleInspector {
                 self.view.inspector_visible = !self.view.inspector_visible;
+            }
+            return;
+        }
+        if let ApplicationAction::Budget(intent) = action {
+            use crate::app::{command::BudgetAction, state::Dialog};
+            let dialog = match intent {
+                BudgetAction::ShowCreate => Some(Dialog::CreateBudget),
+                BudgetAction::ShowOpen => Some(Dialog::OpenBudget),
+                BudgetAction::ShowRecents => Some(Dialog::RecentBudgets),
+                _ => None,
+            };
+            if let Some(dialog) = dialog {
+                self.view.open_dialog(
+                    dialog,
+                    egui::Id::new("budget-menu"),
+                    egui::Id::new("toolbar"),
+                );
             }
             return;
         }

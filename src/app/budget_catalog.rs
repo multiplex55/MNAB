@@ -350,6 +350,38 @@ impl BudgetCatalog {
         Ok(result)
     }
 
+    /// Resolves an Explorer target from catalog identity rather than accepting an
+    /// arbitrary path from the UI.
+    pub fn reveal(&self, paths: &PortablePaths, id: BudgetId) -> Result<(), CatalogError> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|e| e.budget_id == id)
+            .ok_or(CatalogError::NotFound)?;
+        let root = fs::canonicalize(&paths.budgets)?;
+        let path = managed_file(&root, &entry.database_path)?;
+        reveal_in_explorer(&path)?;
+        Ok(())
+    }
+
+    /// Repair is restricted to an explicit catalog identity and managed file.
+    pub fn repair(
+        &self,
+        paths: &PortablePaths,
+        id: BudgetId,
+        request: crate::storage::repair::RepairRequest,
+    ) -> Result<crate::storage::repair::RepairReport, CatalogError> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|e| e.budget_id == id)
+            .ok_or(CatalogError::NotFound)?;
+        let root = fs::canonicalize(&paths.budgets)?;
+        let path = managed_file(&root, &entry.database_path)?;
+        crate::storage::repair::repair(&path, request)
+            .map_err(|error| CatalogError::NotMnab(format!("repair was not applied: {error}")))
+    }
+
     fn entry_mut(&mut self, id: BudgetId) -> Result<&mut BudgetCatalogEntry, CatalogError> {
         self.entries
             .iter_mut()
