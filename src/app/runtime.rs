@@ -225,12 +225,17 @@ impl ApplicationRuntime {
         self.view.clear_budget_state();
     }
     pub fn drain_worker_responses(&mut self) {
-        while let Some(response) = self.worker.as_ref().and_then(StorageWorker::try_response) {
+        let ready = self
+            .worker
+            .as_ref()
+            .map_or_else(Vec::new, StorageWorker::drain_ready);
+        for response in ready {
             match response {
                 StorageResponse::Completed {
                     id,
                     generation,
                     result,
+                    ..
                 } if generation == self.generation => {
                     self.view.complete_request(id);
                     if let Err(error) = result {
@@ -251,6 +256,14 @@ impl ApplicationRuntime {
                 StorageResponse::Terminated => {
                     self.worker = None;
                     break;
+                }
+                StorageResponse::Progress { id, generation, .. }
+                    if generation == self.generation =>
+                {
+                    tracing::trace!(request_id = id, "storage operation progressed");
+                }
+                StorageResponse::Progress { id, .. } => {
+                    tracing::debug!(request_id = id, "discarded stale worker progress");
                 }
             }
         }
@@ -407,7 +420,7 @@ mod tests {
         use crate::{
             app::budget_catalog::BudgetCatalog,
             domain::BudgetId,
-            storage::worker::{StorageOperation, StorageRequest},
+            storage::worker::{SessionOperation, StorageRequest, WorkerOperation},
         };
         let dir = tempfile::tempdir().unwrap();
         let paths = PortablePaths::from_executable(&dir.path().join("mnab.exe")).unwrap();
@@ -448,7 +461,7 @@ mod tests {
             .submit(StorageRequest {
                 id: 1,
                 generation: runtime.generation,
-                operation: StorageOperation::Health,
+                operation: WorkerOperation::Session(SessionOperation::Health),
             })
             .unwrap();
         assert!(
@@ -478,7 +491,10 @@ mod tests {
         let stale = StorageResponse::Completed {
             id: 7,
             generation: Generation { budget: 1, view: 0 },
-            result: Ok(crate::storage::worker::StorageResult::Healthy),
+            result: Ok(crate::storage::worker::TypedResult::Healthy),
+            invalidations: None,
+            user_error: None,
+            diagnostic: None,
         };
         assert!(!crate::storage::worker::response_is_current(
             &stale,

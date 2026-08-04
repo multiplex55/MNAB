@@ -17,36 +17,108 @@ pub struct Generation {
     pub budget: u64,
     pub view: u64,
 }
+/// Typed worker protocol.  Keeping each use-case in its own operation type prevents the UI from
+/// smuggling closures, connections, or arbitrary SQL across the thread boundary.
 #[derive(Debug)]
-pub enum StorageOperation {
+pub enum WorkerOperation {
+    Session(SessionOperation),
+    Financial(FinancialOperation),
+    View(ViewOperation),
+    Register(RegisterPageOperation),
+    Search(GlobalSearchOperation),
+    Import(ImportOperation),
+    Diagnostics(DiagnosticsOperation),
+    Report(ReportOperation),
+    Occurrences(OccurrenceOperation),
+}
+#[derive(Debug)]
+pub enum SessionOperation {
+    Open,
+    Close,
     Health,
+}
+#[derive(Debug)]
+pub enum FinancialOperation {
+    Command(crate::app::command::CommandEnvelope),
+}
+#[derive(Debug)]
+pub enum ViewOperation {
     BudgetCount,
-    Delay(Duration),
-    /// An owned immutable snapshot keeps all repository access and calculation off the UI thread.
-    Report {
-        request: crate::domain::ReportRequest,
-        data: Box<crate::domain::OwnedReportData>,
-    },
+}
+#[derive(Debug)]
+pub struct RegisterPageOperation {
+    pub offset: u32,
+    pub limit: u32,
+}
+#[derive(Debug)]
+pub struct GlobalSearchOperation {
+    pub text: String,
+    pub limit: u32,
+}
+#[derive(Debug)]
+pub enum ImportOperation {
+    Parse { path: PathBuf },
+    Stage,
+    Apply,
+}
+#[derive(Debug)]
+pub enum DiagnosticsOperation {
+    Run,
+}
+#[derive(Debug)]
+pub struct ReportOperation {
+    pub request: crate::domain::ReportRequest,
+    pub data: Box<crate::domain::OwnedReportData>,
+}
+#[derive(Debug)]
+pub struct OccurrenceOperation {
+    pub through: time::Date,
 }
 #[derive(Debug)]
 pub struct StorageRequest {
     pub id: RequestId,
     pub generation: Generation,
-    pub operation: StorageOperation,
+    pub operation: WorkerOperation,
 }
 #[derive(Debug, PartialEq)]
-pub enum StorageResult {
+pub enum TypedResult {
     Healthy,
     Count(i64),
     Completed,
     Report(crate::domain::ReportResult),
+    RegisterPage,
+    SearchResults,
+    ImportParsed,
+    ImportStaged,
+    ImportApplied,
+    Diagnostics,
+    OccurrencesGenerated,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SafeUserError {
+    pub message: &'static str,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticContext {
+    pub operation: &'static str,
+    pub detail: String,
 }
 #[derive(Debug)]
 pub enum StorageResponse {
     Completed {
         id: RequestId,
         generation: Generation,
-        result: Result<StorageResult, WorkerError>,
+        result: Result<TypedResult, WorkerError>,
+        invalidations: Option<crate::app::view_invalidation::ViewInvalidations>,
+        user_error: Option<SafeUserError>,
+        /// This context is for structured logging only and must never be displayed to users.
+        diagnostic: Option<DiagnosticContext>,
+    },
+    Progress {
+        id: RequestId,
+        generation: Generation,
+        completed: u64,
+        total: Option<u64>,
     },
     Terminated,
 }
@@ -107,6 +179,11 @@ impl StorageWorker {
     pub fn try_response(&self) -> Option<StorageResponse> {
         self.responses.try_recv().ok()
     }
+    /// Drains the complete ready queue. Frame loops should use this rather than imposing one-frame
+    /// latency per response.
+    pub fn drain_ready(&self) -> Vec<StorageResponse> {
+        self.responses.try_iter().collect()
+    }
     pub fn response_timeout(&self, timeout: Duration) -> Option<StorageResponse> {
         self.responses.recv_timeout(timeout).ok()
     }
@@ -149,6 +226,21 @@ fn run(
         match message {
             Message::Shutdown => break,
             Message::Work(request) => {
+                if matches!(
+                    request.operation,
+                    WorkerOperation::Import(_)
+                        | WorkerOperation::Diagnostics(_)
+                        | WorkerOperation::Report(_)
+                        | WorkerOperation::Occurrences(_)
+                ) {
+                    let _ = tx.send(StorageResponse::Progress {
+                        id: request.id,
+                        generation: request.generation,
+                        completed: 0,
+                        total: None,
+                    });
+                    repaint();
+                }
                 let result = if stopping.load(Ordering::Acquire) {
                     Err(WorkerError::Cancelled)
                 } else {
@@ -159,6 +251,9 @@ fn run(
                     id: request.id,
                     generation: request.generation,
                     result,
+                    invalidations: None,
+                    user_error: None,
+                    diagnostic: None,
                 });
             }
         }
@@ -169,6 +264,11 @@ fn run(
             id: r.id,
             generation: r.generation,
             result: Err(WorkerError::Cancelled),
+            invalidations: None,
+            user_error: Some(SafeUserError {
+                message: "The operation was cancelled.",
+            }),
+            diagnostic: None,
         });
     }
     connection
@@ -179,20 +279,26 @@ fn run(
     repaint();
     Ok(())
 }
-fn execute(c: &Connection, op: &StorageOperation) -> Result<StorageResult, WorkerError> {
+fn execute(c: &Connection, op: &WorkerOperation) -> Result<TypedResult, WorkerError> {
     match op {
-        StorageOperation::Health => Ok(StorageResult::Healthy),
-        StorageOperation::BudgetCount => c
+        WorkerOperation::Session(
+            SessionOperation::Health | SessionOperation::Open | SessionOperation::Close,
+        ) => Ok(TypedResult::Healthy),
+        WorkerOperation::View(ViewOperation::BudgetCount) => c
             .query_row("SELECT count(*) FROM budgets", [], |r| r.get(0))
-            .map(StorageResult::Count)
+            .map(TypedResult::Count)
             .map_err(|e| WorkerError::Repository(e.to_string())),
-        StorageOperation::Delay(d) => {
-            thread::sleep(*d);
-            Ok(StorageResult::Completed)
-        }
-        StorageOperation::Report { request, data } => Ok(StorageResult::Report(
+        WorkerOperation::Report(ReportOperation { request, data }) => Ok(TypedResult::Report(
             crate::domain::calculate(request, &data.as_data()),
         )),
+        WorkerOperation::Register(_) => Ok(TypedResult::RegisterPage),
+        WorkerOperation::Search(_) => Ok(TypedResult::SearchResults),
+        WorkerOperation::Import(ImportOperation::Parse { .. }) => Ok(TypedResult::ImportParsed),
+        WorkerOperation::Import(ImportOperation::Stage) => Ok(TypedResult::ImportStaged),
+        WorkerOperation::Import(ImportOperation::Apply) => Ok(TypedResult::ImportApplied),
+        WorkerOperation::Diagnostics(_) => Ok(TypedResult::Diagnostics),
+        WorkerOperation::Occurrences(_) => Ok(TypedResult::OccurrencesGenerated),
+        WorkerOperation::Financial(_) => Ok(TypedResult::Completed),
     }
 }
 
@@ -202,7 +308,7 @@ pub fn response_is_current(
     expected_id: RequestId,
     generation: Generation,
 ) -> bool {
-    matches!(response,StorageResponse::Completed{id,generation:g,..} if *id==expected_id && *g==generation)
+    matches!(response,StorageResponse::Completed{id,generation:g,..} | StorageResponse::Progress{id,generation:g,..} if *id==expected_id && *g==generation)
 }
 
 #[cfg(test)]
@@ -224,7 +330,7 @@ mod tests {
             .submit(StorageRequest {
                 id: 7,
                 generation,
-                operation: StorageOperation::Health,
+                operation: WorkerOperation::Session(SessionOperation::Health),
             })
             .unwrap();
         let response = worker.response_timeout(Duration::from_secs(2)).unwrap();
@@ -236,7 +342,7 @@ mod tests {
             worker.submit(StorageRequest {
                 id: 8,
                 generation,
-                operation: StorageOperation::Health
+                operation: WorkerOperation::Session(SessionOperation::Health)
             }),
             Err(WorkerError::Shutdown)
         ));
