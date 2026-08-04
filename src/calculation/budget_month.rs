@@ -230,6 +230,39 @@ pub fn calculate_with_credit_cards(
     })
 }
 
+/// Calculates materialized months oldest-first so carryover and cash overspending can only flow
+/// forward. Input order is deliberately ignored, preventing a later month from contaminating an
+/// earlier result.
+pub fn calculate_chronological(
+    mut inputs: Vec<BudgetMonthInput>,
+) -> Result<Vec<BudgetMonthResult>, CalculationError> {
+    inputs.sort_by_key(|input| input.month);
+    let mut output: Vec<BudgetMonthResult> = Vec::with_capacity(inputs.len());
+    for input in &mut inputs {
+        if let Some(prior) = output.last() {
+            input.prior_categories = prior
+                .categories
+                .iter()
+                .map(|category| PriorCategoryResult {
+                    id: category.id,
+                    // Cash and card overspending do not become negative category carryover.
+                    available: positive(category.available),
+                })
+                .collect();
+            input.prior_cash_overspending =
+                prior
+                    .categories
+                    .iter()
+                    .try_fold(Money::ZERO, |total, category| match category.overspending {
+                        Overspending::Cash(value) => add(total, value),
+                        Overspending::None | Overspending::CreditCard(_) => Ok(total),
+                    })?;
+        }
+        output.push(calculate(input)?);
+    }
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,5 +356,26 @@ mod tests {
             credit_card_activity: m(0),
         });
         assert_eq!(calculate(&i), Err(CalculationError::Overflow));
+    }
+
+    #[test]
+    fn chronology_carries_positive_and_charges_cash_overspending_to_next_rta() {
+        let id = CategoryId::new();
+        let category = |activity| CategoryInput {
+            id,
+            assigned: m(0),
+            activity: m(activity),
+            hidden: false,
+            archived: false,
+            target: None,
+            credit_card_activity: m(0),
+        };
+        let january = input(category(-1_200));
+        let mut february = input(category(0));
+        february.month = BudgetMonth::new(2026, 2).unwrap();
+        let result = calculate_chronological(vec![february, january]).unwrap();
+        assert_eq!(result[0].categories[0].available, m(-1_200));
+        assert_eq!(result[1].categories[0].available, Money::ZERO);
+        assert_eq!(result[1].ready_to_assign, m(-200));
     }
 }

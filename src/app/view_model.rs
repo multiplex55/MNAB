@@ -4,6 +4,7 @@
 //! pieces of display text only. Database rows, repositories and connections stop
 //! at the query boundary which constructs these values.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use time::Date;
@@ -98,6 +99,26 @@ pub struct BudgetMonthView {
     pub activity_cents: i64,
     pub available_cents: i64,
     pub rows: Vec<CategoryRowView>,
+}
+
+/// Session-only memoization of derived reads. Availability is never writable state: every entry
+/// is tagged with the source revision and is replaced or discarded as ledger data changes.
+#[derive(Clone, Debug, Default)]
+pub struct BudgetMonthCache {
+    entries: BTreeMap<BudgetMonth, BudgetMonthView>,
+}
+impl BudgetMonthCache {
+    pub fn get(&self, month: BudgetMonth, version: ViewVersion) -> Option<&BudgetMonthView> {
+        self.entries
+            .get(&month)
+            .filter(|view| view.version == version)
+    }
+    pub fn insert(&mut self, view: BudgetMonthView) {
+        self.entries.insert(view.month, view);
+    }
+    pub fn invalidate_from(&mut self, month: BudgetMonth) {
+        self.entries.retain(|cached, _| *cached < month);
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CategoryRowView {

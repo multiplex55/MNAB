@@ -10,6 +10,7 @@ pub enum DistributionRule {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Assignments {
     values: HashMap<(CategoryId, BudgetMonth), Money>,
+    revision: u64,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UndoAssignment {
@@ -45,6 +46,8 @@ pub struct AssignmentChange {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AutoAssignPreview {
+    /// Revision of the assignment snapshot from which this immutable proposal was made.
+    pub source_revision: u64,
     pub month: BudgetMonth,
     pub changes: Vec<AssignmentChange>,
     pub total_assignment: Money,
@@ -53,6 +56,10 @@ pub struct AutoAssignPreview {
     pub inverse_commands: Vec<(CategoryId, Money)>,
 }
 impl Assignments {
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
     #[must_use]
     pub fn get(&self, id: CategoryId, month: BudgetMonth) -> Money {
         self.values
@@ -72,6 +79,7 @@ impl Assignments {
                 self.values.insert(k, v);
             }
         }
+        self.revision = self.revision.saturating_add(1);
         UndoAssignment { before }
     }
     /// Applies a previously reviewed preview in one all-or-nothing mutation.
@@ -79,7 +87,11 @@ impl Assignments {
         &mut self,
         preview: &AutoAssignPreview,
     ) -> Result<UndoAssignment, MoneyError> {
-        // Revalidate the entire preview before touching the map (including stale previews).
+        // Revalidate the entire preview before touching the map. Even an unrelated intervening
+        // assignment makes the reviewed source snapshot stale.
+        if preview.source_revision != self.revision {
+            return Err(MoneyError::Invalid);
+        }
         let mut changes = Vec::with_capacity(preview.changes.len());
         let mut total = Money::ZERO;
         for change in &preview.changes {
@@ -169,10 +181,12 @@ impl Assignments {
                 self.values.remove(&k);
             }
         }
+        self.revision = self.revision.saturating_add(1);
     }
 }
 
-pub fn propose_auto_assign(
+pub fn propose_auto_assign_at_revision(
+    source_revision: u64,
     month: BudgetMonth,
     rta: Money,
     inputs: &[AutoAssignInput],
@@ -224,6 +238,7 @@ pub fn propose_auto_assign(
     }
     let inverse_commands = changes.iter().map(|c| (c.category_id, c.before)).collect();
     Ok(AutoAssignPreview {
+        source_revision,
         month,
         changes,
         total_assignment: total,
@@ -231,6 +246,17 @@ pub fn propose_auto_assign(
         warnings,
         inverse_commands,
     })
+}
+
+/// Builds a proposal for a fresh assignment collection. Long-lived callers should use
+/// [`propose_auto_assign_at_revision`] with `Assignments::revision()`.
+pub fn propose_auto_assign(
+    month: BudgetMonth,
+    rta: Money,
+    inputs: &[AutoAssignInput],
+    strategy: AutoAssignStrategy,
+) -> Result<AutoAssignPreview, MoneyError> {
+    propose_auto_assign_at_revision(0, month, rta, inputs, strategy)
 }
 fn positive_spending(value: Money) -> Result<Money, MoneyError> {
     if value < Money::ZERO {
@@ -292,5 +318,47 @@ mod tests {
         s.replace(b, month, m(i64::MAX));
         assert!(s.move_money(a, b, month, m(1)).is_err());
         assert_eq!((s.get(a, month), s.get(b, month)), (m(10), m(i64::MAX)));
+    }
+    #[test]
+    fn stale_preview_is_rejected_without_mutation() {
+        let month = BudgetMonth::new(2026, 1).unwrap();
+        let (previewed, unrelated) = (CategoryId::new(), CategoryId::new());
+        let mut assignments = Assignments::default();
+        let preview = propose_auto_assign_at_revision(
+            assignments.revision(),
+            month,
+            m(500),
+            &[AutoAssignInput {
+                category_id: previewed,
+                assigned: m(0),
+                available: m(0),
+                underfunded: m(100),
+                scheduled_this_month: m(0),
+                assigned_history: vec![],
+                spent_history: vec![],
+            }],
+            AutoAssignStrategy::Underfunded,
+        )
+        .unwrap();
+        assignments.add(unrelated, month, m(1)).unwrap();
+        assert_eq!(
+            assignments.apply_preview(&preview),
+            Err(MoneyError::Invalid)
+        );
+        assert_eq!(assignments.get(previewed, month), Money::ZERO);
+    }
+
+    #[test]
+    fn in_order_distribution_preserves_signed_remainder() {
+        let month = BudgetMonth::new(2026, 1).unwrap();
+        let ids = [CategoryId::new(), CategoryId::new(), CategoryId::new()];
+        let mut assignments = Assignments::default();
+        assignments
+            .distribute(&ids, month, m(-5), DistributionRule::InOrder)
+            .unwrap();
+        assert_eq!(
+            ids.map(|id| assignments.get(id, month).minor_units()),
+            [-2, -2, -1]
+        );
     }
 }

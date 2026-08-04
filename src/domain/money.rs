@@ -74,17 +74,23 @@ fn parse(text: &str, rounding: Option<ImportRounding>) -> Result<Money, MoneyErr
     if accounting {
         s = s[1..s.len() - 1].trim();
     }
-    let explicit_negative = s.starts_with('-');
-    if explicit_negative {
-        s = &s[1..];
+    let mut sign = None;
+    let mut currency = false;
+    // Accept the two conventional prefix orders (`-$1` and `$-1`) exactly once each.
+    for _ in 0..2 {
+        s = s.trim_start();
+        if !currency && s.starts_with('$') {
+            currency = true;
+            s = &s[1..];
+        } else if sign.is_none() && (s.starts_with('-') || s.starts_with('+')) {
+            sign = s.chars().next();
+            s = &s[1..];
+        } else {
+            break;
+        }
     }
-    if s.starts_with('+') {
-        s = &s[1..];
-    }
-    if let Some(rest) = s.strip_prefix('$') {
-        s = rest.trim_start();
-    }
-    if s.is_empty() || (accounting && explicit_negative) {
+    let explicit_negative = sign == Some('-');
+    if s.is_empty() || (accounting && sign.is_some()) {
         return Err(MoneyError::Invalid);
     }
     let (whole, fraction) = s.split_once('.').map_or((s, ""), |v| v);
