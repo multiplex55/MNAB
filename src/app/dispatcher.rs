@@ -18,7 +18,11 @@ impl ActionCollector {
 }
 impl From<crate::app::command::AppCommand> for ApplicationAction {
     fn from(value: crate::app::command::AppCommand) -> Self {
-        Self::Ui(value)
+        if value == crate::app::command::AppCommand::Exit {
+            Self::RequestExit
+        } else {
+            Self::Ui(value)
+        }
     }
 }
 

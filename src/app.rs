@@ -2,6 +2,7 @@ pub mod budget_catalog;
 pub mod command;
 pub mod dispatcher;
 pub mod inbox;
+pub mod lifecycle;
 pub mod message;
 pub mod navigation;
 pub mod palette;
@@ -68,7 +69,7 @@ impl eframe::App for MnabApp {
                     }
                     ui.label("Logs: mnab-data/logs beside the application (when writable)");
                     if ui.button("Exit").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        self.runtime.request_exit();
                     }
                 });
             });
@@ -91,17 +92,36 @@ impl eframe::App for MnabApp {
             self.runtime.record_window(rect);
         }
         if ctx.input(|input| input.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.runtime.request_shutdown();
+            self.runtime.native_close_requested();
         }
         // Responses are always exhausted before input or rendering.  This makes the
         // immutable view snapshot used by this frame internally consistent.
         self.runtime.drain_worker_responses();
         let mut actions = crate::app::dispatcher::ActionCollector::default();
-        crate::ui::shell::show(ctx, self.runtime.view_mut(), &mut actions);
-        self.runtime.dispatch_collected(actions);
-        if self.runtime.shutdown_requested() && self.runtime.shutdown().is_ok() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        if self.runtime.lifecycle_state() == lifecycle::LifecycleState::ShuttingDown {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.disable();
+                ui.centered_and_justified(|ui| {
+                    ui.heading("Closing MNAB…");
+                });
+            });
+        } else {
+            crate::ui::shell::show(ctx, self.runtime.view_mut(), &mut actions);
+            self.runtime.dispatch_collected(actions);
+        }
+        if self.runtime.lifecycle_state() == lifecycle::LifecycleState::ShuttingDown {
+            let _ = self.runtime.shutdown();
+        }
+        for effect in self.runtime.take_lifecycle_effects() {
+            match effect {
+                lifecycle::LifecycleEffect::CancelNativeClose => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose)
+                }
+                lifecycle::LifecycleEffect::SendProgrammaticClose => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close)
+                }
+                _ => {}
+            }
         }
         if self.runtime.has_pending_work() || ctx.has_requested_repaint() {
             ctx.request_repaint();
