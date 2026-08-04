@@ -133,10 +133,21 @@ impl AuditRepository for InMemoryRepositories {
 }
 
 /// Safe row-conversion failure context; values from financial columns are intentionally omitted.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
 #[error("invalid row in {table} for record {record_id}: {reason}")]
 pub struct RowConversionError {
     pub table: &'static str,
     pub record_id: String,
     pub reason: &'static str,
+}
+
+impl RowConversionError {
+    #[must_use]
+    pub fn new(table: &'static str, record_id: impl Into<String>, reason: &'static str) -> Self {
+        Self {
+            table,
+            record_id: record_id.into(),
+            reason,
+        }
+    }
 }

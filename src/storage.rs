@@ -2,9 +2,14 @@
 
 pub mod connection;
 pub mod diagnostics;
+pub mod mapping;
 pub mod migration;
+pub mod model;
+pub mod query_store;
 pub mod repair;
 pub mod repository;
+pub mod sqlite_repositories;
+pub mod sqlite_unit_of_work;
 pub mod worker;
 
 #[allow(unused_imports)]
