@@ -8,6 +8,10 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -58,6 +62,35 @@ pub struct BackupArtifact {
     pub details: BackupMetadata,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackupProgress {
+    pub completed_pages: u64,
+    pub total_pages: Option<u64>,
+    pub stage: BackupStage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupStage {
+    Copying,
+    Validating,
+    Publishing,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BackupCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl BackupCancellation {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
     #[error("backup I/O failed: {0}")]
@@ -68,6 +101,10 @@ pub enum BackupError {
     Metadata(#[from] serde_json::Error),
     #[error("backup failed validation: {0}")]
     Validation(String),
+    #[error("backup was cancelled before the critical copy stage completed")]
+    Cancelled,
+    #[error("backup path is outside of the managed backup location")]
+    OutOfScope,
 }
 
 pub struct BackupService {
@@ -92,12 +129,33 @@ impl BackupService {
         schema_version: i64,
         reason: BackupReason,
     ) -> Result<BackupArtifact, BackupError> {
+        self.create_with_progress(
+            source,
+            budget_id_or_name,
+            schema_version,
+            reason,
+            &BackupCancellation::default(),
+            |_| {},
+        )
+    }
+
+    pub fn create_with_progress(
+        &self,
+        source: &Connection,
+        budget_id_or_name: &str,
+        schema_version: i64,
+        reason: BackupReason,
+        cancellation: &BackupCancellation,
+        mut progress: impl FnMut(BackupProgress),
+    ) -> Result<BackupArtifact, BackupError> {
         self.create_at(
             source,
             budget_id_or_name,
             schema_version,
             reason,
             OffsetDateTime::now_utc(),
+            cancellation,
+            &mut progress,
         )
     }
 
@@ -108,8 +166,11 @@ impl BackupService {
         schema_version: i64,
         reason: BackupReason,
         created_at: OffsetDateTime,
+        cancellation: &BackupCancellation,
+        progress: &mut impl FnMut(BackupProgress),
     ) -> Result<BackupArtifact, BackupError> {
-        let directory = self.root.join(safe_component(budget_id_or_name));
+        let root = self.managed_root()?;
+        let directory = root.join(safe_component(budget_id_or_name));
         fs::create_dir_all(&directory)?;
         let timestamp = created_at
             .format(&time::macros::format_description!(
@@ -122,16 +183,40 @@ impl BackupService {
         let metadata = directory.join(format!("{stem}.json"));
 
         let result = (|| {
+            if cancellation.is_cancelled() {
+                return Err(BackupError::Cancelled);
+            }
             let mut destination = Connection::open_with_flags(
                 &partial,
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
             )?;
+            let page_count = source
+                .query_row("PRAGMA page_count", [], |row| row.get::<_, u64>(0))
+                .ok();
+            progress(BackupProgress {
+                completed_pages: 0,
+                total_pages: page_count,
+                stage: BackupStage::Copying,
+            });
             let backup = Backup::new(source, &mut destination)?;
             backup.run_to_completion(COPY_PAGES, Duration::from_millis(5), None)?;
             drop(backup);
+            progress(BackupProgress {
+                completed_pages: page_count.unwrap_or(0),
+                total_pages: page_count,
+                stage: BackupStage::Validating,
+            });
             validate_connection(&destination)?;
             drop(destination);
             let checksum_sha256 = checksum(&partial)?;
+            if cancellation.is_cancelled() {
+                return Err(BackupError::Cancelled);
+            }
+            progress(BackupProgress {
+                completed_pages: page_count.unwrap_or(0),
+                total_pages: page_count,
+                stage: BackupStage::Publishing,
+            });
             fs::rename(&partial, &database)?;
 
             let details = BackupMetadata {
@@ -163,9 +248,21 @@ impl BackupService {
         result
     }
 
-    #[allow(clippy::unused_self)] // Method form keeps validation attached to configured service API.
+    pub fn expose_location(&self) -> Result<PathBuf, BackupError> {
+        self.managed_root()
+    }
+
+    fn managed_root(&self) -> Result<PathBuf, BackupError> {
+        Ok(canonicalize_existing_parent(&self.root)?)
+    }
+
     pub fn validate(&self, metadata_path: &Path) -> Result<BackupArtifact, BackupError> {
-        let details: BackupMetadata = serde_json::from_reader(fs::File::open(metadata_path)?)?;
+        let root = self.managed_root()?;
+        let metadata_path = canonicalize_existing_parent(metadata_path)?;
+        if !metadata_path.starts_with(&root) {
+            return Err(BackupError::OutOfScope);
+        }
+        let details: BackupMetadata = serde_json::from_reader(fs::File::open(&metadata_path)?)?;
         if details.format_version != 1 {
             return Err(BackupError::Validation(format!(
                 "unsupported metadata version {}",
@@ -176,6 +273,10 @@ impl BackupService {
             .parent()
             .ok_or_else(|| BackupError::Validation("metadata has no parent".into()))?
             .join(&details.database_file);
+        let database = canonicalize_existing_parent(&database)?;
+        if !database.starts_with(&root) {
+            return Err(BackupError::OutOfScope);
+        }
         if checksum(&database)? != details.checksum_sha256 {
             return Err(BackupError::Validation("checksum mismatch".into()));
         }
@@ -191,7 +292,7 @@ impl BackupService {
     /// Applies mutually-exclusive retention buckets. The newest valid backup is always retained,
     /// and deletion is disabled until at least one newer known-good generation exists.
     pub fn apply_retention(&self, budget_id_or_name: &str) -> Result<Vec<PathBuf>, BackupError> {
-        let directory = self.root.join(safe_component(budget_id_or_name));
+        let directory = self.managed_root()?.join(safe_component(budget_id_or_name));
         if !directory.exists() {
             return Ok(Vec::new());
         }
@@ -214,8 +315,9 @@ impl BackupService {
         let newest = valid[0].database.clone();
         let mut keep = HashSet::from([newest]);
         let mut manual_count = 0_usize;
-        let cutoff_daily = OffsetDateTime::now_utc() - time::Duration::days(30);
-        let cutoff_monthly = OffsetDateTime::now_utc() - time::Duration::days(366);
+        let retention_now = valid[0].details.created_at;
+        let cutoff_daily = retention_now - time::Duration::days(30);
+        let cutoff_monthly = retention_now - time::Duration::days(366);
         let mut daily = HashSet::<Date>::new();
         let mut monthly = HashSet::<(i32, time::Month)>::new();
 
@@ -256,6 +358,20 @@ impl BackupService {
         }
         Ok(removed)
     }
+}
+
+fn canonicalize_existing_parent(path: &Path) -> Result<PathBuf, std::io::Error> {
+    if path.exists() {
+        return path.canonicalize();
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("path has no parent"))?
+        .canonicalize()?;
+    Ok(parent.join(
+        path.file_name()
+            .ok_or_else(|| std::io::Error::other("path has no file name"))?,
+    ))
 }
 
 fn safe_component(value: &str) -> String {

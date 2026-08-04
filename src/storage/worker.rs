@@ -112,14 +112,105 @@ pub enum TypedResult {
     Diagnostics(crate::app::view_model::DiagnosticsView),
     Occurrences(crate::app::view_model::OccurrencesView),
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetryPolicy {
+    RetryAllowed,
+    ReopenThenRetry,
+    ExitRecommended,
+    NotRetryable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadOnlyImpact {
+    None,
+    MutationsDisabledCachedReadsVisible,
+    SafeBackupExportOnly,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DataChangeState {
+    NotChanged,
+    Changed,
+    Unknown,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SafeUserError {
+    pub operation: &'static str,
     pub message: &'static str,
+    pub data_changed: DataChangeState,
+    pub next_actions: Vec<&'static str>,
+    pub retry: RetryPolicy,
+    pub read_only_impact: ReadOnlyImpact,
 }
+
+impl SafeUserError {
+    pub fn new(operation: &'static str, message: &'static str) -> Self {
+        Self {
+            operation,
+            message,
+            data_changed: DataChangeState::NotChanged,
+            next_actions: vec!["Retry the operation or reopen the budget if it happens again."],
+            retry: RetryPolicy::RetryAllowed,
+            read_only_impact: ReadOnlyImpact::None,
+        }
+    }
+
+    pub fn rendered_message(&self) -> String {
+        let changed = match self.data_changed {
+            DataChangeState::NotChanged => "No data was changed.",
+            DataChangeState::Changed => {
+                "Some data may have changed; review the budget before continuing."
+            }
+            DataChangeState::Unknown => "The app could not confirm whether data changed.",
+        };
+        format!(
+            "{}: {} {} Next actions: {}",
+            self.operation,
+            self.message,
+            changed,
+            self.next_actions.join(" ")
+        )
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiagnosticContext {
+    pub correlation_id: Option<crate::app::command::CorrelationId>,
+    pub command_id: Option<crate::app::command::CommandId>,
+    pub worker_request_id: RequestId,
+    pub budget_generation: u64,
     pub operation: &'static str,
-    pub detail: String,
+    pub failing_stage: &'static str,
+    pub technical_error_chain: String,
+}
+
+impl DiagnosticContext {
+    pub fn from_error(
+        request: &StorageRequest,
+        command_id: Option<crate::app::command::CommandId>,
+        correlation_id: Option<crate::app::command::CorrelationId>,
+        operation: &'static str,
+        failing_stage: &'static str,
+        error: &(dyn std::error::Error + 'static),
+    ) -> Self {
+        let mut chain = error.to_string();
+        let mut source = error.source();
+        while let Some(error) = source {
+            chain.push_str(": ");
+            chain.push_str(&error.to_string());
+            source = error.source();
+        }
+        Self {
+            correlation_id,
+            command_id,
+            worker_request_id: request.id,
+            budget_generation: request.generation.budget,
+            operation,
+            failing_stage,
+            technical_error_chain: chain,
+        }
+    }
 }
 #[derive(Debug)]
 pub enum StorageResponse {
@@ -315,9 +406,10 @@ fn run(
             generation: r.generation,
             result: Err(WorkerError::Cancelled),
             invalidations: None,
-            user_error: Some(SafeUserError {
-                message: "The operation was cancelled.",
-            }),
+            user_error: Some(SafeUserError::new(
+                "cancel operation",
+                "The operation was cancelled.",
+            )),
             diagnostic: None,
         });
     }
@@ -510,5 +602,42 @@ mod tests {
         let result =
             TypedResult::ImportApplied(crate::storage::mapping::outcome("Applied", generation));
         assert!(matches!(result, TypedResult::ImportApplied(view) if view.summary == "Applied"));
+    }
+    #[test]
+    fn safe_user_error_redacts_technical_details_while_diagnostics_keep_context() {
+        let error = WorkerError::Repository(
+            "SQL SELECT * FROM transactions WHERE memo='4111-1111-1111-1111' at /secret/budget.sqlite3".into(),
+        );
+        let request = StorageRequest {
+            id: 42,
+            generation: Generation { budget: 7, view: 3 },
+            operation: WorkerOperation::Session(SessionOperation::Health),
+        };
+        let diagnostic =
+            DiagnosticContext::from_error(&request, None, None, "restore", "validate", &error);
+        let user = SafeUserError {
+            operation: "restore",
+            message: "The backup could not be validated.",
+            data_changed: DataChangeState::NotChanged,
+            next_actions: vec![
+                "Choose another validated backup.",
+                "Keep using the current budget.",
+            ],
+            retry: RetryPolicy::NotRetryable,
+            read_only_impact: ReadOnlyImpact::None,
+        };
+        let rendered = user.rendered_message();
+        assert!(!rendered.contains("SELECT"));
+        assert!(!rendered.contains("/secret"));
+        assert!(!rendered.contains("4111"));
+        assert!(diagnostic.technical_error_chain.contains("SELECT"));
+        assert!(
+            diagnostic
+                .technical_error_chain
+                .contains("/secret/budget.sqlite3")
+        );
+        assert_eq!(diagnostic.worker_request_id, 42);
+        assert_eq!(diagnostic.budget_generation, 7);
+        assert_eq!(diagnostic.failing_stage, "validate");
     }
 }
