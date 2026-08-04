@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const SETTINGS_VERSION: u32 = 1;
+pub const SETTINGS_VERSION: u32 = 2;
 pub const DEFAULT_PALETTE_SHORTCUT: &str = "Ctrl+P";
 pub const MAX_SAVED_FILTERS: usize = 50;
 pub const MAX_SEARCH_HISTORY: usize = 25;
@@ -166,9 +166,13 @@ pub struct Settings {
     pub register_columns: RegisterColumns,
     pub theme: Theme,
     pub display_density: DisplayDensity,
+    #[serde(skip)]
     pub command_palette_shortcut: String,
+    #[serde(skip)]
     pub inbox_thresholds: InboxThresholds,
+    #[serde(skip)]
     pub saved_filters: Vec<PersistedFilter>,
+    #[serde(skip)]
     pub search_history: Vec<SearchHistoryEntry>,
 }
 impl Default for Settings {
@@ -284,7 +288,8 @@ impl SettingsSession {
             };
         }
         match serde_json::from_value::<Settings>(parsed_value) {
-            Ok(mut value) if value.version == SETTINGS_VERSION => {
+            Ok(mut value) if value.version <= SETTINGS_VERSION => {
+                value.version = SETTINGS_VERSION;
                 if !shortcut_is_available(&value.command_palette_shortcut) {
                     value.command_palette_shortcut = DEFAULT_PALETTE_SHORTCUT.into();
                 }
@@ -540,7 +545,7 @@ mod tests {
     #[test]
     fn defaults_are_explicit_and_valid() {
         let s = Settings::default();
-        assert_eq!(s.version, 1);
+        assert_eq!(s.version, SETTINGS_VERSION);
         assert_eq!(s.command_palette_shortcut, "Ctrl+P");
         assert_eq!(s.window, WindowBounds::default());
     }
@@ -557,14 +562,10 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "command_palette_shortcut",
                 "display_density",
-                "inbox_thresholds",
                 "inspector_visible",
                 "last_opened_budget",
                 "register_columns",
-                "saved_filters",
-                "search_history",
                 "theme",
                 "version",
                 "window"
@@ -578,6 +579,15 @@ mod tests {
             "viewed_month",
             "selected_transaction",
             "result_rows",
+            "active_drafts",
+            "command_queue",
+            "confirmations",
+            "critical_operation_state",
+            "undo_payloads",
+            "saved_filters",
+            "search_history",
+            "inbox_thresholds",
+            "command_palette_shortcut",
         ] {
             assert!(value.get(forbidden).is_none());
         }
@@ -633,7 +643,7 @@ mod tests {
         assert!(!s.set_palette_shortcut("Ctrl+F"));
         assert!(s.set_palette_shortcut("Ctrl+P"));
         let mut v = serde_json::to_value(Settings::default()).unwrap();
-        v["command_palette_shortcut"] = json!("Ctrl+N");
+        v["theme"] = json!("dark");
         fs::write(
             d.path().join("settings.json"),
             serde_json::to_vec(&v).unwrap(),
@@ -642,8 +652,8 @@ mod tests {
         assert_eq!(
             SettingsSession::load(d.path().join("settings.json"))
                 .value()
-                .command_palette_shortcut,
-            "Ctrl+P"
+                .theme,
+            Theme::Dark
         );
     }
     #[test]

@@ -162,6 +162,14 @@ fn show_palette(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionC
         account_register: matches!(state.navigation.workspace, Workspace::Account(_)),
         budget_workspace: state.navigation.workspace == Workspace::Budget,
         mutations_disabled: state.mutations_disabled,
+        has_selection: false,
+        editing: false,
+        dialog_open: state.dialog.is_some(),
+        text_editor_owns_shortcuts: false,
+        lifecycle_busy: false,
+        operation_locked: !state.operations.is_empty(),
+        can_undo: false,
+        can_redo: false,
     };
     let descriptors = crate::app::palette::commands_for(context);
     let matches = crate::app::palette::fuzzy(&state.palette.query, &descriptors);
