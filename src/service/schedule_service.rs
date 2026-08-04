@@ -9,6 +9,16 @@ pub struct ScheduleLedger {
     pub transactions: HashMap<TransactionId, Transaction>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduledOccurrenceProjection {
+    pub id: ScheduledOccurrenceId,
+    pub identity: OccurrenceIdentity,
+    pub schedule_id: ScheduledTransactionId,
+    pub date: time::Date,
+    pub amount: Money,
+    pub disposition: OccurrenceDisposition,
+}
+
 /// Stages linked transaction and disposition writes against a clone, making replacement the
 /// single commit point. Persistence adapters can use the same command inside a unit of work.
 pub struct ScheduleService<'a> {
@@ -18,8 +28,23 @@ impl<'a> ScheduleService<'a> {
     pub fn new(ledger: &'a mut ScheduleLedger) -> Self {
         Self { ledger }
     }
-    pub fn create(&mut self, schedule: ScheduledTransaction) {
+    pub fn create(
+        &mut self,
+        schedule: ScheduledTransaction,
+    ) -> Result<ScheduledTransactionId, ScheduleError> {
+        let id = schedule.id;
+        schedule.occurrence_date(0)?;
+        self.ledger.schedules.insert(id, schedule);
+        Ok(id)
+    }
+    pub fn edit(&mut self, mut schedule: ScheduledTransaction) -> Result<(), ScheduleError> {
+        if !self.ledger.schedules.contains_key(&schedule.id) {
+            return Err(ScheduleError::ScheduleNotFound);
+        }
+        schedule.occurrence_date(0)?;
+        schedule.version = schedule.version.saturating_add(1);
         self.ledger.schedules.insert(schedule.id, schedule);
+        Ok(())
     }
     pub fn activate(&mut self, id: ScheduledTransactionId) -> Result<(), ScheduleError> {
         self.schedule_mut(id)?.activate();
@@ -43,16 +68,22 @@ impl<'a> ScheduleService<'a> {
         id: ScheduledTransactionId,
         today: time::Date,
         look_ahead_days: u32,
-    ) -> Result<Vec<ScheduledOccurrenceId>, ScheduleError> {
+    ) -> Result<Vec<ScheduledOccurrenceProjection>, ScheduleError> {
         let schedule = self
             .ledger
             .schedules
             .get(&id)
             .cloned()
             .ok_or(ScheduleError::ScheduleNotFound)?;
-        self.ledger
+        let ids = self
+            .ledger
             .occurrences
-            .refresh(&schedule, today, look_ahead_days)
+            .refresh(&schedule, today, look_ahead_days)?;
+        Ok(ids
+            .into_iter()
+            .filter_map(|id| self.ledger.occurrences.occurrence(id))
+            .map(project_occurrence)
+            .collect())
     }
     pub fn enter_now(
         &mut self,
@@ -95,5 +126,34 @@ impl<'a> ScheduleService<'a> {
         staged.occurrences.enter_now(id, transaction.id)?;
         *self.ledger = staged;
         Ok(transaction)
+    }
+    pub fn skip(&mut self, id: ScheduledOccurrenceId) -> Result<(), ScheduleError> {
+        self.ledger.occurrences.skip(id)
+    }
+    pub fn modify_before_entry(
+        &mut self,
+        id: ScheduledOccurrenceId,
+        date: time::Date,
+        amount: Money,
+    ) -> Result<ScheduledOccurrenceProjection, ScheduleError> {
+        self.ledger
+            .occurrences
+            .modify_occurrence(id, date, amount)?;
+        self.ledger
+            .occurrences
+            .occurrence(id)
+            .map(project_occurrence)
+            .ok_or(ScheduleError::OccurrenceUnavailable)
+    }
+}
+
+fn project_occurrence(value: &ScheduledOccurrence) -> ScheduledOccurrenceProjection {
+    ScheduledOccurrenceProjection {
+        id: value.id,
+        identity: value.identity.clone(),
+        schedule_id: value.schedule_id,
+        date: value.date,
+        amount: value.amount,
+        disposition: value.disposition,
     }
 }
