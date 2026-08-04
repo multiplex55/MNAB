@@ -5,7 +5,7 @@ use std::{
 };
 use thiserror::Error;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 6;
+pub const LATEST_SCHEMA_VERSION: i64 = 7;
 const INITIAL_SQL: &str = include_str!("migrations/0001_initial.sql");
 const RECONCILIATION_SQL: &str = include_str!("migrations/0002_reconciliation_history.sql");
 const CREDIT_CARD_SQL: &str = include_str!("migrations/0003_credit_card_payment_categories.sql");
@@ -13,6 +13,7 @@ const PERSISTENCE_AND_IMPORTS_SQL: &str =
     include_str!("migrations/0004_persistence_and_imports.sql");
 const IMPORT_WORKFLOW_SQL: &str = include_str!("migrations/0005_import_workflow.sql");
 const INBOX_FAILURES_SQL: &str = include_str!("migrations/0006_inbox_failures.sql");
+const QUERY_PLAN_INDEXES_SQL: &str = include_str!("migrations/0007_query_plan_indexes.sql");
 
 struct ReleasedMigration {
     version: i64,
@@ -57,6 +58,12 @@ const RELEASED_MIGRATIONS: &[ReleasedMigration] = &[
         identifier: "0006_inbox_failures",
         checksum: "0006-inbox-failures-v1",
         sql: INBOX_FAILURES_SQL,
+    },
+    ReleasedMigration {
+        version: 7,
+        identifier: "0007_query_plan_indexes",
+        checksum: "0007-query-plan-indexes-v1",
+        sql: QUERY_PLAN_INDEXES_SQL,
     },
 ];
 
@@ -254,6 +261,12 @@ mod tests {
             "idx_import_identity_fingerprint",
             "idx_schedule_occurrence_lookup",
             "idx_assignments_month_category",
+            "idx_transactions_budget_register_page",
+            "idx_transactions_budget_report_v7",
+            "idx_reconciliations_budget_date",
+            "idx_scheduled_occurrences_inbox",
+            "idx_staged_candidates_batch_review",
+            "idx_change_log_report_revision",
         ] {
             assert_eq!(
                 db.query_row(
