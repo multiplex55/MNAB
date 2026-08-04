@@ -3,9 +3,11 @@ use std::collections::BTreeMap;
 use crate::{
     app::{
         command::{
-            ApplicationAction, CommandEnvelope, CommandHistory, FinancialCommand, HistoryEntry,
+            ApplicationAction, CancellationPolicy, CommandEnvelope, CommandHistory, CommandStatus,
+            ConfirmationState, DeduplicationKey, FailureSafety, FinancialCommand, HistoryEntry,
+            OperationClass, RetryMetadata, Reversibility, RuntimeCommand,
         },
-        dispatcher::{ActionCollector, validate_confirmation},
+        dispatcher::{ActionCollector, invalidations_for, requires_confirmation},
         lifecycle::{Lifecycle, LifecycleEffect, LifecycleState},
         portable_paths::PortablePaths,
         session::BudgetSession,
@@ -29,7 +31,9 @@ pub struct ApplicationRuntime {
     view: AppState,
     history: CommandHistory<FinancialCommand>,
     invalidations: ViewInvalidations,
-    pending_commands: BTreeMap<u64, CommandEnvelope>,
+    pending_commands: BTreeMap<u64, RuntimeCommand>,
+    terminal_sequence: u64,
+    terminal_capacity: usize,
     settings: Option<SettingsSession>,
     accepting_commands: bool,
     lifecycle: Lifecycle,
@@ -96,6 +100,8 @@ impl ApplicationRuntime {
             history: CommandHistory::new(100),
             invalidations: ViewInvalidations::default(),
             pending_commands: BTreeMap::new(),
+            terminal_sequence: 0,
+            terminal_capacity: 64,
             settings,
             accepting_commands: true,
             lifecycle: Lifecycle::default(),
@@ -231,7 +237,8 @@ impl ApplicationRuntime {
         self.generation.view = 0;
         self.view.generation = self.generation;
         self.history.clear();
-        self.pending_commands.clear();
+        // The old worker was joined above, so none of its mutations remain unknown. Keep records
+        // for correlation diagnostics; generation checks make late responses harmless.
         self.view.clear_budget_state();
         self.view.active_budget = Some(budget_id);
         self.view.database_path = Some(database_path);
@@ -246,7 +253,7 @@ impl ApplicationRuntime {
         self.generation.view = 0;
         self.view.generation = self.generation;
         self.history.clear();
-        self.pending_commands.clear();
+        // Retain terminal/in-flight records for diagnostics. The worker was joined first.
         self.view.clear_budget_state();
     }
     pub fn drain_worker_responses(&mut self) {
@@ -258,22 +265,17 @@ impl ApplicationRuntime {
             match response {
                 StorageResponse::Completed {
                     id,
+                    command_id: Some(cid),
+                    correlation_id: Some(corr),
                     generation,
                     result,
+                    user_error,
                     ..
-                } if generation == self.generation => {
+                } => self.handle_command_response(id, cid, corr, generation, result, user_error),
+                StorageResponse::Completed { id, generation, .. }
+                    if generation == self.generation =>
+                {
                     self.view.complete_request(id);
-                    if let Err(error) = result {
-                        tracing::error!(request_id=id, error=?error, "storage command failed");
-                        self.view.notifications.push(Notification {
-                            kind: NotificationKind::Error,
-                            title: "Operation failed".into(),
-                            detail:
-                                "MNAB could not complete that operation. Your data was not changed."
-                                    .into(),
-                            persistent: true,
-                        });
-                    }
                 }
                 StorageResponse::Completed { id, .. } => {
                     tracing::debug!(request_id = id, "discarded stale worker response");
@@ -314,6 +316,17 @@ impl ApplicationRuntime {
             }
             return;
         }
+        if self.generation.budget == 0 {
+            return;
+        }
+        let key = DeduplicationKey(format!("{:?}", action));
+        if self
+            .pending_commands
+            .values()
+            .any(|c| !c.status.is_terminal() && c.deduplication_key == key)
+        {
+            return;
+        }
         let id = self.next_command;
         self.next_command = self.next_command.saturating_add(1);
         let envelope = CommandEnvelope {
@@ -321,19 +334,153 @@ impl ApplicationRuntime {
             correlation_id: id,
             budget_generation: self.generation.budget,
             payload: action,
-            confirmation_token: None,
-            focus_restoration_id: None,
         };
-        if validate_confirmation(&envelope).is_err() {
+        let ApplicationAction::Financial(financial) = &envelope.payload else {
+            return;
+        };
+        let confirmation = if requires_confirmation(financial) {
+            ConfirmationState::Required
+        } else {
+            ConfirmationState::NotRequired
+        };
+        let mut command = RuntimeCommand {
+            envelope,
+            status: CommandStatus::Queued,
+            worker_request_id: None,
+            confirmation,
+            focus_restoration_id: Some(id),
+            operation_label: "Financial operation".into(),
+            reversibility: Reversibility::Reversible,
+            cancellation_policy: CancellationPolicy::Cancellable,
+            retry: RetryMetadata {
+                attempts: 0,
+                max_attempts: 3,
+            },
+            operation_class: OperationClass::Mutation,
+            safe_failure: None,
+            deduplication_key: key,
+            terminal_sequence: None,
+        };
+        if matches!(confirmation, ConfirmationState::Required) {
+            command
+                .transition(CommandStatus::AwaitingConfirmation)
+                .expect("legal transition");
             self.view.notifications.push(Notification {
                 kind: NotificationKind::Warning,
                 title: "Confirmation required".into(),
                 detail: "Review and confirm this change before continuing.".into(),
                 persistent: true,
             });
+            self.pending_commands.insert(id, command);
             return;
         }
-        self.pending_commands.insert(id, envelope);
+        self.pending_commands.insert(id, command);
+        self.submit_runtime_command(id);
+    }
+    pub fn confirm_command(&mut self, id: u64, token: u64) -> bool {
+        let Some(c) = self.pending_commands.get_mut(&id) else {
+            return false;
+        };
+        if c.status != CommandStatus::AwaitingConfirmation {
+            return false;
+        }
+        c.confirmation = ConfirmationState::Confirmed(token);
+        self.submit_runtime_command(id);
+        true
+    }
+    fn submit_runtime_command(&mut self, id: u64) {
+        let request = self.allocate_request();
+        let Some(c) = self.pending_commands.get_mut(&id) else {
+            return;
+        };
+        if c.envelope.budget_generation != self.generation.budget {
+            return Self::fail_record(
+                c,
+                FailureSafety::NonRetryable(crate::storage::worker::SafeUserError {
+                    message: "This operation belongs to a closed budget.",
+                }),
+                &mut self.terminal_sequence,
+            );
+        }
+        if c.transition(CommandStatus::Submitting).is_err() {
+            return;
+        }
+        c.worker_request_id = Some(request);
+        c.retry.attempts += 1;
+        let req = crate::storage::worker::StorageRequest {
+            id: request,
+            generation: self.generation,
+            operation: crate::storage::worker::WorkerOperation::Financial(
+                crate::storage::worker::FinancialOperation::Command(c.envelope.clone()),
+            ),
+        };
+        if self.worker.as_ref().is_some_and(|w| w.submit(req).is_ok()) {
+            c.transition(CommandStatus::Running)
+                .expect("submitting may run");
+        } else {
+            Self::fail_record(
+                c,
+                FailureSafety::Retryable(crate::storage::worker::SafeUserError {
+                    message: "The operation could not be submitted. You may safely retry.",
+                }),
+                &mut self.terminal_sequence,
+            )
+        }
+    }
+    fn fail_record(c: &mut RuntimeCommand, f: FailureSafety, seq: &mut u64) {
+        let _ = c.transition(CommandStatus::Failed);
+        c.safe_failure = Some(f);
+        *seq += 1;
+        c.terminal_sequence = Some(*seq);
+    }
+    fn handle_command_response(
+        &mut self,
+        id: u64,
+        cid: u64,
+        corr: u64,
+        generation: Generation,
+        result: Result<crate::storage::worker::TypedResult, crate::storage::worker::WorkerError>,
+        safe: Option<crate::storage::worker::SafeUserError>,
+    ) {
+        let Some(c) = self.pending_commands.get_mut(&cid) else {
+            return;
+        };
+        if generation != self.generation
+            || !c.response_matches(id, cid, corr, generation.budget)
+            || c.status != CommandStatus::Running
+        {
+            return;
+        }
+        self.view.complete_request(id);
+        match result { Ok(crate::storage::worker::TypedResult::Mutation{command,inverse})=>{c.transition(CommandStatus::Committed).expect("running commits");self.terminal_sequence+=1;c.terminal_sequence=Some(self.terminal_sequence);self.history.record_success(HistoryEntry{label:c.operation_label.clone(),command:command.clone(),inverse});self.invalidations.merge(invalidations_for(&command));}, Err(crate::storage::worker::WorkerError::Cancelled)=>{let _=c.transition(CommandStatus::Cancelled);self.terminal_sequence+=1;c.terminal_sequence=Some(self.terminal_sequence);}, Err(_)=>Self::fail_record(c,FailureSafety::Retryable(safe.unwrap_or(crate::storage::worker::SafeUserError{message:"The operation failed without changing your data. You may safely retry."})),&mut self.terminal_sequence), _=>Self::fail_record(c,FailureSafety::NonRetryable(crate::storage::worker::SafeUserError{message:"The worker returned an unexpected result."}),&mut self.terminal_sequence)}
+        self.prune_commands();
+    }
+    pub fn cancel_command(&mut self, id: u64) -> bool {
+        let Some(c) = self.pending_commands.get_mut(&id) else {
+            return false;
+        };
+        if c.cancellation_policy != CancellationPolicy::Cancellable
+            || !matches!(
+                c.status,
+                CommandStatus::Queued | CommandStatus::AwaitingConfirmation
+            )
+        {
+            return false;
+        }
+        c.transition(CommandStatus::Cancelled).is_ok()
+    }
+    fn prune_commands(&mut self) {
+        let mut terminal = self
+            .pending_commands
+            .iter()
+            .filter(|(_, c)| c.status.is_terminal())
+            .map(|(id, c)| (*id, c.terminal_sequence.unwrap_or(0)))
+            .collect::<Vec<_>>();
+        terminal.sort_by_key(|x| x.1);
+        let remove = terminal.len().saturating_sub(self.terminal_capacity);
+        for (id, _) in terminal.into_iter().take(remove) {
+            self.pending_commands.remove(&id);
+        }
     }
     pub fn record_command_success(
         &mut self,
@@ -398,7 +545,16 @@ impl ApplicationRuntime {
             self.lifecycle_effects.push(effect);
         }
         self.accepting_commands = false;
-        self.pending_commands.clear(); // queued mutations have not started and are rolled back
+        for command in self.pending_commands.values_mut().filter(|c| {
+            matches!(
+                c.status,
+                CommandStatus::Queued | CommandStatus::AwaitingConfirmation
+            )
+        }) {
+            if command.cancellation_policy == CancellationPolicy::Cancellable {
+                let _ = command.transition(CommandStatus::Cancelled);
+            }
+        }
         if !self.view.operations.is_empty() {
             self.view.operations.clear();
         }
@@ -480,6 +636,128 @@ fn sync_directory(_path: &std::path::Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::command::{InboxAction, InboxCommand};
+
+    fn inbox_action() -> ApplicationAction {
+        ApplicationAction::Financial(FinancialCommand::Inbox(InboxCommand::Resolve {
+            item_id: crate::app::inbox::InboxItemId::FailedOperation("stable-id".into()),
+            action: InboxAction::Dismiss,
+        }))
+    }
+
+    fn runtime_with_worker() -> (tempfile::TempDir, ApplicationRuntime) {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("runtime.sqlite3");
+        let worker = StorageWorker::start(&database, || {}).unwrap();
+        let mut runtime = ApplicationRuntime::new(
+            None,
+            None,
+            false,
+            StartupContext {
+                marker_was_absent: false,
+                last_successfully_opened_budget: None,
+            },
+        );
+        runtime.commit_session(
+            BudgetSession {
+                budget_id: crate::domain::BudgetId::new(),
+                database_path: database,
+                schema_version: 3,
+                summary: crate::app::session::SessionSummary {
+                    budget_name: "Test".into(),
+                    account_count: 0,
+                },
+            },
+            worker,
+        );
+        (dir, runtime)
+    }
+
+    #[test]
+    fn repeated_semantic_action_submits_once_and_commits_history_once() {
+        let (_dir, mut runtime) = runtime_with_worker();
+        runtime.dispatch(inbox_action());
+        runtime.dispatch(inbox_action()); // click/key repeat while equivalent work is active
+        assert_eq!(runtime.pending_commands.len(), 1);
+        assert_eq!(
+            runtime.pending_commands.values().next().unwrap().status,
+            CommandStatus::Running
+        );
+        let response = runtime
+            .worker
+            .as_ref()
+            .unwrap()
+            .response_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let StorageResponse::Completed {
+            id,
+            command_id: Some(command_id),
+            correlation_id: Some(correlation_id),
+            generation,
+            result,
+            user_error,
+            ..
+        } = response
+        else {
+            panic!("expected associated completion")
+        };
+        runtime.handle_command_response(
+            id,
+            command_id,
+            correlation_id,
+            generation,
+            result,
+            user_error,
+        );
+        assert_eq!(runtime.history.undo_len(), 1);
+        assert_eq!(
+            runtime.pending_commands[&command_id].status,
+            CommandStatus::Committed
+        );
+    }
+
+    #[test]
+    fn stale_budget_response_cannot_commit_or_clear_redo() {
+        let (_dir, mut runtime) = runtime_with_worker();
+        runtime.history.record_success(HistoryEntry {
+            label: "old".into(),
+            command: match inbox_action() {
+                ApplicationAction::Financial(c) => c,
+                _ => unreachable!(),
+            },
+            inverse: match inbox_action() {
+                ApplicationAction::Financial(c) => c,
+                _ => unreachable!(),
+            },
+        });
+        assert!(runtime.history.undo().is_some());
+        let redo_before = runtime.history.redo_len();
+        runtime.dispatch(inbox_action());
+        let c = runtime.pending_commands.values().next().unwrap().clone();
+        runtime.generation.budget += 1;
+        runtime.handle_command_response(
+            c.worker_request_id.unwrap(),
+            c.envelope.command_id,
+            c.envelope.correlation_id,
+            Generation {
+                budget: c.envelope.budget_generation,
+                view: 0,
+            },
+            Ok(crate::storage::worker::TypedResult::Mutation {
+                command: match c.envelope.payload.clone() {
+                    ApplicationAction::Financial(x) => x,
+                    _ => unreachable!(),
+                },
+                inverse: match c.envelope.payload {
+                    ApplicationAction::Financial(x) => x,
+                    _ => unreachable!(),
+                },
+            }),
+            None,
+        );
+        assert_eq!(runtime.history.undo_len(), 0);
+        assert_eq!(runtime.history.redo_len(), redo_before);
+    }
     #[test]
     fn request_ids_are_monotonic_and_generations_are_independent() {
         let mut runtime = ApplicationRuntime::new(
@@ -576,6 +854,8 @@ mod tests {
         runtime.view.generation = runtime.generation;
         let stale = StorageResponse::Completed {
             id: 7,
+            command_id: None,
+            correlation_id: None,
             generation: Generation { budget: 1, view: 0 },
             result: Ok(crate::storage::worker::TypedResult::Healthy),
             invalidations: None,

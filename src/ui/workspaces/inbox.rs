@@ -1,5 +1,5 @@
 use crate::app::{
-    command::{ApplicationAction, FinancialCommand, InboxAction},
+    command::{ApplicationAction, FinancialCommand, InboxAction, InboxCommand},
     dispatcher::ActionCollector,
     state::AppState,
 };
@@ -43,12 +43,12 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, commands: &mut ActionCollector)
     ui.horizontal_wrapped(|ui| {
         for action in &item.actions {
             if ui.button(action_label(*action)).clicked() {
-                commands.push(ApplicationAction::Financial(
-                    FinancialCommand::ResolveInbox {
+                commands.push(ApplicationAction::Financial(FinancialCommand::Inbox(
+                    InboxCommand::Resolve {
                         item_id: item.id.clone(),
                         action: *action,
                     },
-                ));
+                )));
             }
         }
     });

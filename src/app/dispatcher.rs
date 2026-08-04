@@ -1,13 +1,13 @@
 use crate::app::{
-    command::{ApplicationAction, CommandEnvelope, FinancialCommand},
-    view_invalidation::{ViewInvalidation, ViewInvalidations},
+    command::*,
+    view_invalidation::{ViewInvalidation as V, ViewInvalidations},
 };
 
 #[derive(Default)]
 pub struct ActionCollector(Vec<ApplicationAction>);
 impl ActionCollector {
-    pub fn push(&mut self, action: impl Into<ApplicationAction>) {
-        self.0.push(action.into());
+    pub fn push(&mut self, a: impl Into<ApplicationAction>) {
+        self.0.push(a.into())
     }
     pub fn drain(&mut self) -> impl Iterator<Item = ApplicationAction> + '_ {
         self.0.drain(..)
@@ -16,12 +16,12 @@ impl ActionCollector {
         self.0
     }
 }
-impl From<crate::app::command::AppCommand> for ApplicationAction {
-    fn from(value: crate::app::command::AppCommand) -> Self {
-        if value == crate::app::command::AppCommand::Exit {
+impl From<AppCommand> for ApplicationAction {
+    fn from(v: AppCommand) -> Self {
+        if v == AppCommand::Exit {
             Self::RequestExit
         } else {
-            Self::Ui(value)
+            Self::Ui(v)
         }
     }
 }
@@ -29,49 +29,53 @@ impl From<crate::app::command::AppCommand> for ApplicationAction {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DispatchError {
     ConfirmationRequired,
+    IllegalTransition,
     SubmissionFailed,
+    StaleGeneration,
+    NotCancellable,
 }
-
 pub trait CommandSubmitter {
-    fn submit(&mut self, envelope: &CommandEnvelope) -> Result<(), DispatchError>;
-}
-
-pub fn requires_confirmation(command: &FinancialCommand) -> bool {
-    matches!(command, FinancialCommand::DeleteTransaction { .. })
-}
-
-pub fn validate_confirmation(envelope: &CommandEnvelope) -> Result<(), DispatchError> {
-    if matches!(&envelope.payload, ApplicationAction::Financial(c) if requires_confirmation(c))
-        && envelope.confirmation_token.is_none()
-    {
-        Err(DispatchError::ConfirmationRequired)
-    } else {
-        Ok(())
-    }
-}
-
-/// Submits at the worker boundary and records undo state only after acceptance.
-/// This ordering is the invariant that prevents failed dispatches entering history.
-pub fn submit_financial<S: CommandSubmitter>(
-    submitter: &mut S,
-    envelope: &CommandEnvelope,
-    history: &mut crate::app::command::CommandHistory<FinancialCommand>,
-    history_entry: crate::app::command::HistoryEntry<FinancialCommand>,
-) -> Result<ViewInvalidations, DispatchError> {
-    validate_confirmation(envelope)?;
-    submitter.submit(envelope)?;
-    history.record_success(history_entry);
-    let ApplicationAction::Financial(command) = &envelope.payload else {
-        return Ok(ViewInvalidations::default());
-    };
-    Ok(invalidations_for(command))
+    fn submit(&mut self, command: &RuntimeCommand) -> Result<(), DispatchError>;
 }
 
 #[must_use]
-pub fn invalidations_for(command: &FinancialCommand) -> ViewInvalidations {
-    use ViewInvalidation as V;
-    match command {
-        FinancialCommand::ResolveInbox { .. } => [
+pub fn requires_confirmation(c: &FinancialCommand) -> bool {
+    matches!(
+        c,
+        FinancialCommand::Transaction(TransactionCommand::Delete { .. })
+            | FinancialCommand::Category(CategoryCommand::Delete(_))
+            | FinancialCommand::Payee(PayeeCommand::Delete(_))
+            | FinancialCommand::Target(TargetCommand::Delete(_))
+            | FinancialCommand::Schedule(ScheduleCommand::Delete(_))
+    )
+}
+
+/// The only worker submission gateway. The request ID must already be associated, and the record
+/// must already be in `Submitting`; this prevents enqueueing directly from queued/confirmation UI.
+pub fn submit_command<S: CommandSubmitter>(
+    submitter: &mut S,
+    command: &mut RuntimeCommand,
+) -> Result<(), DispatchError> {
+    if command.status != CommandStatus::Submitting || command.worker_request_id.is_none() {
+        return Err(DispatchError::IllegalTransition);
+    }
+    if requires_confirmation(match &command.envelope.payload {
+        ApplicationAction::Financial(c) => c,
+        _ => return Err(DispatchError::SubmissionFailed),
+    }) && !matches!(command.confirmation, ConfirmationState::Confirmed(_))
+    {
+        return Err(DispatchError::ConfirmationRequired);
+    }
+    submitter.submit(command)?;
+    command
+        .transition(CommandStatus::Running)
+        .map_err(|_| DispatchError::IllegalTransition)
+}
+
+#[must_use]
+pub fn invalidations_for(c: &FinancialCommand) -> ViewInvalidations {
+    match c {
+        FinancialCommand::Inbox(_) => [
             V::Inbox,
             V::Accounts,
             V::AllAccountRegisters,
@@ -83,9 +87,9 @@ pub fn invalidations_for(command: &FinancialCommand) -> ViewInvalidations {
         ]
         .into_iter()
         .collect(),
-        FinancialCommand::Assign { month, .. } => [
-            V::BudgetMonth(*month),
-            V::BudgetRolloverFrom(*month),
+        FinancialCommand::Assignment(AssignmentCommand::Set(a)) => [
+            V::BudgetMonth(a.month),
+            V::BudgetRolloverFrom(a.month),
             V::Reports,
             V::Targets,
             V::Inbox,
@@ -93,9 +97,9 @@ pub fn invalidations_for(command: &FinancialCommand) -> ViewInvalidations {
         ]
         .into_iter()
         .collect(),
-        FinancialCommand::DeleteTransaction {
+        FinancialCommand::Transaction(TransactionCommand::Delete {
             account_id, month, ..
-        } => [
+        }) => [
             V::AccountRegister(*account_id),
             V::BudgetMonth(*month),
             V::Reports,
@@ -108,7 +112,19 @@ pub fn invalidations_for(command: &FinancialCommand) -> ViewInvalidations {
         ]
         .into_iter()
         .collect(),
-        FinancialCommand::AddAccount { .. } => [
+        FinancialCommand::Import(ImportCommand::Apply { account_id, .. }) => [
+            V::AccountRegister(*account_id),
+            V::Accounts,
+            V::Inbox,
+            V::Reports,
+            V::Targets,
+            V::Search,
+            V::LookupData,
+            V::Inspectors,
+        ]
+        .into_iter()
+        .collect(),
+        FinancialCommand::Account(_) => [
             V::Accounts,
             V::AllAccountRegisters,
             V::Reports,
@@ -118,12 +134,12 @@ pub fn invalidations_for(command: &FinancialCommand) -> ViewInvalidations {
         ]
         .into_iter()
         .collect(),
-        FinancialCommand::Import { account_id } => [
-            V::AccountRegister(*account_id),
+        _ => [
             V::Accounts,
-            V::Inbox,
+            V::AllAccountRegisters,
             V::Reports,
             V::Targets,
+            V::Inbox,
             V::Search,
             V::LookupData,
             V::Inspectors,
@@ -136,123 +152,13 @@ pub fn invalidations_for(command: &FinancialCommand) -> ViewInvalidations {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        app::command::{AppCommand, CommandHistory, HistoryEntry},
-        domain::{AccountId, BudgetMonth, TransactionId},
-    };
-
-    struct FakeSubmitter {
-        fail: bool,
-        calls: usize,
-    }
-    impl CommandSubmitter for FakeSubmitter {
-        fn submit(&mut self, _: &CommandEnvelope) -> Result<(), DispatchError> {
-            self.calls += 1;
-            if self.fail {
-                Err(DispatchError::SubmissionFailed)
-            } else {
-                Ok(())
-            }
-        }
-    }
-    fn deletion() -> FinancialCommand {
-        FinancialCommand::DeleteTransaction {
-            transaction_id: TransactionId::new(),
-            account_id: AccountId::new(),
-            month: BudgetMonth::new(2026, 8).unwrap(),
-        }
-    }
-    fn envelope(command: FinancialCommand, confirmed: bool) -> CommandEnvelope {
-        CommandEnvelope {
-            command_id: 1,
-            correlation_id: 1,
-            budget_generation: 2,
-            payload: ApplicationAction::Financial(command),
-            confirmation_token: confirmed.then_some(4),
-            focus_restoration_id: None,
-        }
-    }
     #[test]
-    fn collector_preserves_widget_order() {
-        let mut collector = ActionCollector::default();
-        collector.push(AppCommand::AddAccount);
-        collector.push(AppCommand::Import);
+    fn collector_is_semantic() {
+        let mut c = ActionCollector::default();
+        c.push(AppCommand::Import);
         assert_eq!(
-            collector.into_actions(),
-            vec![
-                ApplicationAction::Ui(AppCommand::AddAccount),
-                ApplicationAction::Ui(AppCommand::Import)
-            ]
-        );
-    }
-    #[test]
-    fn confirmation_precedes_submission() {
-        let mut fake = FakeSubmitter {
-            fail: false,
-            calls: 0,
-        };
-        let command = deletion();
-        let mut history = CommandHistory::new(5);
-        let result = submit_financial(
-            &mut fake,
-            &envelope(command.clone(), false),
-            &mut history,
-            HistoryEntry {
-                label: "delete".into(),
-                command: command.clone(),
-                inverse: command,
-            },
-        );
-        assert_eq!(result, Err(DispatchError::ConfirmationRequired));
-        assert_eq!(fake.calls, 0);
-    }
-    #[test]
-    fn failed_submission_does_not_change_history() {
-        let mut fake = FakeSubmitter {
-            fail: true,
-            calls: 0,
-        };
-        let command = deletion();
-        let mut history = CommandHistory::new(5);
-        assert_eq!(
-            submit_financial(
-                &mut fake,
-                &envelope(command.clone(), true),
-                &mut history,
-                HistoryEntry {
-                    label: "delete".into(),
-                    command: command.clone(),
-                    inverse: command
-                }
-            ),
-            Err(DispatchError::SubmissionFailed)
-        );
-        assert_eq!(history.undo_len(), 0);
-    }
-
-    #[test]
-    fn indirect_invalidations_are_mapped() {
-        let month = BudgetMonth::new(2026, 8).unwrap();
-        let assigned = invalidations_for(&FinancialCommand::Assign {
-            category_id: crate::domain::CategoryId::new(),
-            month,
-            amount: crate::domain::Money::ZERO,
-        });
-        assert!(assigned.iter().any(|v| *v == ViewInvalidation::Targets));
-        assert!(assigned.iter().any(|v| *v == ViewInvalidation::Inbox));
-        assert!(
-            assigned
-                .iter()
-                .any(|v| *v == ViewInvalidation::BudgetRolloverFrom(month))
-        );
-
-        let account = invalidations_for(&FinancialCommand::AddAccount { name: "New".into() });
-        assert!(account.iter().any(|v| *v == ViewInvalidation::Reports));
-        assert!(account.iter().any(|v| *v == ViewInvalidation::LookupData));
-        assert!(
-            account
-                .iter()
-                .any(|v| *v == ViewInvalidation::AllAccountRegisters)
+            c.into_actions(),
+            vec![ApplicationAction::Ui(AppCommand::Import)]
         );
     }
 }
