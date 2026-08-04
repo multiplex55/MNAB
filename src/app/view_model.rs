@@ -211,9 +211,16 @@ pub struct TransactionInspectorView {
 pub struct ImportCandidateView {
     pub index: u32,
     pub date: Date,
-    pub payee: String,
+    pub original_payee: Option<String>,
+    pub proposed_payee: Option<String>,
+    pub proposed_category: Option<String>,
+    pub original_memo: Option<String>,
+    pub proposed_memo: Option<String>,
     pub amount_cents: i64,
-    pub duplicate: bool,
+    pub duplicate_class: String,
+    pub duplicate_explanation: Option<String>,
+    pub warnings: Vec<String>,
+    pub decision: String,
     pub selected: bool,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -221,6 +228,8 @@ pub struct ImportReviewView {
     pub version: ViewVersion,
     pub batch_id: ImportBatchId,
     pub account_id: AccountId,
+    pub statement_account: Option<String>,
+    pub account_mismatch: Option<String>,
     pub candidates: Vec<ImportCandidateView>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]

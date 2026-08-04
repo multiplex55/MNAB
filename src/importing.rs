@@ -7,6 +7,7 @@ pub mod deduplication;
 pub mod ofx;
 pub mod preview;
 pub mod source;
+pub mod workflow;
 
 #[allow(unused_imports)]
 pub use source::{ImportError, ImportedStatement, ImportedTransaction};
