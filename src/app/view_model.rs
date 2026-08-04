@@ -267,6 +267,8 @@ pub struct ImportCandidateView {
     pub warnings: Vec<String>,
     pub decision: String,
     pub selected: bool,
+    pub match_candidate_ids: Vec<TransactionId>,
+    pub available_actions: Vec<String>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportReviewView {
@@ -276,6 +278,9 @@ pub struct ImportReviewView {
     pub statement_account: Option<String>,
     pub account_mismatch: Option<String>,
     pub candidates: Vec<ImportCandidateView>,
+    pub selected_candidate_count: usize,
+    pub bulk_actions: Vec<String>,
+    pub can_apply: bool,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReconciliationView {
