@@ -1,6 +1,7 @@
 pub mod budget_catalog;
 pub mod command;
 pub mod dispatcher;
+pub mod inbox;
 pub mod message;
 pub mod navigation;
 pub mod palette;

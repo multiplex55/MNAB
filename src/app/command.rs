@@ -1,4 +1,5 @@
 //! Semantic commands emitted by the single global keyboard/router layer.
+use crate::app::inbox::InboxItemId;
 use crate::domain::{AccountId, BudgetMonth, CategoryId, Money, TransactionId};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,6 +39,10 @@ pub enum AppCommand {
 /// details on their respective sides of the dispatcher boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FinancialCommand {
+    ResolveInbox {
+        item_id: InboxItemId,
+        action: InboxAction,
+    },
     Assign {
         category_id: CategoryId,
         month: BudgetMonth,
@@ -54,6 +59,21 @@ pub enum FinancialCommand {
     Import {
         account_id: AccountId,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InboxAction {
+    Approve,
+    Categorize,
+    Match,
+    EnterOccurrence,
+    SkipOccurrence,
+    Clear,
+    Reconcile,
+    MoveMoney,
+    OpenTarget,
+    ViewFailure,
+    Dismiss,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
