@@ -56,6 +56,21 @@ impl ViewInvalidations {
     }
 }
 
+/// Expands a rollover invalidation only across already-materialized dependent months.
+pub fn dependent_budget_months(
+    earliest: BudgetMonth,
+    materialized: impl IntoIterator<Item = BudgetMonth>,
+) -> ViewInvalidations {
+    materialized
+        .into_iter()
+        .filter(|month| *month >= earliest)
+        .map(ViewInvalidation::BudgetMonth)
+        .chain(std::iter::once(ViewInvalidation::BudgetRolloverFrom(
+            earliest,
+        )))
+        .collect()
+}
+
 /// Coalesces mutation invalidations until the next scheduling pass. A query key can
 /// only be queued once, even when several commands invalidate it in one frame.
 #[derive(Clone, Debug, Default)]
