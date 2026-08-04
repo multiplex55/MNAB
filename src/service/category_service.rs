@@ -20,7 +20,31 @@ pub struct Category {
     pub hidden: bool,
     pub archived: bool,
     pub historically_used: bool,
+    pub usage: CategoryUsage,
 }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CategoryUsage {
+    pub transactions: bool,
+    pub splits: bool,
+    pub assignments: bool,
+    pub targets: bool,
+    pub schedules: bool,
+    pub import_mappings: bool,
+    pub reconciliation_history: bool,
+}
+impl CategoryUsage {
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.transactions
+            || self.splits
+            || self.assignments
+            || self.targets
+            || self.schedules
+            || self.import_mappings
+            || self.reconciliation_history
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CategoryCatalog {
     pub groups: Vec<Group>,
@@ -41,6 +65,26 @@ pub enum CategoryCommandError {
 }
 
 impl CategoryCatalog {
+    #[must_use]
+    pub fn is_managed_payment_category(&self, id: CategoryId) -> bool {
+        self.managed_payment_categories
+            .values()
+            .any(|managed| *managed == id)
+    }
+
+    pub fn relink_managed_payment_category(
+        &mut self,
+        account_id: AccountId,
+        category_id: CategoryId,
+    ) -> Result<(), CategoryCommandError> {
+        if !self.categories.iter().any(|c| c.id == category_id) {
+            return Err(CategoryCommandError::NotFound);
+        }
+        self.managed_payment_categories
+            .insert(account_id, category_id);
+        Ok(())
+    }
+
     /// Resolves names independently of visibility so historical rows remain intelligible.
     #[must_use]
     pub fn resolve_name(&self, id: CategoryId) -> Option<&str> {
@@ -185,6 +229,7 @@ impl CategoryCatalog {
             hidden: false,
             archived: false,
             historically_used: false,
+            usage: CategoryUsage::default(),
         });
         Ok(id)
     }
@@ -193,11 +238,7 @@ impl CategoryCatalog {
         id: CategoryId,
         name: &str,
     ) -> Result<(), CategoryCommandError> {
-        if self
-            .managed_payment_categories
-            .values()
-            .any(|managed| *managed == id)
-        {
+        if self.is_managed_payment_category(id) {
             return Err(CategoryCommandError::Managed);
         }
         if name.trim().is_empty() {
@@ -216,11 +257,7 @@ impl CategoryCatalog {
         group_id: CategoryGroupId,
         position: usize,
     ) -> Result<(), CategoryCommandError> {
-        if self
-            .managed_payment_categories
-            .values()
-            .any(|managed| *managed == id)
-        {
+        if self.is_managed_payment_category(id) {
             return Err(CategoryCommandError::Managed);
         }
         if !self.groups.iter().any(|g| g.id == group_id) {
@@ -237,11 +274,7 @@ impl CategoryCatalog {
         Ok(())
     }
     pub fn set_hidden(&mut self, id: CategoryId, value: bool) -> Result<(), CategoryCommandError> {
-        if self
-            .managed_payment_categories
-            .values()
-            .any(|managed| *managed == id)
-        {
+        if self.is_managed_payment_category(id) {
             return Err(CategoryCommandError::Managed);
         }
         self.categories
@@ -252,11 +285,7 @@ impl CategoryCatalog {
         Ok(())
     }
     pub fn delete_if_unused(&mut self, id: CategoryId) -> Result<(), CategoryCommandError> {
-        if self
-            .managed_payment_categories
-            .values()
-            .any(|managed| *managed == id)
-        {
+        if self.is_managed_payment_category(id) {
             return Err(CategoryCommandError::Managed);
         }
         let i = self
@@ -264,7 +293,7 @@ impl CategoryCatalog {
             .iter()
             .position(|c| c.id == id)
             .ok_or(CategoryCommandError::NotFound)?;
-        if self.categories[i].historically_used {
+        if self.categories[i].historically_used || self.categories[i].usage.any() {
             self.categories[i].archived = true;
             self.categories[i].hidden = true;
             return Err(CategoryCommandError::Archived);

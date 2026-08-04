@@ -3,6 +3,7 @@
 //! Register paging is keyset based.  The key is deliberately the persisted
 //! `(transaction_date, id)` pair: dates are not unique and an offset alone can
 //! skip or repeat rows when a transaction is inserted while the user scrolls.
+use crate::app::view_model::{BudgetMonthView, CategoryRowView, ViewVersion};
 use crate::{
     domain::{
         AccountId, AccountScope, BudgetId, BudgetMonth, IncomeExpenseResult, IncomeExpenseRow,
@@ -783,18 +784,53 @@ impl<'a> QueryStore<'a> {
         &self,
         budget: BudgetId,
         month: &str,
-    ) -> Result<Vec<BudgetRow>, RepositoryError> {
-        let mut statement=self.connection.prepare("SELECT category_id,amount FROM budget_assignments WHERE budget_id=?1 AND budget_month=?2 ORDER BY category_id").map_err(repo)?;
-        statement
-            .query_map((budget.to_string(), month), |r| {
-                Ok(BudgetRow {
-                    category_id: r.get(0)?,
-                    assigned: Money::from_minor_units(r.get(1)?),
-                })
+    ) -> Result<BudgetMonthView, RepositoryError> {
+        let parsed_month = parse_month(month)?;
+        let mut stmt = self.connection.prepare(
+            r"SELECT g.id,c.id,g.name,c.name,g.sort_order,c.sort_order,
+                      COALESCE(g.hidden,0),COALESCE(c.hidden,0),COALESCE(c.archived,0),
+                      COALESCE(a.amount,0),
+                      COALESCE((SELECT SUM(CASE WHEN x.amount<0 THEN x.amount ELSE 0 END) FROM (
+                          SELECT t.category_id,t.amount FROM transactions t WHERE t.budget_id=?1 AND substr(t.transaction_date,1,7)=?2 AND t.archived=0 AND COALESCE(t.voided,0)=0
+                          UNION ALL SELECT s.category_id,s.amount FROM subtransactions s JOIN transactions t ON t.id=s.transaction_id WHERE t.budget_id=?1 AND substr(t.transaction_date,1,7)=?2 AND t.archived=0 AND COALESCE(t.voided,0)=0
+                      ) x WHERE x.category_id=c.id),0) activity,
+                      t.id,t.amount,t.due_date,t.target_type,
+                      CASE WHEN m.category_id IS NULL THEN 0 ELSE 1 END protected
+               FROM category_groups g JOIN categories c ON c.group_id=g.id
+               LEFT JOIN budget_assignments a ON a.category_id=c.id AND a.budget_month=?2
+               LEFT JOIN targets t ON t.category_id=c.id
+               LEFT JOIN credit_card_payment_categories m ON m.category_id=c.id
+               WHERE g.budget_id=?1
+               ORDER BY g.sort_order,g.id,c.sort_order,c.id",
+        ).map_err(repo)?;
+        let mut assigned = 0_i64;
+        let mut activity_total = 0_i64;
+        let rows = stmt.query_map((budget.to_string(), month), |r| {
+            let assigned_cents: i64 = r.get(9)?;
+            let activity_cents: i64 = r.get(10)?;
+            let target_amount: Option<i64> = r.get(12)?;
+            let available = assigned_cents + activity_cents;
+            let underfunded = target_amount.map_or(0, |t| (t - assigned_cents).max(0));
+            Ok(CategoryRowView {
+                group_id: r.get::<_, String>(0)?.parse().map_err(|_| rusqlite::Error::InvalidQuery)?, category_id: r.get::<_, String>(1)?.parse().map_err(|_| rusqlite::Error::InvalidQuery)?,
+                group_name: r.get(2)?, name: r.get(3)?, group_sort: r.get(4)?, category_sort: r.get(5)?,
+                group_collapsed: r.get::<_, i64>(6)? != 0, hidden: r.get::<_, i64>(7)? != 0, archived: r.get::<_, i64>(8)? != 0,
+                assigned_cents, activity_cents, available_cents: available, overspending_cents: (-available).max(0), underfunded_cents: underfunded,
+                target_id: r.get::<_, Option<String>>(11)?.map(|x| x.parse().map_err(|_| rusqlite::Error::InvalidQuery)).transpose()?, target_amount_cents: target_amount,
+                target_remaining_cents: target_amount.map(|_| underfunded), target_due_date: r.get(13)?, target_status: if underfunded == 0 { "funded" } else { "underfunded" }.into(),
+                credit_card_payment: r.get::<_, i64>(15)? != 0, protected: r.get::<_, i64>(15)? != 0,
+                inspector: format!("Assigned {assigned_cents}¢, activity {activity_cents}¢, available {available}¢. Recommendations are advisory and require Apply."),
             })
-            .map_err(repo)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(repo)
+        }).map_err(repo)?.collect::<Result<Vec<_>, _>>().map_err(repo)?;
+        for row in &rows {
+            assigned += row.assigned_cents;
+            activity_total += row.activity_cents;
+        }
+        let available = assigned + activity_total;
+        let revision = self.connection.query_row(
+            "SELECT COALESCE(MAX(rev),0) FROM (SELECT MAX(strftime('%s',modified_at)) rev FROM budget_assignments WHERE budget_id=?1 UNION ALL SELECT MAX(strftime('%s',modified_at)) FROM transactions WHERE budget_id=?1 UNION ALL SELECT MAX(sort_order) FROM categories WHERE budget_id=?1)",
+            [budget.to_string()], |r| r.get::<_, Option<u64>>(0)).map_err(repo)?.unwrap_or(0);
+        Ok(BudgetMonthView { version: ViewVersion { generation: 0, revision }, month: parsed_month, calculation_revision: revision, ready_to_assign_cents: -assigned, assigned_cents: assigned, activity_cents: activity_total, available_cents: available, overspending_cents: rows.iter().map(|r| r.overspending_cents).sum(), rows, inspector: vec!["Ready to Assign is calculated from persisted cents; targets never move money without a confirmed assignment command.".into()] })
     }
 }
 
