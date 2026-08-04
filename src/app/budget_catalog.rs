@@ -701,7 +701,8 @@ mod tests {
                 .all(|finding| finding.severity != diagnostics::Severity::Error)
         );
         let backup = backup_fixed(&paths, BackupReason::Manual).unwrap();
-        assert!(backup.database.starts_with(&paths.backups));
+        let backup_root = fs::canonicalize(&paths.backups).unwrap();
+        assert!(backup.database.starts_with(&backup_root));
         assert_eq!(paths.database.file_name().unwrap(), "mnab.sqlite3");
         let mut catalog = BudgetCatalog::default();
         catalog.refresh(&paths).unwrap();
