@@ -51,6 +51,24 @@ pub struct SourceData {
     pub refreshed_at: OffsetDateTime,
 }
 
+/// Small, stable hints needed to present an aggregate.  Report queries never return source
+/// transactions or other ledger entities to the UI.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReportPresentation {
+    pub currency_code: String,
+    pub row_count: usize,
+    pub is_empty: bool,
+}
+impl ReportPresentation {
+    fn for_rows(row_count: usize) -> Self {
+        Self {
+            currency_code: "USD".into(),
+            row_count,
+            is_empty: row_count == 0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReportData<'a> {
     pub source: SourceData,
@@ -112,6 +130,7 @@ pub struct SpendingResult {
     pub monthly: Vec<MonthlySpendingRow>,
     pub payees: Vec<PayeeSpendingRow>,
     pub total: Money,
+    pub presentation: ReportPresentation,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct IncomeExpenseRow {
@@ -127,6 +146,7 @@ pub struct IncomeExpenseResult {
     pub income: Money,
     pub expense: Money,
     pub net: Money,
+    pub presentation: ReportPresentation,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NetWorthRow {
@@ -140,6 +160,8 @@ pub struct NetWorthResult {
     pub source: SourceData,
     pub included_accounts: Vec<AccountId>,
     pub rows: Vec<NetWorthRow>,
+    pub total: Money,
+    pub presentation: ReportPresentation,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BudgetProgressRow {
@@ -156,6 +178,9 @@ pub struct BudgetProgressRow {
 pub struct BudgetProgressResult {
     pub source: SourceData,
     pub rows: Vec<BudgetProgressRow>,
+    pub total_assigned: Money,
+    pub total_spent: Money,
+    pub presentation: ReportPresentation,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ReportResult {
@@ -341,6 +366,7 @@ pub fn spending(data: &ReportData<'_>, filter: &ReportFilter) -> SpendingResult 
     let total = rows.iter().fold(Money::ZERO, |s, r| {
         s.checked_add(r.amount).expect("overflow")
     });
+    let presentation = ReportPresentation::for_rows(rows.len());
     SpendingResult {
         source: data.source,
         rows,
@@ -354,6 +380,7 @@ pub fn spending(data: &ReportData<'_>, filter: &ReportFilter) -> SpendingResult 
             .map(|(payee_id, amount)| PayeeSpendingRow { payee_id, amount })
             .collect(),
         total,
+        presentation,
     }
 }
 #[must_use]
@@ -371,7 +398,7 @@ pub fn income_expense(data: &ReportData<'_>, filter: &ReportFilter) -> IncomeExp
             }
         }
     }
-    let rows = map
+    let rows: Vec<IncomeExpenseRow> = map
         .into_iter()
         .map(|(month, (income, expense))| IncomeExpenseRow {
             month,
@@ -386,12 +413,14 @@ pub fn income_expense(data: &ReportData<'_>, filter: &ReportFilter) -> IncomeExp
     let expense = rows
         .iter()
         .fold(Money::ZERO, |s, r| s.checked_add(r.expense).unwrap());
+    let presentation = ReportPresentation::for_rows(rows.len());
     IncomeExpenseResult {
         source: data.source,
         rows,
         income,
         expense,
         net: income.checked_sub(expense).unwrap(),
+        presentation,
     }
 }
 #[must_use]
@@ -445,10 +474,14 @@ pub fn net_worth(data: &ReportData<'_>, filter: &ReportFilter) -> NetWorthResult
             })
         }
     }
+    let total = rows.last().map_or(Money::ZERO, |row| row.net_worth);
+    let presentation = ReportPresentation::for_rows(rows.len());
     NetWorthResult {
         source: data.source,
         included_accounts: included.into_iter().collect(),
         rows,
+        total,
+        presentation,
     }
 }
 fn target_amount(t: &Target) -> Option<Money> {
@@ -488,7 +521,7 @@ pub fn budget_progress(data: &ReportData<'_>, filter: &ReportFilter) -> BudgetPr
             }
         }
     }
-    let rows = map
+    let rows: Vec<BudgetProgressRow> = map
         .into_iter()
         .map(|((month, category_id), (assigned, spent))| {
             let target = data
@@ -525,9 +558,19 @@ pub fn budget_progress(data: &ReportData<'_>, filter: &ReportFilter) -> BudgetPr
             }
         })
         .collect();
+    let total_assigned = rows.iter().fold(Money::ZERO, |sum, row| {
+        sum.checked_add(row.assigned).unwrap()
+    });
+    let total_spent = rows
+        .iter()
+        .fold(Money::ZERO, |sum, row| sum.checked_add(row.spent).unwrap());
+    let presentation = ReportPresentation::for_rows(rows.len());
     BudgetProgressResult {
         source: data.source,
         rows,
+        total_assigned,
+        total_spent,
+        presentation,
     }
 }
 #[must_use]
