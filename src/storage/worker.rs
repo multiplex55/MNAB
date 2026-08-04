@@ -48,6 +48,7 @@ pub enum ViewOperation {
 }
 #[derive(Debug)]
 pub struct RegisterPageOperation {
+    pub account_id: crate::domain::AccountId,
     pub offset: u32,
     pub limit: u32,
 }
@@ -93,15 +94,15 @@ pub enum TypedResult {
     Count(i64),
     /// A transaction committed successfully. Only this result is eligible for undo history.
     Mutation(crate::storage::protocol::MutationResult),
-    Report(crate::domain::ReportResult),
-    RegisterPage,
-    SearchResults,
-    ImportParsed,
+    Report(crate::app::view_model::ReportView),
+    RegisterPage(crate::app::view_model::RegisterPageView),
+    SearchResults(crate::app::view_model::SearchResultsView),
+    ImportParsed(crate::app::view_model::CommandOutcomeView),
     ImportStatement(Box<crate::importing::ImportedStatement>),
-    ImportStaged,
-    ImportApplied,
-    Diagnostics,
-    OccurrencesGenerated,
+    ImportStaged(crate::app::view_model::CommandOutcomeView),
+    ImportApplied(crate::app::view_model::CommandOutcomeView),
+    Diagnostics(crate::app::view_model::DiagnosticsView),
+    OccurrencesGenerated(crate::app::view_model::OccurrencesView),
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SafeUserError {
@@ -347,7 +348,10 @@ fn execute_operation(
                 .map_err(|e| WorkerError::Repository(e.to_string()))?;
             let key = (*budget_id, normalized, revision);
             if let Some(result) = cache.entries.get(&key) {
-                return Ok(TypedResult::Report(result.clone()));
+                return Ok(TypedResult::Report(crate::storage::mapping::report_view(
+                    result.clone(),
+                    generation,
+                )));
             }
             let result = store
                 .report(*budget_id, request)
@@ -356,9 +360,22 @@ fn execute_operation(
                 budget != budget_id || *old_revision == revision
             });
             cache.entries.insert(key, result.clone());
-            Ok(TypedResult::Report(result))
+            Ok(TypedResult::Report(crate::storage::mapping::report_view(
+                result, generation,
+            )))
         }
-        WorkerOperation::Register(_) => Ok(TypedResult::RegisterPage),
+        WorkerOperation::Register(operation) => {
+            let store = crate::storage::query_store::QueryStore::new(c);
+            store
+                .register_projection(
+                    operation.account_id,
+                    operation.offset,
+                    operation.limit,
+                    generation,
+                )
+                .map(TypedResult::RegisterPage)
+                .map_err(|e| WorkerError::Repository(e.to_string()))
+        }
         WorkerOperation::Search(search) => {
             // Parsing and planning live beside the worker-side database execution;
             // the UI thread only schedules debounced text and renders typed results.
@@ -397,12 +414,20 @@ fn execute_operation(
             let mut rows = statement
                 .query(rusqlite::params_from_iter(values))
                 .map_err(|error| WorkerError::Repository(error.to_string()))?;
-            while rows
+            let mut results = Vec::new();
+            while let Some(row) = rows
                 .next()
                 .map_err(|error| WorkerError::Repository(error.to_string()))?
-                .is_some()
-            {}
-            Ok(TypedResult::SearchResults)
+            {
+                let id: String = row
+                    .get(0)
+                    .map_err(|e| WorkerError::Repository(e.to_string()))?;
+                results.push(id);
+            }
+            let projection =
+                crate::storage::mapping::search_results(&search.text, results, generation)
+                    .map_err(|e| WorkerError::Repository(e.to_string()))?;
+            Ok(TypedResult::SearchResults(projection))
         }
         WorkerOperation::Import(ImportOperation::Parse { path }) => {
             let bytes = std::fs::read(path).map_err(|error| {
@@ -415,7 +440,10 @@ fn execute_operation(
                     .map(Box::new)
                     .map(TypedResult::ImportStatement)
                     .map_err(|error| WorkerError::Repository(error.to_string())),
-                _ => Ok(TypedResult::ImportParsed),
+                _ => Ok(TypedResult::ImportParsed(crate::storage::mapping::outcome(
+                    "Statement parsed",
+                    generation,
+                ))),
             }
         }
         WorkerOperation::Import(ImportOperation::ParseCsv { path, preset }) => {
@@ -427,10 +455,20 @@ fn execute_operation(
                 .map(TypedResult::ImportStatement)
                 .map_err(|error| WorkerError::Repository(error.to_string()))
         }
-        WorkerOperation::Import(ImportOperation::Stage) => Ok(TypedResult::ImportStaged),
-        WorkerOperation::Import(ImportOperation::Apply) => Ok(TypedResult::ImportApplied),
-        WorkerOperation::Diagnostics(_) => Ok(TypedResult::Diagnostics),
-        WorkerOperation::Occurrences(_) => Ok(TypedResult::OccurrencesGenerated),
+        WorkerOperation::Import(ImportOperation::Stage) => Ok(TypedResult::ImportStaged(
+            crate::storage::mapping::outcome("Import staged", generation),
+        )),
+        WorkerOperation::Import(ImportOperation::Apply) => Ok(TypedResult::ImportApplied(
+            crate::storage::mapping::outcome("Import applied", generation),
+        )),
+        WorkerOperation::Diagnostics(_) => crate::storage::diagnostics::quick_check(c)
+            .map(|v| TypedResult::Diagnostics(crate::storage::mapping::diagnostics(v, generation)))
+            .map_err(|e| WorkerError::Repository(e.to_string())),
+        WorkerOperation::Occurrences(operation) => {
+            crate::storage::mapping::occurrences(c, operation.through, generation)
+                .map(TypedResult::OccurrencesGenerated)
+                .map_err(|e| WorkerError::Repository(e.to_string()))
+        }
         WorkerOperation::Financial(FinancialOperation::Command(envelope)) => {
             crate::storage::financial_executor::execute(c, envelope, generation.budget)
                 .map(TypedResult::Mutation)
@@ -482,5 +520,16 @@ mod tests {
             }),
             Err(WorkerError::Shutdown)
         ));
+    }
+
+    #[test]
+    fn view_results_are_payload_carrying_not_markers() {
+        let generation = Generation { budget: 1, view: 1 };
+        let result =
+            TypedResult::Diagnostics(crate::storage::mapping::diagnostics(vec![], generation));
+        assert!(matches!(result, TypedResult::Diagnostics(view) if view.findings.is_empty()));
+        let result =
+            TypedResult::ImportApplied(crate::storage::mapping::outcome("Applied", generation));
+        assert!(matches!(result, TypedResult::ImportApplied(view) if view.summary == "Applied"));
     }
 }

@@ -92,6 +92,22 @@ impl<'a> QueryStore<'a> {
         Self { connection }
     }
 
+    pub fn register_projection(
+        &self,
+        account: AccountId,
+        offset: u32,
+        requested_size: u32,
+        generation: crate::storage::worker::Generation,
+    ) -> Result<crate::app::view_model::RegisterPageView, RepositoryError> {
+        let page = self.register_page(
+            RegisterScope::Account(account),
+            &RegisterFilter::default(),
+            None,
+            requested_size as usize,
+        )?;
+        crate::storage::mapping::register_page(page, account, offset, generation)
+    }
+
     /// Executes a report inside SQLite. Only typed aggregate rows cross this boundary; ledger
     /// rows remain owned by the storage thread.
     pub fn report(

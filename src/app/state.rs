@@ -9,6 +9,63 @@ use crate::{
 use egui::Id;
 use std::{collections::BTreeMap, path::PathBuf};
 
+/// State shared by every independently refreshed immutable projection.
+#[derive(Clone, Debug)]
+pub struct ViewQueryState<T> {
+    pub last_successful: Option<T>,
+    pub refresh_active: bool,
+    pub latest_request_id: Option<RequestId>,
+    pub latest_generation: Generation,
+    pub safe_failure: Option<String>,
+    /// Focus is restored only for the accepted latest response, never merely because data arrived.
+    pub preserve_focus: Option<Id>,
+}
+impl<T> Default for ViewQueryState<T> {
+    fn default() -> Self {
+        Self {
+            last_successful: None,
+            refresh_active: false,
+            latest_request_id: None,
+            latest_generation: Generation { budget: 0, view: 0 },
+            safe_failure: None,
+            preserve_focus: None,
+        }
+    }
+}
+impl<T> ViewQueryState<T> {
+    pub fn begin(&mut self, id: RequestId, generation: Generation, focus: Option<Id>) {
+        self.refresh_active = true;
+        self.latest_request_id = Some(id);
+        self.latest_generation = generation;
+        self.safe_failure = None;
+        self.preserve_focus = focus;
+    }
+    #[must_use]
+    pub fn accept(&mut self, id: RequestId, generation: Generation, value: T) -> bool {
+        if self.latest_request_id != Some(id) || self.latest_generation != generation {
+            return false;
+        }
+        self.last_successful = Some(value);
+        self.refresh_active = false;
+        self.safe_failure = None;
+        true
+    }
+    #[must_use]
+    pub fn fail(
+        &mut self,
+        id: RequestId,
+        generation: Generation,
+        safe_failure: impl Into<String>,
+    ) -> bool {
+        if self.latest_request_id != Some(id) || self.latest_generation != generation {
+            return false;
+        }
+        self.refresh_active = false;
+        self.safe_failure = Some(safe_failure.into());
+        true
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AccountSummary {
     pub id: AccountId,
@@ -207,6 +264,20 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn projection_refresh_retains_prior_and_rejects_stale_completion() {
+        let generation = Generation { budget: 1, view: 2 };
+        let mut state = ViewQueryState::default();
+        state.begin(1, generation, Some(Id::new("editor")));
+        assert!(state.accept(1, generation, "old"));
+        state.begin(2, generation, Some(Id::new("editor")));
+        assert_eq!(state.last_successful, Some("old"));
+        assert!(!state.accept(1, generation, "stale"));
+        assert!(state.refresh_active);
+        assert!(state.fail(2, generation, "Could not refresh."));
+        assert_eq!(state.last_successful, Some("old"));
+        assert_eq!(state.preserve_focus, Some(Id::new("editor")));
+    }
     #[test]
     fn stale_response_does_not_replace_navigation() {
         let mut s = AppState::default();
