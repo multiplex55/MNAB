@@ -7,7 +7,7 @@ use crate::{
             ConfirmationState, DeduplicationKey, FailureSafety, FinancialCommand, HistoryEntry,
             OperationClass, RetryMetadata, Reversibility, RuntimeCommand,
         },
-        dispatcher::{ActionCollector, invalidations_for, requires_confirmation},
+        dispatcher::{ActionCollector, requires_confirmation},
         lifecycle::{Lifecycle, LifecycleEffect, LifecycleState},
         portable_paths::PortablePaths,
         session::BudgetSession,
@@ -452,7 +452,7 @@ impl ApplicationRuntime {
             return;
         }
         self.view.complete_request(id);
-        match result { Ok(crate::storage::worker::TypedResult::Mutation{command,inverse})=>{c.transition(CommandStatus::Committed).expect("running commits");self.terminal_sequence+=1;c.terminal_sequence=Some(self.terminal_sequence);self.history.record_success(HistoryEntry{label:c.operation_label.clone(),command:command.clone(),inverse});self.invalidations.merge(invalidations_for(&command));}, Err(crate::storage::worker::WorkerError::Cancelled)=>{let _=c.transition(CommandStatus::Cancelled);self.terminal_sequence+=1;c.terminal_sequence=Some(self.terminal_sequence);}, Err(_)=>Self::fail_record(c,FailureSafety::Retryable(safe.unwrap_or(crate::storage::worker::SafeUserError{message:"The operation failed without changing your data. You may safely retry."})),&mut self.terminal_sequence), _=>Self::fail_record(c,FailureSafety::NonRetryable(crate::storage::worker::SafeUserError{message:"The worker returned an unexpected result."}),&mut self.terminal_sequence)}
+        match result { Ok(crate::storage::worker::TypedResult::Mutation(m))=>{c.transition(CommandStatus::Committed).expect("running commits");self.terminal_sequence+=1;c.terminal_sequence=Some(self.terminal_sequence);if let (ApplicationAction::Financial(command),Some(crate::storage::protocol::UndoData::Command(inverse)))=(&c.envelope.payload,m.undo){self.history.record_success(HistoryEntry{label:c.operation_label.clone(),command:command.clone(),inverse});}self.invalidations.merge(m.invalidations);}, Err(crate::storage::worker::WorkerError::Cancelled)=>{let _=c.transition(CommandStatus::Cancelled);self.terminal_sequence+=1;c.terminal_sequence=Some(self.terminal_sequence);}, Err(_)=>Self::fail_record(c,FailureSafety::Retryable(safe.unwrap_or(crate::storage::worker::SafeUserError{message:"The operation failed without changing your data. You may safely retry."})),&mut self.terminal_sequence), _=>Self::fail_record(c,FailureSafety::NonRetryable(crate::storage::worker::SafeUserError{message:"The worker returned an unexpected result."}),&mut self.terminal_sequence)}
         self.prune_commands();
     }
     pub fn cancel_command(&mut self, id: u64) -> bool {
@@ -743,16 +743,19 @@ mod tests {
                 budget: c.envelope.budget_generation,
                 view: 0,
             },
-            Ok(crate::storage::worker::TypedResult::Mutation {
-                command: match c.envelope.payload.clone() {
-                    ApplicationAction::Financial(x) => x,
-                    _ => unreachable!(),
+            Ok(crate::storage::worker::TypedResult::Mutation(
+                crate::storage::protocol::MutationResult {
+                    command_id: c.envelope.command_id,
+                    correlation_id: c.envelope.correlation_id,
+                    operation_label: "test",
+                    affected_entity_ids: vec![],
+                    undo: None,
+                    invalidations: Default::default(),
+                    navigation: None,
+                    focus_restoration: None,
+                    notice: None,
                 },
-                inverse: match c.envelope.payload {
-                    ApplicationAction::Financial(x) => x,
-                    _ => unreachable!(),
-                },
-            }),
+            )),
             None,
         );
         assert_eq!(runtime.history.undo_len(), 0);

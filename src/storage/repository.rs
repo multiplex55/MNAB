@@ -5,8 +5,9 @@
 
 use crate::{
     domain::{
-        Account, Budget, BudgetAssignment, BudgetId, Category, CategoryGroup, ImportBatch, Payee,
-        Reconciliation, ScheduledTransaction, Target, Transaction,
+        Account, AccountId, Budget, BudgetAssignment, BudgetId, Category, CategoryGroup,
+        CategoryId, ImportBatch, Payee, PayeeId, Reconciliation, ScheduledTransaction,
+        ScheduledTransactionId, Target, TargetId, Transaction, TransactionId,
     },
     error::RepositoryError,
 };
@@ -18,25 +19,41 @@ pub trait BudgetRepository {
 }
 pub trait AccountRepository {
     fn put_account(&mut self, value: &Account) -> Result<(), RepositoryError>;
+    fn account(&mut self, id: AccountId) -> Result<Option<Account>, RepositoryError>;
 }
 pub trait CategoryRepository {
     fn put_group(&mut self, value: &CategoryGroup) -> Result<(), RepositoryError>;
     fn put_category(&mut self, value: &Category) -> Result<(), RepositoryError>;
+    fn category(&mut self, id: CategoryId) -> Result<Option<Category>, RepositoryError>;
+    fn category_is_used(&mut self, id: CategoryId) -> Result<bool, RepositoryError>;
+    fn delete_category(&mut self, id: CategoryId) -> Result<(), RepositoryError>;
 }
 pub trait PayeeRepository {
     fn put_payee(&mut self, value: &Payee) -> Result<(), RepositoryError>;
+    fn payee(&mut self, id: PayeeId) -> Result<Option<Payee>, RepositoryError>;
+    fn payee_is_used(&mut self, id: PayeeId) -> Result<bool, RepositoryError>;
+    fn delete_payee(&mut self, id: PayeeId) -> Result<(), RepositoryError>;
 }
 pub trait TransactionRepository {
     fn put_transaction(&mut self, value: &Transaction) -> Result<(), RepositoryError>;
+    fn transaction(&mut self, id: TransactionId) -> Result<Option<Transaction>, RepositoryError>;
+    fn delete_transaction(&mut self, id: TransactionId) -> Result<(), RepositoryError>;
 }
 pub trait AssignmentRepository {
     fn put_assignment(&mut self, value: &BudgetAssignment) -> Result<(), RepositoryError>;
+    fn assignment(
+        &mut self,
+        category: CategoryId,
+        month: crate::domain::BudgetMonth,
+    ) -> Result<Option<BudgetAssignment>, RepositoryError>;
 }
 pub trait TargetRepository {
     fn put_target(&mut self, value: &Target) -> Result<(), RepositoryError>;
+    fn delete_target(&mut self, id: TargetId) -> Result<(), RepositoryError>;
 }
 pub trait ScheduledRepository {
     fn put_scheduled(&mut self, value: &ScheduledTransaction) -> Result<(), RepositoryError>;
+    fn delete_scheduled(&mut self, id: ScheduledTransactionId) -> Result<(), RepositoryError>;
 }
 pub trait ImportRepository {
     fn put_import_batch(&mut self, value: &ImportBatch) -> Result<(), RepositoryError>;
@@ -52,6 +69,10 @@ pub trait AuditRepository {
         operation: &str,
     ) -> Result<(), RepositoryError>;
 }
+pub trait InboxRepository {
+    /// Toggles the durable dismissal marker and returns whether the row was previously dismissed.
+    fn toggle_failure_dismissal(&mut self, id: &str) -> Result<Option<bool>, RepositoryError>;
+}
 
 pub trait Repositories:
     BudgetRepository
@@ -65,6 +86,7 @@ pub trait Repositories:
     + ImportRepository
     + ReconciliationRepository
     + AuditRepository
+    + InboxRepository
 {
 }
 impl<T> Repositories for T where
@@ -79,6 +101,7 @@ impl<T> Repositories for T where
         + ImportRepository
         + ReconciliationRepository
         + AuditRepository
+        + InboxRepository
 {
 }
 
@@ -99,6 +122,18 @@ pub trait UnitOfWorkFactory {
 #[derive(Default)]
 pub struct InMemoryRepositories {
     pub budgets: HashMap<BudgetId, Budget>,
+    pub accounts: HashMap<AccountId, Account>,
+    pub groups: HashMap<crate::domain::CategoryGroupId, CategoryGroup>,
+    pub categories: HashMap<CategoryId, Category>,
+    pub payees: HashMap<PayeeId, Payee>,
+    pub transactions: HashMap<TransactionId, Transaction>,
+    pub assignments: HashMap<(CategoryId, crate::domain::BudgetMonth), BudgetAssignment>,
+    pub targets: HashMap<TargetId, Target>,
+    pub schedules: HashMap<ScheduledTransactionId, ScheduledTransaction>,
+    pub imports: HashMap<crate::domain::ImportBatchId, ImportBatch>,
+    pub reconciliations: HashMap<crate::domain::ReconciliationId, Reconciliation>,
+    pub audit: Vec<(String, String, String)>,
+    pub failure_dismissals: HashMap<String, bool>,
 }
 impl BudgetRepository for InMemoryRepositories {
     fn create_budget(&mut self, v: &Budget) -> Result<(), RepositoryError> {
@@ -109,26 +144,129 @@ impl BudgetRepository for InMemoryRepositories {
         Ok(self.budgets.get(&id).cloned())
     }
 }
-macro_rules! no_op { ($trait:ident, $($method:ident($ty:ty)),+) => { impl $trait for InMemoryRepositories { $(fn $method(&mut self, _: &$ty) -> Result<(), RepositoryError> { Ok(()) })+ } }; }
-no_op!(AccountRepository, put_account(Account));
-impl CategoryRepository for InMemoryRepositories {
-    fn put_group(&mut self, _: &CategoryGroup) -> Result<(), RepositoryError> {
+impl AccountRepository for InMemoryRepositories {
+    fn put_account(&mut self, v: &Account) -> Result<(), RepositoryError> {
+        self.accounts.insert(v.id, v.clone());
         Ok(())
     }
-    fn put_category(&mut self, _: &Category) -> Result<(), RepositoryError> {
+    fn account(&mut self, id: AccountId) -> Result<Option<Account>, RepositoryError> {
+        Ok(self.accounts.get(&id).cloned())
+    }
+}
+impl CategoryRepository for InMemoryRepositories {
+    fn put_group(&mut self, v: &CategoryGroup) -> Result<(), RepositoryError> {
+        self.groups.insert(v.id, v.clone());
+        Ok(())
+    }
+    fn put_category(&mut self, v: &Category) -> Result<(), RepositoryError> {
+        self.categories.insert(v.id, v.clone());
+        Ok(())
+    }
+    fn category(&mut self, id: CategoryId) -> Result<Option<Category>, RepositoryError> {
+        Ok(self.categories.get(&id).cloned())
+    }
+    fn category_is_used(&mut self, id: CategoryId) -> Result<bool, RepositoryError> {
+        Ok(self.transactions.values().any(|t| match &t.body {
+            crate::domain::TransactionBody::Categorized { category_id } => *category_id == id,
+            crate::domain::TransactionBody::Split { lines } => {
+                lines.iter().any(|l| l.category_id == id)
+            }
+            crate::domain::TransactionBody::OpeningBalance { category_id } => {
+                *category_id == Some(id)
+            }
+            _ => false,
+        }))
+    }
+    fn delete_category(&mut self, id: CategoryId) -> Result<(), RepositoryError> {
+        self.categories.remove(&id);
         Ok(())
     }
 }
-no_op!(PayeeRepository, put_payee(Payee));
-no_op!(TransactionRepository, put_transaction(Transaction));
-no_op!(AssignmentRepository, put_assignment(BudgetAssignment));
-no_op!(TargetRepository, put_target(Target));
-no_op!(ScheduledRepository, put_scheduled(ScheduledTransaction));
-no_op!(ImportRepository, put_import_batch(ImportBatch));
-no_op!(ReconciliationRepository, put_reconciliation(Reconciliation));
-impl AuditRepository for InMemoryRepositories {
-    fn append_audit(&mut self, _: &str, _: &str, _: &str) -> Result<(), RepositoryError> {
+impl PayeeRepository for InMemoryRepositories {
+    fn put_payee(&mut self, v: &Payee) -> Result<(), RepositoryError> {
+        self.payees.insert(v.id, v.clone());
         Ok(())
+    }
+    fn payee(&mut self, id: PayeeId) -> Result<Option<Payee>, RepositoryError> {
+        Ok(self.payees.get(&id).cloned())
+    }
+    fn payee_is_used(&mut self, id: PayeeId) -> Result<bool, RepositoryError> {
+        Ok(self.transactions.values().any(|t| t.payee_id == Some(id)))
+    }
+    fn delete_payee(&mut self, id: PayeeId) -> Result<(), RepositoryError> {
+        self.payees.remove(&id);
+        Ok(())
+    }
+}
+impl TransactionRepository for InMemoryRepositories {
+    fn put_transaction(&mut self, v: &Transaction) -> Result<(), RepositoryError> {
+        self.transactions.insert(v.id, v.clone());
+        Ok(())
+    }
+    fn transaction(&mut self, id: TransactionId) -> Result<Option<Transaction>, RepositoryError> {
+        Ok(self.transactions.get(&id).cloned())
+    }
+    fn delete_transaction(&mut self, id: TransactionId) -> Result<(), RepositoryError> {
+        self.transactions.remove(&id);
+        Ok(())
+    }
+}
+impl AssignmentRepository for InMemoryRepositories {
+    fn put_assignment(&mut self, v: &BudgetAssignment) -> Result<(), RepositoryError> {
+        self.assignments.insert((v.category_id, v.month), v.clone());
+        Ok(())
+    }
+    fn assignment(
+        &mut self,
+        c: CategoryId,
+        m: crate::domain::BudgetMonth,
+    ) -> Result<Option<BudgetAssignment>, RepositoryError> {
+        Ok(self.assignments.get(&(c, m)).cloned())
+    }
+}
+impl TargetRepository for InMemoryRepositories {
+    fn put_target(&mut self, v: &Target) -> Result<(), RepositoryError> {
+        self.targets.insert(v.id, v.clone());
+        Ok(())
+    }
+    fn delete_target(&mut self, id: TargetId) -> Result<(), RepositoryError> {
+        self.targets.remove(&id);
+        Ok(())
+    }
+}
+impl ScheduledRepository for InMemoryRepositories {
+    fn put_scheduled(&mut self, v: &ScheduledTransaction) -> Result<(), RepositoryError> {
+        self.schedules.insert(v.id, v.clone());
+        Ok(())
+    }
+    fn delete_scheduled(&mut self, id: ScheduledTransactionId) -> Result<(), RepositoryError> {
+        self.schedules.remove(&id);
+        Ok(())
+    }
+}
+impl ImportRepository for InMemoryRepositories {
+    fn put_import_batch(&mut self, v: &ImportBatch) -> Result<(), RepositoryError> {
+        self.imports.insert(v.id, v.clone());
+        Ok(())
+    }
+}
+impl ReconciliationRepository for InMemoryRepositories {
+    fn put_reconciliation(&mut self, v: &Reconciliation) -> Result<(), RepositoryError> {
+        self.reconciliations.insert(v.id, v.clone());
+        Ok(())
+    }
+}
+impl AuditRepository for InMemoryRepositories {
+    fn append_audit(&mut self, e: &str, id: &str, op: &str) -> Result<(), RepositoryError> {
+        self.audit.push((e.into(), id.into(), op.into()));
+        Ok(())
+    }
+}
+impl InboxRepository for InMemoryRepositories {
+    fn toggle_failure_dismissal(&mut self, id: &str) -> Result<Option<bool>, RepositoryError> {
+        let before = self.failure_dismissals.get(id).copied().unwrap_or(false);
+        self.failure_dismissals.insert(id.to_owned(), !before);
+        Ok(Some(before))
     }
 }
 
