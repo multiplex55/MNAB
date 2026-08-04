@@ -78,6 +78,7 @@ pub enum InboxAction {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ApplicationAction {
+    RequestExit,
     Ui(AppCommand),
     Financial(FinancialCommand),
 }

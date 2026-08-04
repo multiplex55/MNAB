@@ -6,6 +6,7 @@ use crate::{
             ApplicationAction, CommandEnvelope, CommandHistory, FinancialCommand, HistoryEntry,
         },
         dispatcher::{ActionCollector, validate_confirmation},
+        lifecycle::{Lifecycle, LifecycleEffect, LifecycleState},
         portable_paths::PortablePaths,
         session::BudgetSession,
         settings::SettingsSession,
@@ -31,8 +32,17 @@ pub struct ApplicationRuntime {
     pending_commands: BTreeMap<u64, CommandEnvelope>,
     settings: Option<SettingsSession>,
     accepting_commands: bool,
-    shutdown_complete: bool,
-    shutdown_requested: bool,
+    lifecycle: Lifecycle,
+    lifecycle_effects: Vec<LifecycleEffect>,
+    shutdown_steps: ShutdownSteps,
+    read_only: bool,
+}
+
+#[derive(Default)]
+struct ShutdownSteps {
+    worker: bool,
+    settings: bool,
+    marker: bool,
 }
 
 impl ApplicationRuntime {
@@ -88,8 +98,10 @@ impl ApplicationRuntime {
             pending_commands: BTreeMap::new(),
             settings,
             accepting_commands: true,
-            shutdown_complete: false,
-            shutdown_requested: false,
+            lifecycle: Lifecycle::default(),
+            lifecycle_effects: Vec::new(),
+            shutdown_steps: ShutdownSteps::default(),
+            read_only: false,
         };
         runtime.apply_startup(startup);
         runtime
@@ -290,14 +302,15 @@ impl ApplicationRuntime {
         if !self.accepting_commands {
             return;
         }
+        if action == ApplicationAction::RequestExit {
+            self.request_exit();
+            return;
+        }
         if let ApplicationAction::Ui(intent) = action {
             // Global intentions are handled by the application router and are not
             // mistaken for persistence work.
             if intent == crate::app::command::AppCommand::ToggleInspector {
                 self.view.inspector_visible = !self.view.inspector_visible;
-            }
-            if intent == crate::app::command::AppCommand::Exit {
-                self.shutdown_requested = true;
             }
             return;
         }
@@ -336,39 +349,99 @@ impl ApplicationRuntime {
     pub fn history(&self) -> &CommandHistory<FinancialCommand> {
         &self.history
     }
-    pub const fn shutdown_requested(&self) -> bool {
-        self.shutdown_requested
+    pub const fn lifecycle_state(&self) -> LifecycleState {
+        self.lifecycle.state()
     }
-    pub fn request_shutdown(&mut self) {
-        self.shutdown_requested = true;
+    pub const fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+    pub fn take_lifecycle_effects(&mut self) -> Vec<LifecycleEffect> {
+        std::mem::take(&mut self.lifecycle_effects)
+    }
+    pub fn native_close_requested(&mut self) {
+        let effects = self.lifecycle.native_close_requested();
+        self.lifecycle_effects.extend(effects);
+        self.advance_exit_review();
+    }
+    pub fn request_exit(&mut self) {
+        let effects = self.lifecycle.request_exit();
+        self.lifecycle_effects.extend(effects);
+        self.advance_exit_review();
+    }
+    fn advance_exit_review(&mut self) {
+        if self.lifecycle.state() == LifecycleState::ShutdownRequested {
+            self.lifecycle
+                .begin_review()
+                .expect("requested shutdown can be reviewed");
+            let effect = self
+                .lifecycle
+                .begin_shutdown()
+                .expect("review can begin shutdown");
+            self.lifecycle_effects.push(effect);
+        }
     }
 
     /// The sole ordered shutdown state machine. A marker is published only after every
     /// required durability step has succeeded.
     pub fn shutdown(&mut self) -> Result<(), String> {
-        if self.shutdown_complete {
+        if self.shutdown_steps.marker {
             return Ok(());
+        }
+        if self.lifecycle.state() == LifecycleState::Running {
+            self.request_exit();
+        }
+        if self.lifecycle.state() == LifecycleState::ShutdownFailed {
+            let effect = self
+                .lifecycle
+                .retry_shutdown()
+                .map_err(|e| format!("illegal retry: {e:?}"))?;
+            self.lifecycle_effects.push(effect);
         }
         self.accepting_commands = false;
         self.pending_commands.clear(); // queued mutations have not started and are rolled back
         if !self.view.operations.is_empty() {
             self.view.operations.clear();
         }
-        if let Some(mut worker) = self.worker.take() {
-            worker
-                .shutdown()
-                .map_err(|e| Self::shutdown_failed("worker stop/join and WAL checkpoint", e))?;
+        if !self.shutdown_steps.worker {
+            if let Some(mut worker) = self.worker.take() {
+                if let Err(error) = worker.shutdown() {
+                    self.read_only = true;
+                    return self.fail_shutdown("worker stop/join and WAL checkpoint", error);
+                }
+            }
+            self.shutdown_steps.worker = true;
         }
-        self.save_settings()
-            .map_err(|e| Self::shutdown_failed("settings persistence", e))?;
+        if !self.shutdown_steps.settings {
+            if let Err(error) = self.save_settings() {
+                return self.fail_shutdown("settings persistence", error);
+            }
+            self.shutdown_steps.settings = true;
+        }
         let paths = self
             .paths
             .as_ref()
             .ok_or_else(|| Self::shutdown_failed("clean marker", "portable paths unavailable"))?;
-        write_clean_marker(&paths.data.join(".clean-shutdown"))
-            .map_err(|e| Self::shutdown_failed("clean marker write/sync", e))?;
-        self.shutdown_complete = true;
+        if !self.shutdown_steps.marker {
+            if let Err(error) = write_clean_marker(&paths.data.join(".clean-shutdown")) {
+                return self.fail_shutdown("clean marker write/sync", error);
+            }
+            self.shutdown_steps.marker = true;
+        }
+        let effects = self
+            .lifecycle
+            .shutdown_succeeded()
+            .map_err(|e| format!("illegal shutdown completion: {e:?}"))?;
+        self.lifecycle_effects.extend(effects);
         Ok(())
+    }
+    fn fail_shutdown(&mut self, step: &str, error: impl std::fmt::Display) -> Result<(), String> {
+        let message = Self::shutdown_failed(step, error);
+        if self.lifecycle.state() == LifecycleState::ShuttingDown {
+            if let Ok(effect) = self.lifecycle.shutdown_failed() {
+                self.lifecycle_effects.push(effect);
+            }
+        }
+        Err(message)
     }
     fn shutdown_failed(step: &str, error: impl std::fmt::Display) -> String {
         let message = format!("shutdown step '{step}' failed: {error}");
@@ -527,8 +600,8 @@ mod tests {
         };
         let mut command =
             ApplicationRuntime::new(Some(paths.clone()), Some(settings), false, context.clone());
-        command.dispatch(ApplicationAction::Ui(crate::app::command::AppCommand::Exit));
-        assert!(command.shutdown_requested());
+        command.dispatch(ApplicationAction::RequestExit);
+        assert_eq!(command.lifecycle_state(), LifecycleState::ShuttingDown);
         command.shutdown().unwrap();
         command.shutdown().unwrap();
         assert!(paths.data.join(".clean-shutdown").is_file());
@@ -540,8 +613,8 @@ mod tests {
             false,
             context,
         );
-        window.request_shutdown();
-        assert_eq!(window.shutdown_requested(), command.shutdown_requested());
+        window.native_close_requested();
+        assert_eq!(window.lifecycle_state(), LifecycleState::ShuttingDown);
         window.shutdown().unwrap();
         assert!(paths.data.join(".clean-shutdown").is_file());
     }
