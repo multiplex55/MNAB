@@ -20,6 +20,24 @@ fn account_row(ui: &mut egui::Ui, account: &AccountSummary, selected: bool) -> e
         ),
     )
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountSection {
+    OnBudget,
+    Tracking,
+    Closed,
+}
+
+#[must_use]
+pub fn account_section(account: &AccountSummary) -> AccountSection {
+    if account.closed {
+        AccountSection::Closed
+    } else if account.tracking {
+        AccountSection::Tracking
+    } else {
+        AccountSection::OnBudget
+    }
+}
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollector) {
     ui.heading("MNAB");
     ui.label(&state.budget_name);
@@ -34,6 +52,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollect
         ("Budget", Workspace::Budget),
         ("Reports", Workspace::Reports),
         ("All Accounts", Workspace::AllAccounts),
+        ("Inbox", Workspace::Inbox),
     ] {
         if ui
             .selectable_label(state.navigation.workspace == workspace, label)
@@ -68,3 +87,21 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollect
 }
 #[allow(dead_code)]
 fn _money(_: Money) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::AccountId;
+    #[test]
+    fn closed_always_appears_in_closed_section() {
+        let account = AccountSummary {
+            id: AccountId::new(),
+            name: "Old".into(),
+            working_balance: Money::ZERO,
+            unreconciled: false,
+            tracking: true,
+            closed: true,
+        };
+        assert_eq!(account_section(&account), AccountSection::Closed);
+    }
+}

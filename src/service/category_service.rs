@@ -41,6 +41,48 @@ pub enum CategoryCommandError {
 }
 
 impl CategoryCatalog {
+    /// Resolves names independently of visibility so historical rows remain intelligible.
+    #[must_use]
+    pub fn resolve_name(&self, id: CategoryId) -> Option<&str> {
+        self.categories
+            .iter()
+            .find(|category| category.id == id)
+            .map(|category| category.name.as_str())
+    }
+
+    pub fn archive(&mut self, id: CategoryId) -> Result<(), CategoryCommandError> {
+        let category = self
+            .categories
+            .iter_mut()
+            .find(|category| category.id == id)
+            .ok_or(CategoryCommandError::NotFound)?;
+        category.archived = true;
+        category.hidden = true;
+        Ok(())
+    }
+
+    /// ID-based ordering for drag/drop and keyboard movement.
+    pub fn reorder_group_before(
+        &mut self,
+        id: CategoryGroupId,
+        before: Option<CategoryGroupId>,
+    ) -> Result<(), CategoryCommandError> {
+        let old = self
+            .groups
+            .iter()
+            .position(|group| group.id == id)
+            .ok_or(CategoryCommandError::NotFound)?;
+        let item = self.groups.remove(old);
+        let destination = before.map_or(self.groups.len(), |target| {
+            self.groups
+                .iter()
+                .position(|group| group.id == target)
+                .unwrap_or(self.groups.len())
+        });
+        self.groups.insert(destination, item);
+        self.normalize();
+        Ok(())
+    }
     fn normalize(&mut self) {
         self.groups.sort_by_key(|g| g.position);
         for (p, g) in self.groups.iter_mut().enumerate() {
