@@ -1,6 +1,7 @@
 use super::{connection::open_primary, migration::MigrationError};
 use rusqlite::Connection;
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -73,8 +74,8 @@ pub enum DiagnosticsOperation {
 }
 #[derive(Debug)]
 pub struct ReportOperation {
+    pub budget_id: crate::domain::BudgetId,
     pub request: crate::domain::ReportRequest,
-    pub data: Box<crate::domain::OwnedReportData>,
 }
 #[derive(Debug)]
 pub struct OccurrenceOperation {
@@ -229,6 +230,7 @@ fn run(
             return Ok(());
         }
     };
+    let mut report_cache = ReportCache::default();
     while let Ok(message) = rx.recv() {
         match message {
             Message::Shutdown => break,
@@ -251,7 +253,7 @@ fn run(
                 let result = if stopping.load(Ordering::Acquire) {
                     Err(WorkerError::Cancelled)
                 } else {
-                    execute(&connection, &request.operation)
+                    execute(&connection, &request.operation, &mut report_cache)
                 };
                 repaint();
                 let _ = tx.send(StorageResponse::Completed {
@@ -286,7 +288,15 @@ fn run(
     repaint();
     Ok(())
 }
-fn execute(c: &Connection, op: &WorkerOperation) -> Result<TypedResult, WorkerError> {
+#[derive(Default)]
+struct ReportCache {
+    entries: HashMap<(crate::domain::BudgetId, String, u64), crate::domain::ReportResult>,
+}
+fn execute(
+    c: &Connection,
+    op: &WorkerOperation,
+    cache: &mut ReportCache,
+) -> Result<TypedResult, WorkerError> {
     match op {
         WorkerOperation::Session(
             SessionOperation::Health | SessionOperation::Open | SessionOperation::Close,
@@ -295,9 +305,26 @@ fn execute(c: &Connection, op: &WorkerOperation) -> Result<TypedResult, WorkerEr
             .query_row("SELECT count(*) FROM budgets", [], |r| r.get(0))
             .map(TypedResult::Count)
             .map_err(|e| WorkerError::Repository(e.to_string())),
-        WorkerOperation::Report(ReportOperation { request, data }) => Ok(TypedResult::Report(
-            crate::domain::calculate(request, &data.as_data()),
-        )),
+        WorkerOperation::Report(ReportOperation { budget_id, request }) => {
+            let store = crate::storage::query_store::QueryStore::new(c);
+            let revision = store
+                .report_revision(*budget_id, request.kind)
+                .map_err(|e| WorkerError::Repository(e.to_string()))?;
+            let normalized = serde_json::to_string(request)
+                .map_err(|e| WorkerError::Repository(e.to_string()))?;
+            let key = (*budget_id, normalized, revision);
+            if let Some(result) = cache.entries.get(&key) {
+                return Ok(TypedResult::Report(result.clone()));
+            }
+            let result = store
+                .report(*budget_id, request)
+                .map_err(|e| WorkerError::Repository(e.to_string()))?;
+            cache.entries.retain(|(budget, _, old_revision), _| {
+                budget != budget_id || *old_revision == revision
+            });
+            cache.entries.insert(key, result.clone());
+            Ok(TypedResult::Report(result))
+        }
         WorkerOperation::Register(_) => Ok(TypedResult::RegisterPage),
         WorkerOperation::Search(_) => Ok(TypedResult::SearchResults),
         WorkerOperation::Import(ImportOperation::Parse { path }) => {

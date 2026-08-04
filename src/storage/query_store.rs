@@ -4,10 +4,16 @@
 //! `(transaction_date, id)` pair: dates are not unique and an offset alone can
 //! skip or repeat rows when a transaction is inserted while the user scrolls.
 use crate::{
-    domain::{AccountId, BudgetId, Money},
+    domain::{
+        AccountId, AccountScope, BudgetId, BudgetMonth, IncomeExpenseResult, IncomeExpenseRow,
+        Money, MonthlySpendingRow, PayeeSpendingRow, ReportFilter, ReportKind, ReportPresentation,
+        ReportRequest, ReportResult, SourceData, SpendingResult, SpendingRow,
+    },
     error::RepositoryError,
 };
 use rusqlite::{Connection, params_from_iter, types::Value};
+use std::{collections::BTreeMap, str::FromStr};
+use time::OffsetDateTime;
 
 pub const MAX_REGISTER_PAGE_SIZE: usize = 200;
 
@@ -84,6 +90,384 @@ impl<'a> QueryStore<'a> {
     #[must_use]
     pub const fn new(connection: &'a Connection) -> Self {
         Self { connection }
+    }
+
+    /// Executes a report inside SQLite. Only typed aggregate rows cross this boundary; ledger
+    /// rows remain owned by the storage thread.
+    pub fn report(
+        &self,
+        budget: BudgetId,
+        request: &ReportRequest,
+    ) -> Result<ReportResult, RepositoryError> {
+        match request.kind {
+            ReportKind::Spending => self
+                .spending_report(budget, &request.filter)
+                .map(ReportResult::Spending),
+            ReportKind::IncomeExpense => self
+                .income_expense_report(budget, &request.filter)
+                .map(ReportResult::IncomeExpense),
+            ReportKind::NetWorth => self
+                .net_worth_report(budget, &request.filter)
+                .map(ReportResult::NetWorth),
+            ReportKind::BudgetProgress => self
+                .budget_progress_report(budget, &request.filter)
+                .map(ReportResult::BudgetProgress),
+        }
+    }
+
+    /// A report revision changes only when one of the tables capable of affecting that report is
+    /// committed. This makes unrelated mutations retain their cache entries.
+    pub fn report_revision(
+        &self,
+        budget: BudgetId,
+        kind: ReportKind,
+    ) -> Result<u64, RepositoryError> {
+        let tables = match kind {
+            ReportKind::Spending | ReportKind::IncomeExpense => {
+                "'transactions','subtransactions','accounts','categories','category_groups','payees'"
+            }
+            ReportKind::NetWorth => "'transactions','accounts'",
+            ReportKind::BudgetProgress => {
+                "'transactions','subtransactions','accounts','categories','category_groups','budget_assignments','targets'"
+            }
+        };
+        self.connection.query_row(&format!("SELECT COALESCE(MAX(id),0) FROM change_log WHERE budget_id=?1 AND entity_table IN ({tables})"), [budget.to_string()], |r| r.get::<_, i64>(0))
+            .map(|v| v as u64).map_err(repo)
+    }
+
+    fn report_source(
+        &self,
+        budget: BudgetId,
+        kind: ReportKind,
+    ) -> Result<SourceData, RepositoryError> {
+        Ok(SourceData {
+            revision: self.report_revision(budget, kind)?,
+            refreshed_at: OffsetDateTime::now_utc(),
+        })
+    }
+
+    fn spending_report(
+        &self,
+        budget: BudgetId,
+        filter: &ReportFilter,
+    ) -> Result<SpendingResult, RepositoryError> {
+        let (where_sql, values) = report_where(budget, filter, true, true);
+        let cte = report_lines_cte();
+        let sql = format!(
+            "{cte} SELECT c.group_id,l.category_id,-SUM(l.amount) amount FROM lines l JOIN categories c ON c.id=l.category_id WHERE {where_sql} AND l.amount<0 GROUP BY c.group_id,l.category_id ORDER BY c.group_id,l.category_id"
+        );
+        let mut stmt = self.connection.prepare(&sql).map_err(repo)?;
+        let rows = stmt
+            .query_map(params_from_iter(values.clone()), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(repo)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(repo)?
+            .into_iter()
+            .map(|(g, c, a)| {
+                Ok(SpendingRow {
+                    group_id: parse_id(&g)?,
+                    category_id: parse_id(&c)?,
+                    amount: Money::from_minor_units(a),
+                })
+            })
+            .collect::<Result<Vec<_>, RepositoryError>>()?;
+        let mut groups = BTreeMap::new();
+        let mut total = Money::ZERO;
+        for row in &rows {
+            add_money(&mut groups, row.group_id, row.amount)?;
+            total = total.checked_add(row.amount).map_err(repo)?;
+        }
+        let monthly = self
+            .aggregate_spending_dimension::<String, _>(
+                &cte,
+                &where_sql,
+                values.clone(),
+                "substr(l.transaction_date,1,7)",
+                |s| parse_month(&s),
+            )?
+            .into_iter()
+            .map(|(month, amount)| MonthlySpendingRow { month, amount })
+            .collect();
+        let payees = self
+            .aggregate_spending_dimension::<Option<String>, _>(
+                &cte,
+                &where_sql,
+                values,
+                "l.payee_id",
+                |s| match s {
+                    Some(v) => Ok(Some(parse_id(&v)?)),
+                    None => Ok(None),
+                },
+            )?
+            .into_iter()
+            .map(|(payee_id, amount)| PayeeSpendingRow { payee_id, amount })
+            .collect();
+        let row_count = rows.len();
+        Ok(SpendingResult {
+            source: self.report_source(budget, ReportKind::Spending)?,
+            rows,
+            groups: groups.into_iter().collect(),
+            monthly,
+            payees,
+            total,
+            presentation: ReportPresentation {
+                currency_code: "USD".into(),
+                row_count,
+                is_empty: row_count == 0,
+            },
+        })
+    }
+
+    fn aggregate_spending_dimension<T: rusqlite::types::FromSql, K: Ord>(
+        &self,
+        cte: &str,
+        where_sql: &str,
+        values: Vec<Value>,
+        dimension: &str,
+        convert: impl Fn(T) -> Result<K, RepositoryError>,
+    ) -> Result<Vec<(K, Money)>, RepositoryError> {
+        let sql = format!(
+            "{cte} SELECT {dimension},-SUM(l.amount) FROM lines l JOIN categories c ON c.id=l.category_id WHERE {where_sql} AND l.amount<0 GROUP BY {dimension} ORDER BY {dimension}"
+        );
+        let mut stmt = self.connection.prepare(&sql).map_err(repo)?;
+        stmt.query_map(params_from_iter(values), |r| {
+            Ok((r.get::<_, T>(0)?, r.get::<_, i64>(1)?))
+        })
+        .map_err(repo)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(repo)?
+        .into_iter()
+        .map(|(key, value)| Ok((convert(key)?, Money::from_minor_units(value))))
+        .collect()
+    }
+
+    fn income_expense_report(
+        &self,
+        budget: BudgetId,
+        filter: &ReportFilter,
+    ) -> Result<IncomeExpenseResult, RepositoryError> {
+        let (where_sql, values) = report_where(budget, filter, true, true);
+        let sql = format!(
+            "{} SELECT substr(l.transaction_date,1,7),SUM(CASE WHEN l.amount>=0 THEN l.amount ELSE 0 END),-SUM(CASE WHEN l.amount<0 THEN l.amount ELSE 0 END) FROM lines l JOIN categories c ON c.id=l.category_id WHERE {where_sql} GROUP BY 1 ORDER BY 1",
+            report_lines_cte()
+        );
+        let mut stmt = self.connection.prepare(&sql).map_err(repo)?;
+        let raw = stmt
+            .query_map(params_from_iter(values), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(repo)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(repo)?;
+        let mut rows = Vec::with_capacity(raw.len());
+        let mut income = Money::ZERO;
+        let mut expense = Money::ZERO;
+        for (m, i, e) in raw {
+            let i = Money::from_minor_units(i);
+            let e = Money::from_minor_units(e);
+            income = income.checked_add(i).map_err(repo)?;
+            expense = expense.checked_add(e).map_err(repo)?;
+            rows.push(IncomeExpenseRow {
+                month: parse_month(&m)?,
+                income: i,
+                expense: e,
+                net: i.checked_sub(e).map_err(repo)?,
+            });
+        }
+        let net = income.checked_sub(expense).map_err(repo)?;
+        let count = rows.len();
+        Ok(IncomeExpenseResult {
+            source: self.report_source(budget, ReportKind::IncomeExpense)?,
+            rows,
+            income,
+            expense,
+            net,
+            presentation: presentation(count),
+        })
+    }
+
+    fn net_worth_report(
+        &self,
+        budget: BudgetId,
+        filter: &ReportFilter,
+    ) -> Result<crate::domain::NetWorthResult, RepositoryError> {
+        let (account_sql, account_values) = account_where(budget, filter);
+        let mut stmt = self
+            .connection
+            .prepare(&format!(
+                "SELECT a.id FROM accounts a WHERE {account_sql} ORDER BY a.id"
+            ))
+            .map_err(repo)?;
+        let included_accounts = stmt
+            .query_map(params_from_iter(account_values.clone()), |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(repo)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(repo)?
+            .into_iter()
+            .map(|id| parse_id(&id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut values = account_values;
+        values.push(filter.dates.end.to_string().into());
+        values.push(filter.dates.start.to_string().into());
+        let sql = format!(
+            r#"WITH selected AS (SELECT a.id,a.account_type FROM accounts a WHERE {account_sql}),
+          dates AS (SELECT DISTINCT t.transaction_date d FROM transactions t JOIN selected a ON a.id=t.account_id WHERE t.archived=0 AND t.voided=0 AND t.transaction_date<=?),
+          balances AS (SELECT d.d,a.account_type,COALESCE(SUM(t.amount),0) balance FROM dates d CROSS JOIN selected a LEFT JOIN transactions t ON t.account_id=a.id AND t.archived=0 AND t.voided=0 AND t.transaction_date<=d.d GROUP BY d.d,a.id)
+          SELECT d,SUM(CASE WHEN account_type IN ('credit_card','loan','liability') THEN 0 ELSE balance END),SUM(CASE WHEN account_type IN ('credit_card','loan','liability') THEN balance ELSE 0 END) FROM balances WHERE d>=? GROUP BY d ORDER BY d"#
+        );
+        let mut stmt = self.connection.prepare(&sql).map_err(repo)?;
+        let raw = stmt
+            .query_map(params_from_iter(values), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(repo)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(repo)?;
+        let mut rows = Vec::with_capacity(raw.len());
+        for (date, assets, liabilities) in raw {
+            let assets = Money::from_minor_units(assets);
+            let liabilities = Money::from_minor_units(liabilities);
+            rows.push(crate::domain::NetWorthRow {
+                date: time::Date::parse(
+                    &date,
+                    &time::format_description::well_known::Iso8601::DATE,
+                )
+                .map_err(repo)?,
+                assets,
+                liabilities,
+                net_worth: assets.checked_add(liabilities).map_err(repo)?,
+            });
+        }
+        let total = rows.last().map_or(Money::ZERO, |r| r.net_worth);
+        let count = rows.len();
+        Ok(crate::domain::NetWorthResult {
+            source: self.report_source(budget, ReportKind::NetWorth)?,
+            included_accounts,
+            rows,
+            total,
+            presentation: presentation(count),
+        })
+    }
+
+    fn budget_progress_report(
+        &self,
+        budget: BudgetId,
+        filter: &ReportFilter,
+    ) -> Result<crate::domain::BudgetProgressResult, RepositoryError> {
+        let (where_sql, mut values) = report_where(budget, filter, true, false);
+        // Assignment months are inclusive when their first day lies in the requested range.
+        values.push(budget.to_string().into());
+        values.push(filter.dates.start.to_string().into());
+        values.push(filter.dates.end.to_string().into());
+        let mut category_conditions = Vec::new();
+        if !filter.category_ids.is_empty() {
+            category_conditions.push(format!(
+                "ba.category_id IN ({})",
+                placeholders(filter.category_ids.len())
+            ));
+            values.extend(
+                filter
+                    .category_ids
+                    .iter()
+                    .map(|v| Value::from(v.to_string())),
+            );
+        }
+        if !filter.category_group_ids.is_empty() {
+            category_conditions.push(format!(
+                "c.group_id IN ({})",
+                placeholders(filter.category_group_ids.len())
+            ));
+            values.extend(
+                filter
+                    .category_group_ids
+                    .iter()
+                    .map(|v| Value::from(v.to_string())),
+            );
+        }
+        let category_sql = if category_conditions.is_empty() {
+            "1=1".into()
+        } else {
+            category_conditions.join(" AND ")
+        };
+        let sql = format!(
+            r#"{} , spend AS (SELECT substr(l.transaction_date,1,7) month,l.category_id,-SUM(l.amount) spent FROM lines l JOIN categories c ON c.id=l.category_id WHERE {where_sql} AND l.amount<0 GROUP BY 1,2),
+          assigned AS (SELECT ba.budget_month month,ba.category_id,SUM(ba.amount) assigned FROM budget_assignments ba JOIN categories c ON c.id=ba.category_id WHERE ba.budget_id=? AND ba.budget_month||'-01'>=? AND ba.budget_month||'-01'<=? AND {category_sql} GROUP BY 1,2),
+          keys AS (SELECT month,category_id FROM spend UNION SELECT month,category_id FROM assigned)
+          SELECT k.month,k.category_id,COALESCE(a.assigned,0),COALESCE(s.spent,0),CASE WHEN t.target_type='credit_card_payoff_by_date' THEN NULL ELSE t.amount END FROM keys k LEFT JOIN assigned a USING(month,category_id) LEFT JOIN spend s USING(month,category_id) LEFT JOIN targets t ON t.category_id=k.category_id ORDER BY k.month,k.category_id"#,
+            report_lines_cte()
+        );
+        let mut stmt = self.connection.prepare(&sql).map_err(repo)?;
+        let raw = stmt
+            .query_map(params_from_iter(values), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                ))
+            })
+            .map_err(repo)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(repo)?;
+        let mut rows = Vec::with_capacity(raw.len());
+        let mut total_assigned = Money::ZERO;
+        let mut total_spent = Money::ZERO;
+        for (month, category, assigned, spent, target) in raw {
+            let assigned = Money::from_minor_units(assigned);
+            let spent = Money::from_minor_units(spent);
+            let target = target.map(Money::from_minor_units);
+            total_assigned = total_assigned.checked_add(assigned).map_err(repo)?;
+            total_spent = total_spent.checked_add(spent).map_err(repo)?;
+            let available = assigned.checked_sub(spent).map_err(repo)?;
+            rows.push(crate::domain::BudgetProgressRow {
+                month: parse_month(&month)?,
+                category_id: parse_id(&category)?,
+                assigned,
+                spent,
+                target,
+                target_completion_basis_points: target.map(|x| {
+                    if x <= Money::ZERO {
+                        10_000
+                    } else {
+                        ((assigned.max(Money::ZERO).minor_units() as i128 * 10_000
+                            / i128::from(x.minor_units()))
+                        .clamp(0, 10_000)) as u16
+                    }
+                }),
+                underfunded: target.map_or(Money::ZERO, |x| {
+                    x.checked_sub(assigned).unwrap().max(Money::ZERO)
+                }),
+                overspent: available
+                    .checked_neg()
+                    .unwrap_or(Money::ZERO)
+                    .max(Money::ZERO),
+            });
+        }
+        let count = rows.len();
+        Ok(crate::domain::BudgetProgressResult {
+            source: self.report_source(budget, ReportKind::BudgetProgress)?,
+            rows,
+            total_assigned,
+            total_spent,
+            presentation: presentation(count),
+        })
     }
 
     /// Compatibility helper. Unlike the old unbounded query this can return at
@@ -327,6 +711,158 @@ impl<'a> QueryStore<'a> {
     }
 }
 
+fn report_lines_cte() -> String {
+    r#"WITH lines AS (
+      SELECT t.budget_id,t.account_id,t.transaction_date,t.payee_id,t.category_id,t.amount,t.archived,t.voided
+      FROM transactions t WHERE NOT EXISTS (SELECT 1 FROM subtransactions s WHERE s.transaction_id=t.id)
+      UNION ALL
+      SELECT t.budget_id,t.account_id,t.transaction_date,t.payee_id,s.category_id,s.amount,t.archived,t.voided
+      FROM transactions t JOIN subtransactions s ON s.transaction_id=t.id
+    )"#.into()
+}
+fn placeholders(count: usize) -> String {
+    std::iter::repeat_n("?", count)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+fn account_where(budget: BudgetId, filter: &ReportFilter) -> (String, Vec<Value>) {
+    let mut clauses = vec!["a.budget_id=?".into()];
+    let mut values = vec![budget.to_string().into()];
+    if !filter.account_ids.is_empty() {
+        clauses.push(format!(
+            "a.id IN ({})",
+            placeholders(filter.account_ids.len())
+        ));
+        values.extend(
+            filter
+                .account_ids
+                .iter()
+                .map(|v| Value::from(v.to_string())),
+        );
+    }
+    match filter.accounts {
+        AccountScope::OnBudget => {
+            clauses.push("a.account_type IN ('checking','savings','cash','credit_card')".into())
+        }
+        AccountScope::Tracking => {
+            clauses.push("a.account_type IN ('loan','asset','liability','investment')".into())
+        }
+        AccountScope::Both => {}
+    }
+    (clauses.join(" AND "), values)
+}
+fn report_where(
+    budget: BudgetId,
+    filter: &ReportFilter,
+    budget_only: bool,
+    categories_required: bool,
+) -> (String, Vec<Value>) {
+    let mut clauses = vec![
+        "l.budget_id=?".into(),
+        "l.archived=0".into(),
+        "l.voided=0".into(),
+        "l.transaction_date>=?".into(),
+        "l.transaction_date<=?".into(),
+    ];
+    let mut values = vec![
+        budget.to_string().into(),
+        filter.dates.start.to_string().into(),
+        filter.dates.end.to_string().into(),
+    ];
+    if categories_required {
+        clauses.push("l.category_id IS NOT NULL".into());
+    }
+    if !filter.account_ids.is_empty() {
+        clauses.push(format!(
+            "l.account_id IN ({})",
+            placeholders(filter.account_ids.len())
+        ));
+        values.extend(
+            filter
+                .account_ids
+                .iter()
+                .map(|v| Value::from(v.to_string())),
+        );
+    }
+    if !filter.category_ids.is_empty() {
+        clauses.push(format!(
+            "l.category_id IN ({})",
+            placeholders(filter.category_ids.len())
+        ));
+        values.extend(
+            filter
+                .category_ids
+                .iter()
+                .map(|v| Value::from(v.to_string())),
+        );
+    }
+    if !filter.category_group_ids.is_empty() {
+        clauses.push(format!(
+            "c.group_id IN ({})",
+            placeholders(filter.category_group_ids.len())
+        ));
+        values.extend(
+            filter
+                .category_group_ids
+                .iter()
+                .map(|v| Value::from(v.to_string())),
+        );
+    }
+    if !filter.payee_ids.is_empty() {
+        clauses.push(format!(
+            "l.payee_id IN ({})",
+            placeholders(filter.payee_ids.len())
+        ));
+        values.extend(filter.payee_ids.iter().map(|v| Value::from(v.to_string())));
+    }
+    // Every report line query joins accounts under this alias.
+    let classification = if budget_only || matches!(filter.accounts, AccountScope::OnBudget) {
+        " AND a.account_type IN ('checking','savings','cash','credit_card')"
+    } else if matches!(filter.accounts, AccountScope::Tracking) {
+        " AND a.account_type IN ('loan','asset','liability','investment')"
+    } else {
+        ""
+    };
+    clauses.push(format!("EXISTS (SELECT 1 FROM accounts a WHERE a.id=l.account_id AND a.budget_id=l.budget_id{classification})"));
+    (clauses.join(" AND "), values)
+}
+fn parse_id<T: FromStr>(value: &str) -> Result<T, RepositoryError>
+where
+    T::Err: std::error::Error + Send + Sync + 'static,
+{
+    value.parse().map_err(repo)
+}
+fn parse_month(value: &str) -> Result<BudgetMonth, RepositoryError> {
+    let (year, month) = value.split_once('-').ok_or_else(|| {
+        repo(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid month",
+        ))
+    })?;
+    BudgetMonth::new(year.parse().map_err(repo)?, month.parse().map_err(repo)?).map_err(repo)
+}
+fn add_money<K: Ord + Copy>(
+    map: &mut BTreeMap<K, Money>,
+    key: K,
+    value: Money,
+) -> Result<(), RepositoryError> {
+    let next = map
+        .get(&key)
+        .copied()
+        .unwrap_or(Money::ZERO)
+        .checked_add(value)
+        .map_err(repo)?;
+    map.insert(key, next);
+    Ok(())
+}
+fn presentation(row_count: usize) -> ReportPresentation {
+    ReportPresentation {
+        currency_code: "USD".into(),
+        row_count,
+        is_empty: row_count == 0,
+    }
+}
+
 fn push(where_sql: &mut Vec<String>, values: &mut Vec<Value>, clause: &str, value: String) {
     where_sql.push(clause.replace('?', &format!("?{}", values.len() + 1)));
     values.push(value.into());
@@ -401,5 +937,59 @@ fn escape_like(value: &str) -> String {
 fn repo<E: std::error::Error + Send + Sync + 'static>(source: E) -> RepositoryError {
     RepositoryError::Failed {
         source: Box::new(source),
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+    use crate::domain::{DateRange, ReportFilter};
+    use std::collections::BTreeSet;
+    use time::macros::date;
+
+    #[test]
+    fn every_aggregate_query_returns_a_bounded_typed_empty_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection =
+            crate::storage::connection::open_primary(&directory.path().join("reports.sqlite3"))
+                .unwrap();
+        let budget = BudgetId::new();
+        connection.execute("INSERT INTO budgets(id,name,created_at,modified_at,archived) VALUES(?1,'Reports',datetime('now'),datetime('now'),0)",[budget.to_string()]).unwrap();
+        let filter = ReportFilter {
+            dates: DateRange {
+                start: date!(2026 - 01 - 01),
+                end: date!(2026 - 12 - 31),
+            },
+            account_ids: BTreeSet::new(),
+            category_group_ids: BTreeSet::new(),
+            category_ids: BTreeSet::new(),
+            payee_ids: BTreeSet::new(),
+            accounts: AccountScope::Both,
+        };
+        let store = QueryStore::new(&connection);
+        for kind in [
+            ReportKind::Spending,
+            ReportKind::IncomeExpense,
+            ReportKind::NetWorth,
+            ReportKind::BudgetProgress,
+        ] {
+            let result = store
+                .report(
+                    budget,
+                    &ReportRequest {
+                        kind,
+                        filter: filter.clone(),
+                    },
+                )
+                .unwrap();
+            let metadata = match result {
+                ReportResult::Spending(v) => v.presentation,
+                ReportResult::IncomeExpense(v) => v.presentation,
+                ReportResult::NetWorth(v) => v.presentation,
+                ReportResult::BudgetProgress(v) => v.presentation,
+            };
+            assert!(metadata.is_empty);
+            assert_eq!(metadata.row_count, 0);
+        }
     }
 }
