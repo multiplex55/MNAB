@@ -123,10 +123,14 @@ pub struct AccountSidebarView {
 pub struct BudgetMonthView {
     pub version: ViewVersion,
     pub month: BudgetMonth,
+    pub calculation_revision: u64,
+    pub ready_to_assign_cents: i64,
     pub assigned_cents: i64,
     pub activity_cents: i64,
     pub available_cents: i64,
+    pub overspending_cents: i64,
     pub rows: Vec<CategoryRowView>,
+    pub inspector: Vec<String>,
 }
 
 /// Session-only memoization of derived reads. Availability is never writable state: every entry
@@ -154,11 +158,24 @@ pub struct CategoryRowView {
     pub category_id: CategoryId,
     pub group_name: String,
     pub name: String,
+    pub group_sort: i64,
+    pub category_sort: i64,
+    pub group_collapsed: bool,
     pub assigned_cents: i64,
     pub activity_cents: i64,
     pub available_cents: i64,
+    pub overspending_cents: i64,
+    pub underfunded_cents: i64,
     pub target_id: Option<TargetId>,
+    pub target_amount_cents: Option<i64>,
+    pub target_remaining_cents: Option<i64>,
+    pub target_due_date: Option<String>,
+    pub target_status: String,
+    pub credit_card_payment: bool,
+    pub protected: bool,
     pub hidden: bool,
+    pub archived: bool,
+    pub inspector: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
