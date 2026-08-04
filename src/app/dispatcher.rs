@@ -67,30 +67,53 @@ pub fn submit_financial<S: CommandSubmitter>(
 pub fn invalidations_for(command: &FinancialCommand) -> ViewInvalidations {
     use ViewInvalidation as V;
     match command {
-        FinancialCommand::Assign { month, .. } => {
-            [V::BudgetMonth(*month), V::Reports, V::Inspectors]
-                .into_iter()
-                .collect()
-        }
+        FinancialCommand::Assign { month, .. } => [
+            V::BudgetMonth(*month),
+            V::BudgetRolloverFrom(*month),
+            V::Reports,
+            V::Targets,
+            V::Inbox,
+            V::Inspectors,
+        ]
+        .into_iter()
+        .collect(),
         FinancialCommand::DeleteTransaction {
             account_id, month, ..
         } => [
             V::AccountRegister(*account_id),
             V::BudgetMonth(*month),
             V::Reports,
+            V::Targets,
+            V::Inbox,
             V::Search,
+            V::LookupData,
+            V::Inspectors,
+            V::BudgetRolloverFrom(*month),
+        ]
+        .into_iter()
+        .collect(),
+        FinancialCommand::AddAccount { .. } => [
+            V::Accounts,
+            V::AllAccountRegisters,
+            V::Reports,
+            V::Search,
+            V::LookupData,
             V::Inspectors,
         ]
         .into_iter()
         .collect(),
-        FinancialCommand::AddAccount { .. } => {
-            [V::Accounts, V::AllAccountRegisters].into_iter().collect()
-        }
-        FinancialCommand::Import { account_id } => {
-            [V::AccountRegister(*account_id), V::Inbox, V::Reports]
-                .into_iter()
-                .collect()
-        }
+        FinancialCommand::Import { account_id } => [
+            V::AccountRegister(*account_id),
+            V::Accounts,
+            V::Inbox,
+            V::Reports,
+            V::Targets,
+            V::Search,
+            V::LookupData,
+            V::Inspectors,
+        ]
+        .into_iter()
+        .collect(),
     }
 }
 
@@ -189,5 +212,31 @@ mod tests {
             Err(DispatchError::SubmissionFailed)
         );
         assert_eq!(history.undo_len(), 0);
+    }
+
+    #[test]
+    fn indirect_invalidations_are_mapped() {
+        let month = BudgetMonth::new(2026, 8).unwrap();
+        let assigned = invalidations_for(&FinancialCommand::Assign {
+            category_id: crate::domain::CategoryId::new(),
+            month,
+            amount: crate::domain::Money::ZERO,
+        });
+        assert!(assigned.iter().any(|v| *v == ViewInvalidation::Targets));
+        assert!(assigned.iter().any(|v| *v == ViewInvalidation::Inbox));
+        assert!(
+            assigned
+                .iter()
+                .any(|v| *v == ViewInvalidation::BudgetRolloverFrom(month))
+        );
+
+        let account = invalidations_for(&FinancialCommand::AddAccount { name: "New".into() });
+        assert!(account.iter().any(|v| *v == ViewInvalidation::Reports));
+        assert!(account.iter().any(|v| *v == ViewInvalidation::LookupData));
+        assert!(
+            account
+                .iter()
+                .any(|v| *v == ViewInvalidation::AllAccountRegisters)
+        );
     }
 }
