@@ -326,7 +326,51 @@ fn execute(
             Ok(TypedResult::Report(result))
         }
         WorkerOperation::Register(_) => Ok(TypedResult::RegisterPage),
-        WorkerOperation::Search(_) => Ok(TypedResult::SearchResults),
+        WorkerOperation::Search(search) => {
+            // Parsing and planning live beside the worker-side database execution;
+            // the UI thread only schedules debounced text and renders typed results.
+            let ast = crate::app::search::parse(&search.text)
+                .map_err(|_| WorkerError::Repository("invalid search expression".into()))?;
+            let plan = crate::app::search::compile(&ast);
+            let bounded_limit = search.limit.clamp(1, 100);
+            let sql = format!(
+                "SELECT transactions.id FROM transactions \
+                 JOIN accounts ON accounts.id=transactions.account_id \
+                 LEFT JOIN payees ON payees.id=transactions.payee_id \
+                 LEFT JOIN categories ON categories.id=transactions.category_id \
+                 {} LIMIT ?",
+                if plan.where_sql.is_empty() {
+                    String::new()
+                } else {
+                    format!("WHERE {}", plan.where_sql)
+                }
+            );
+            let mut values = plan
+                .binds
+                .into_iter()
+                .map(|value| match value {
+                    crate::app::search::BindValue::Text(value) => {
+                        rusqlite::types::Value::Text(value)
+                    }
+                    crate::app::search::BindValue::Integer(value) => {
+                        rusqlite::types::Value::Integer(value)
+                    }
+                })
+                .collect::<Vec<_>>();
+            values.push(rusqlite::types::Value::Integer(i64::from(bounded_limit)));
+            let mut statement = c
+                .prepare(&sql)
+                .map_err(|error| WorkerError::Repository(error.to_string()))?;
+            let mut rows = statement
+                .query(rusqlite::params_from_iter(values))
+                .map_err(|error| WorkerError::Repository(error.to_string()))?;
+            while rows
+                .next()
+                .map_err(|error| WorkerError::Repository(error.to_string()))?
+                .is_some()
+            {}
+            Ok(TypedResult::SearchResults)
+        }
         WorkerOperation::Import(ImportOperation::Parse { path }) => {
             let bytes = std::fs::read(path).map_err(|error| {
                 WorkerError::Repository(format!("statement read failed: {error}"))
