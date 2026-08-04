@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::domain::{AccountId, BudgetMonth};
+use crate::domain::{AccountId, BudgetMonth, ImportBatchId, TargetId, TransactionId};
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ViewInvalidation {
@@ -14,6 +14,14 @@ pub enum ViewInvalidation {
     Schedules,
     Search,
     Inspectors,
+    TransactionInspector(TransactionId),
+    ImportReview(ImportBatchId),
+    Reconciliation(AccountId),
+    Target(TargetId),
+    /// The changed month and every materialized later month (rollover is cumulative).
+    BudgetRolloverFrom(BudgetMonth),
+    /// Payee/category/account choices used by editors and search suggestions.
+    LookupData,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -41,6 +49,31 @@ impl ViewInvalidations {
     }
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+/// Coalesces mutation invalidations until the next scheduling pass. A query key can
+/// only be queued once, even when several commands invalidate it in one frame.
+#[derive(Clone, Debug, Default)]
+pub struct QueryScheduler {
+    pending: ViewInvalidations,
+}
+
+impl QueryScheduler {
+    pub fn invalidate(&mut self, invalidations: ViewInvalidations) {
+        self.pending.merge(invalidations);
+    }
+
+    pub fn drain(&mut self) -> ViewInvalidations {
+        std::mem::take(&mut self.pending)
+    }
+
+    pub fn pending(&self) -> &ViewInvalidations {
+        &self.pending
     }
 }
 
@@ -75,5 +108,26 @@ mod tests {
             0
         );
         assert_eq!(values.iter().count(), 2);
+    }
+
+    #[test]
+    fn scheduling_deduplicates_and_coalesces() {
+        let account = AccountId::new();
+        let mut scheduler = QueryScheduler::default();
+        scheduler.invalidate(
+            [ViewInvalidation::AccountRegister(account)]
+                .into_iter()
+                .collect(),
+        );
+        scheduler.invalidate(
+            [
+                ViewInvalidation::AccountRegister(account),
+                ViewInvalidation::Reports,
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(scheduler.drain().iter().count(), 2);
+        assert!(scheduler.pending().is_empty());
     }
 }

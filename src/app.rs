@@ -12,6 +12,7 @@ pub mod settings;
 pub mod startup;
 pub mod state;
 pub mod view_invalidation;
+pub mod view_model;
 
 use crate::{
     app::runtime::ApplicationRuntime, error::UserFacingError, storage::LATEST_SCHEMA_VERSION,
