@@ -53,17 +53,19 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.heading("MNAB — Multi Needs A Budget");
-            ui.menu_button("Budget", |ui| {
+            ui.menu_button("Data", |ui| {
                 use crate::app::command::{ApplicationAction, BudgetAction};
-                if ui.button("New budget…").clicked() {
-                    actions.push(ApplicationAction::Budget(BudgetAction::ShowCreate));
+                if ui.button("Budget settings…").clicked() {
+                    actions.push(ApplicationAction::Budget(BudgetAction::ShowRecents));
                     ui.close();
                 }
-                if ui.button("Open budget…").clicked() {
-                    actions.push(ApplicationAction::Budget(BudgetAction::ShowOpen));
+                ui.separator();
+                ui.label("Maintenance");
+                if ui.button("Reveal data folder…").clicked() {
+                    actions.push(ApplicationAction::Budget(BudgetAction::ShowRecents));
                     ui.close();
                 }
-                if ui.button("Recent budgets…").clicked() {
+                if ui.button("Reveal backup folder…").clicked() {
                     actions.push(ApplicationAction::Budget(BudgetAction::ShowRecents));
                     ui.close();
                 }
@@ -109,20 +111,20 @@ fn show_budget_dialog(ctx: &egui::Context, state: &mut AppState) {
     };
     let (title, guidance) = match dialog {
         crate::app::state::Dialog::CreateBudget => (
-            "Create a budget",
-            "Choose a name, managed filename, currency, and initial month.",
+            "First-run setup",
+            "Create the fixed mnab-data/mnab.sqlite3 database for this portable install.",
         ),
         crate::app::state::Dialog::OpenBudget => (
-            "Open a budget",
-            "Select a managed MNAB budget. It will be validated completely before replacing the current session.",
+            "Database maintenance",
+            "MNAB opens mnab-data/mnab.sqlite3 automatically; file picker workflows are retired.",
         ),
         crate::app::state::Dialog::RecentBudgets => (
-            "Recent budgets",
-            "Open, rename, archive, remove, validate, repair, reveal, or delete a catalog entry.",
+            "Budget settings",
+            "Rename budget metadata, back up, restore, validate, repair, or reveal data and backup folders.",
         ),
         crate::app::state::Dialog::RenameBudget => (
             "Rename budget",
-            "Renaming changes only the visible catalog/session name.",
+            "Renaming changes only database metadata; mnab.sqlite3 keeps its fixed filename.",
         ),
         crate::app::state::Dialog::ArchiveBudget => (
             "Archive budget",
@@ -137,8 +139,8 @@ fn show_budget_dialog(ctx: &egui::Context, state: &mut AppState) {
             "Opening was refused. Choose a backup or an explicit diagnostic/repair action; MNAB will not reset the database.",
         ),
         crate::app::state::Dialog::ConfirmDelete => (
-            "Delete budget",
-            "Type the exact current budget name to enable permanent managed-file deletion.",
+            "Delete unavailable",
+            "The fixed database lifecycle preserves data; use restore or repair for maintenance.",
         ),
         crate::app::state::Dialog::Reconcile(_)
         | crate::app::state::Dialog::Import(_)

@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const SETTINGS_VERSION: u32 = 2;
+pub const SETTINGS_VERSION: u32 = 3;
 pub const DEFAULT_PALETTE_SHORTCUT: &str = "Ctrl+P";
 pub const MAX_SAVED_FILTERS: usize = 50;
 pub const MAX_SEARCH_HISTORY: usize = 25;
@@ -160,7 +160,9 @@ impl Default for InboxThresholds {
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub version: u32,
-    pub last_opened_budget: Option<PathBuf>,
+    pub last_selected_account_id: Option<String>,
+    pub last_workspace: Option<String>,
+    pub collapsed_account_groups: Vec<String>,
     pub window: WindowBounds,
     pub inspector_visible: bool,
     pub register_columns: RegisterColumns,
@@ -179,7 +181,9 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             version: SETTINGS_VERSION,
-            last_opened_budget: None,
+            last_selected_account_id: None,
+            last_workspace: None,
+            collapsed_account_groups: Vec::new(),
             window: WindowBounds::default(),
             inspector_visible: true,
             register_columns: RegisterColumns::default(),
@@ -286,6 +290,10 @@ impl SettingsSession {
                 status: LoadStatus::UnsupportedFuture,
                 read_only: true,
             };
+        }
+        let mut parsed_value = parsed_value;
+        if let Some(object) = parsed_value.as_object_mut() {
+            object.remove("last_opened_budget");
         }
         match serde_json::from_value::<Settings>(parsed_value) {
             Ok(mut value) if value.version <= SETTINGS_VERSION => {
@@ -562,9 +570,11 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "collapsed_account_groups",
                 "display_density",
                 "inspector_visible",
-                "last_opened_budget",
+                "last_selected_account_id",
+                "last_workspace",
                 "register_columns",
                 "theme",
                 "version",
@@ -717,6 +727,30 @@ mod tests {
         assert_eq!(s.saved_filters.len(), 1);
         assert_eq!(s.saved_filters[0].name, "Valid");
     }
+    #[test]
+    fn legacy_last_opened_budget_is_ignored_for_compatibility() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("settings.json");
+        std::fs::write(
+            &p,
+            serde_json::to_vec_pretty(&json!({
+                "version": 2,
+                "last_opened_budget": "/tmp/old.sqlite3",
+                "window": WindowBounds::default(),
+                "inspector_visible": true,
+                "register_columns": RegisterColumns::default(),
+                "theme": "system",
+                "display_density": "normal"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let loaded = SettingsSession::load(&p);
+        assert_eq!(loaded.status(), LoadStatus::Supported);
+        assert_eq!(loaded.value().version, SETTINGS_VERSION);
+        assert!(loaded.value().last_selected_account_id.is_none());
+    }
+
     #[test]
     fn theme_density_round_trip_and_column_repair() {
         let d = tempdir().unwrap();

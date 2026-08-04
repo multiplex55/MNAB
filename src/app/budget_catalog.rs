@@ -1,7 +1,7 @@
-//! Discovery and lifecycle management for portable, managed budget databases.
+//! Lifecycle management for the fixed portable MNAB database.
 //!
-//! Paths in this module are capabilities: a path is not returned as managed until
-//! its canonical target has been proven to be a regular file below `budgets`.
+//! Active workflows target only `mnab-data/mnab.sqlite3`; legacy files under
+//! `mnab-data/budgets` are intentionally ignored and never converted.
 
 use std::{
     fs::{self, OpenOptions},
@@ -123,40 +123,27 @@ impl BudgetCatalog {
         }
     }
 
-    /// Refreshes filesystem facts without discarding missing recent entries.
+    /// Refreshes filesystem facts for the fixed database only.
     pub fn refresh(&mut self, paths: &PortablePaths) -> Result<(), CatalogError> {
-        let root = fs::canonicalize(&paths.budgets)?;
-        for entry in &mut self.entries {
-            entry.file_existence = if entry.database_path.is_file() {
-                FileExistence::Present
-            } else {
-                FileExistence::Missing
-            };
+        self.entries.clear();
+        let path = fixed_database(paths);
+        if !path.is_file() {
+            return Ok(());
         }
-        for item in fs::read_dir(&root)? {
-            let item = item?;
-            let lexical = item.path();
-            let Ok(path) = managed_file(&root, &lexical) else {
-                continue;
-            };
-            if self.entries.iter().any(|e| e.database_path == path) {
-                continue;
-            }
-            let Some(info) = inspect(&path)? else {
-                continue;
-            };
-            self.entries.push(BudgetCatalogEntry {
-                budget_id: info.id,
-                display_name: info.name,
-                database_path: path,
-                schema_version: info.version,
-                archive_state: ArchiveState::Active,
-                last_successful_open: None,
-                last_validation: None,
-                file_existence: FileExistence::Present,
-                recognition: DatabaseRecognition::Mnab,
-            });
-        }
+        let Some(info) = inspect(&path)? else {
+            return Ok(());
+        };
+        self.entries.push(BudgetCatalogEntry {
+            budget_id: info.id,
+            display_name: info.name,
+            database_path: fs::canonicalize(path)?,
+            schema_version: info.version,
+            archive_state: ArchiveState::Active,
+            last_successful_open: None,
+            last_validation: None,
+            file_existence: FileExistence::Present,
+            recognition: DatabaseRecognition::Mnab,
+        });
         Ok(())
     }
 
@@ -201,8 +188,8 @@ impl BudgetCatalog {
             return Err(CatalogError::EmptyName);
         }
         let entry = self.entry_mut(id)?;
-        let root = fs::canonicalize(&paths.budgets)?;
-        let path = managed_file(&root, &entry.database_path)?;
+        let path = fixed_database(paths);
+        let path = fs::canonicalize(&path).map_err(|_| CatalogError::UnmanagedPath)?;
         Connection::open(path)?.execute(
             "UPDATE budgets SET name=?1, modified_at=datetime('now') WHERE id=?2",
             (name, id.to_string()),
@@ -264,8 +251,9 @@ impl BudgetCatalog {
         thorough: bool,
         repaint: impl Fn() + Send + 'static,
     ) -> Result<PreparedBudget, CatalogError> {
-        let root = fs::canonicalize(&paths.budgets)?;
-        let path = managed_file(&root, selected)?; // 1: managed path
+        let _ = selected;
+        let path = fixed_database(paths);
+        let path = fs::canonicalize(&path).map_err(|_| CatalogError::UnmanagedPath)?; // 1: fixed path
         let info = inspect(&path)?
             .ok_or_else(|| CatalogError::NotMnab("header or schema not recognized".into()))?; // 2
         let validation = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?; // 3
@@ -321,13 +309,8 @@ impl BudgetCatalog {
         confirmation: &str,
     ) -> Result<DeletionResult, CatalogError> {
         self.confirm_name(id, confirmation)?;
-        let entry = self
-            .entries
-            .iter()
-            .find(|e| e.budget_id == id)
-            .expect("confirmed entry");
-        let root = fs::canonicalize(&paths.budgets)?;
-        let path = managed_file(&root, &entry.database_path)?;
+        let path = fixed_database(paths);
+        let path = fs::canonicalize(&path).map_err(|_| CatalogError::UnmanagedPath)?;
         let targets = [
             path.clone(),
             PathBuf::from(format!("{}-wal", path.display())),
@@ -358,9 +341,8 @@ impl BudgetCatalog {
             .iter()
             .find(|e| e.budget_id == id)
             .ok_or(CatalogError::NotFound)?;
-        let root = fs::canonicalize(&paths.budgets)?;
-        let path = managed_file(&root, &entry.database_path)?;
-        reveal_in_explorer(&path)?;
+        let _ = entry;
+        reveal_in_explorer(&paths.data)?;
         Ok(())
     }
 
@@ -376,8 +358,9 @@ impl BudgetCatalog {
             .iter()
             .find(|e| e.budget_id == id)
             .ok_or(CatalogError::NotFound)?;
-        let root = fs::canonicalize(&paths.budgets)?;
-        let path = managed_file(&root, &entry.database_path)?;
+        let _ = entry;
+        let path = fixed_database(paths);
+        let path = fs::canonicalize(&path).map_err(|_| CatalogError::UnmanagedPath)?;
         crate::storage::repair::repair(&path, request)
             .map_err(|error| CatalogError::NotMnab(format!("repair was not applied: {error}")))
     }
@@ -472,6 +455,52 @@ pub fn reveal_in_explorer(_path: &Path) -> std::io::Result<()> {
         std::io::ErrorKind::Unsupported,
         "Explorer reveal is only available on Windows",
     ))
+}
+
+#[must_use]
+pub fn fixed_database(paths: &PortablePaths) -> PathBuf {
+    paths.database.clone()
+}
+
+pub fn validate_fixed(
+    paths: &PortablePaths,
+    thorough: bool,
+) -> Result<Vec<diagnostics::Finding>, CatalogError> {
+    let path = fs::canonicalize(fixed_database(paths)).map_err(|_| CatalogError::UnmanagedPath)?;
+    let info = inspect(&path)?
+        .ok_or_else(|| CatalogError::NotMnab("header or schema not recognized".into()))?;
+    if info.version > LATEST_SCHEMA_VERSION {
+        return Err(CatalogError::FutureSchema {
+            found: info.version,
+            supported: LATEST_SCHEMA_VERSION,
+        });
+    }
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    diagnostics::all(&connection, thorough).map_err(CatalogError::Sqlite)
+}
+
+pub fn backup_fixed(
+    paths: &PortablePaths,
+    reason: crate::service::backup_service::BackupReason,
+) -> Result<
+    crate::service::backup_service::BackupArtifact,
+    crate::service::backup_service::BackupError,
+> {
+    let path = fixed_database(paths);
+    let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let info = inspect(&path)
+        .map_err(|e| crate::service::backup_service::BackupError::Validation(e.to_string()))?
+        .ok_or_else(|| {
+            crate::service::backup_service::BackupError::Validation(
+                "fixed database is not an MNAB database".into(),
+            )
+        })?;
+    crate::service::backup_service::BackupService::new(&paths.backups).create(
+        &connection,
+        &info.id.to_string(),
+        info.version,
+        reason,
+    )
 }
 
 pub struct PortableBudgetStorage<'a> {
@@ -580,23 +609,26 @@ pub fn create_managed(
     paths: &PortablePaths,
     request: CreateBudget,
 ) -> Result<Budget, CreateBudgetError> {
-    let mut storage = PortableBudgetStorage::new(&paths.budgets);
+    let mut request = request;
+    request.database_filename = "mnab.sqlite3".into();
+    let mut storage = PortableBudgetStorage::new(&paths.data);
     budget_service::create_budget(&mut storage, request)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::backup_service::BackupReason;
 
     fn paths() -> (tempfile::TempDir, PortablePaths) {
         let dir = tempfile::tempdir().unwrap();
         let paths = PortablePaths::from_executable(&dir.path().join("mnab.exe")).unwrap();
         (dir, paths)
     }
-    fn request(name: &str, file: &str) -> CreateBudget {
+    fn request(name: &str) -> CreateBudget {
         CreateBudget {
             name: name.into(),
-            database_filename: file.into(),
+            database_filename: "ignored.sqlite3".into(),
             initial_month: BudgetMonth::new(2026, 8).unwrap(),
             currency: "USD".into(),
             starter_content: true,
@@ -604,80 +636,79 @@ mod tests {
     }
 
     #[test]
-    fn creation_discovery_rename_archive_remove_and_missing_are_independent() {
+    fn fresh_lifecycle_creates_and_opens_only_fixed_database() {
         let (_dir, paths) = paths();
-        let budget = create_managed(&paths, request("Household", "independent.sqlite3")).unwrap();
+        let budget = create_managed(&paths, request("Household")).unwrap();
+        assert!(paths.database.is_file());
+        assert_eq!(paths.database.file_name().unwrap(), "mnab.sqlite3");
+        assert_eq!(fs::read_dir(&paths.budgets).unwrap().count(), 0);
         let mut catalog = BudgetCatalog::default();
         catalog.refresh(&paths).unwrap();
+        assert_eq!(catalog.entries().len(), 1);
         assert_eq!(catalog.entries()[0].budget_id, budget.id);
-        let original = catalog.entries()[0].database_path.clone();
-        catalog
-            .rename(&paths, budget.id, "Renamed display")
-            .unwrap();
-        assert_eq!(catalog.entries()[0].database_path, original);
-        catalog.set_archived(budget.id, true).unwrap();
-        assert!(catalog.recent().is_empty());
-        catalog.set_archived(budget.id, false).unwrap();
-        fs::remove_file(original).unwrap();
-        catalog.refresh(&paths).unwrap();
-        assert_eq!(catalog.entries()[0].file_existence, FileExistence::Missing);
-        assert!(catalog.remove_from_recents(budget.id));
+        assert_eq!(
+            catalog.entries()[0].database_path,
+            fs::canonicalize(&paths.database).unwrap()
+        );
     }
 
     #[test]
-    fn external_copy_is_collision_safe_and_does_not_modify_source() {
-        let (_external_dir, external_paths) = paths();
-        create_managed(&external_paths, request("Source", "source.sqlite3")).unwrap();
-        let source = external_paths.budgets.join("source.sqlite3");
-        let before = fs::read(&source).unwrap();
-        let (_managed_dir, managed) = paths();
-        let catalog = BudgetCatalog::default();
-        let first = catalog.import_external(&managed, &source).unwrap();
-        let second = catalog.import_external(&managed, &source).unwrap();
-        assert_ne!(first, second);
-        assert_eq!(fs::read(source).unwrap(), before);
-    }
-
-    #[test]
-    fn rejects_traversal_non_files_and_symlink_escape() {
-        let (dir, paths) = paths();
-        let root = fs::canonicalize(&paths.budgets).unwrap();
-        assert!(managed_file(&root, &paths.budgets.join("../settings.json")).is_err());
-        assert!(managed_file(&root, &paths.budgets).is_err());
-        #[cfg(unix)]
-        {
-            let outside = dir.path().join("outside");
-            fs::write(&outside, b"x").unwrap();
-            std::os::unix::fs::symlink(outside, paths.budgets.join("escape")).unwrap();
-            assert!(managed_file(&root, &paths.budgets.join("escape")).is_err());
-        }
-    }
-
-    #[test]
-    fn recent_order_and_exact_confirmation_and_sidecars() {
+    fn legacy_budget_directory_files_are_ignored_and_untouched() {
+        let (_legacy_dir, legacy_paths) = paths();
+        create_managed(&legacy_paths, request("Legacy")).unwrap();
+        let legacy_bytes = fs::read(&legacy_paths.database).unwrap();
         let (_dir, paths) = paths();
-        let old = create_managed(&paths, request("Old", "old.sqlite3")).unwrap();
-        let new = create_managed(&paths, request("New", "new.sqlite3")).unwrap();
+        let legacy = paths.budgets.join("legacy.sqlite3");
+        fs::write(&legacy, &legacy_bytes).unwrap();
+        let before = fs::metadata(&legacy).unwrap().modified().unwrap();
         let mut catalog = BudgetCatalog::default();
         catalog.refresh(&paths).unwrap();
-        catalog.entry_mut(old.id).unwrap().last_successful_open = Some(OffsetDateTime::UNIX_EPOCH);
-        catalog.entry_mut(new.id).unwrap().last_successful_open = Some(OffsetDateTime::now_utc());
-        assert_eq!(catalog.recent()[0].budget_id, new.id);
-        assert!(matches!(
-            catalog.delete(&paths, new.id, "new"),
-            Err(CatalogError::ConfirmationMismatch)
-        ));
-        let path = catalog
-            .entries()
-            .iter()
-            .find(|e| e.budget_id == new.id)
-            .unwrap()
-            .database_path
-            .clone();
-        fs::write(format!("{}-wal", path.display()), b"wal").unwrap();
-        fs::write(format!("{}-shm", path.display()), b"shm").unwrap();
-        let result = catalog.delete(&paths, new.id, "New").unwrap();
-        assert_eq!(result.removed.len(), 3);
-        assert!(result.failed.is_empty());
+        assert!(catalog.entries().is_empty());
+        assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
+        assert_eq!(fs::metadata(&legacy).unwrap().modified().unwrap(), before);
+        assert!(!paths.database.exists());
+    }
+
+    #[test]
+    fn renaming_budget_changes_metadata_not_fixed_filename() {
+        let (_dir, paths) = paths();
+        let budget = create_managed(&paths, request("Before")).unwrap();
+        let fixed = paths.database.clone();
+        let mut catalog = BudgetCatalog::default();
+        catalog.refresh(&paths).unwrap();
+        catalog.rename(&paths, budget.id, "After").unwrap();
+        assert!(fixed.is_file());
+        assert!(!paths.data.join("After.sqlite3").exists());
+        assert_eq!(
+            catalog.entries()[0].database_path,
+            fs::canonicalize(&fixed).unwrap()
+        );
+        let connection = Connection::open(&fixed).unwrap();
+        let name: String = connection
+            .query_row("SELECT name FROM budgets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "After");
+    }
+
+    #[test]
+    fn backup_validate_and_repair_target_fixed_database() {
+        let (_dir, paths) = paths();
+        create_managed(&paths, request("Maintained")).unwrap();
+        assert!(
+            validate_fixed(&paths, false)
+                .unwrap()
+                .iter()
+                .all(|finding| finding.severity != diagnostics::Severity::Error)
+        );
+        let backup = backup_fixed(&paths, BackupReason::Manual).unwrap();
+        assert!(backup.database.starts_with(&paths.backups));
+        assert_eq!(paths.database.file_name().unwrap(), "mnab.sqlite3");
+        let mut catalog = BudgetCatalog::default();
+        catalog.refresh(&paths).unwrap();
+        let id = catalog.entries()[0].budget_id;
+        let report = catalog
+            .repair(&paths, id, crate::storage::repair::RepairRequest::Reindex)
+            .unwrap();
+        assert_eq!(report.replacement, paths.database);
     }
 }

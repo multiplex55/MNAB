@@ -239,11 +239,11 @@ mod tests {
             },
         )
         .unwrap();
-        let path = paths.budgets.join("repair.sqlite3");
+        let path = paths.database.clone();
         repair(&path, RepairRequest::Reindex).unwrap();
         assert!(path.is_file());
         assert!(
-            std::fs::read_dir(&paths.budgets)
+            std::fs::read_dir(&paths.data)
                 .unwrap()
                 .flatten()
                 .any(|e| e.file_name().to_string_lossy().contains("pre-repair"))
