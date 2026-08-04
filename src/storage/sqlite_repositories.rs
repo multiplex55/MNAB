@@ -342,6 +342,41 @@ impl AuditRepository for SqliteRepositories<'_> {
         record_id: &str,
         operation: &str,
     ) -> Result<(), RepositoryError> {
-        self.transaction.execute("INSERT INTO audit_log(entity_type,entity_id,operation,changed_at) VALUES(?1,?2,?3,datetime('now'))",(entity,record_id,operation)).map(|_|()).map_err(repo)
+        let kind = if operation.starts_with("Create") || operation.starts_with("Save") {
+            "insert"
+        } else if operation.starts_with("Delete") {
+            "delete"
+        } else {
+            "update"
+        };
+        let correlation = operation
+            .rsplit_once("correlation=")
+            .map_or("unknown", |(_, value)| value);
+        self.transaction.execute("INSERT INTO change_log(budget_id,entity_table,entity_id,operation,changed_at,correlation_id) VALUES(NULL,?1,?2,?3,datetime('now'),?4)",(entity,record_id,kind,correlation)).map(|_|()).map_err(repo)
+    }
+}
+impl InboxRepository for SqliteRepositories<'_> {
+    fn toggle_failure_dismissal(&mut self, id: &str) -> Result<Option<bool>, RepositoryError> {
+        use rusqlite::OptionalExtension;
+        let before: Option<bool> = self
+            .transaction
+            .query_row(
+                "SELECT dismissed_at IS NOT NULL FROM operation_failures WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(repo)?;
+        if let Some(was_dismissed) = before {
+            self.transaction.execute(
+                "UPDATE operation_failures SET dismissed_at=CASE WHEN dismissed_at IS NULL THEN datetime('now') ELSE NULL END WHERE id=?1",
+                [id],
+            ).map_err(repo)?;
+            Ok(Some(was_dismissed))
+        } else {
+            // A projected failure may disappear between scheduling and execution. Treat that as
+            // an idempotent success rather than manufacturing a durable inbox row.
+            Ok(None)
+        }
     }
 }

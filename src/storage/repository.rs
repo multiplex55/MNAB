@@ -69,6 +69,10 @@ pub trait AuditRepository {
         operation: &str,
     ) -> Result<(), RepositoryError>;
 }
+pub trait InboxRepository {
+    /// Toggles the durable dismissal marker and returns whether the row was previously dismissed.
+    fn toggle_failure_dismissal(&mut self, id: &str) -> Result<Option<bool>, RepositoryError>;
+}
 
 pub trait Repositories:
     BudgetRepository
@@ -82,6 +86,7 @@ pub trait Repositories:
     + ImportRepository
     + ReconciliationRepository
     + AuditRepository
+    + InboxRepository
 {
 }
 impl<T> Repositories for T where
@@ -96,6 +101,7 @@ impl<T> Repositories for T where
         + ImportRepository
         + ReconciliationRepository
         + AuditRepository
+        + InboxRepository
 {
 }
 
@@ -127,6 +133,7 @@ pub struct InMemoryRepositories {
     pub imports: HashMap<crate::domain::ImportBatchId, ImportBatch>,
     pub reconciliations: HashMap<crate::domain::ReconciliationId, Reconciliation>,
     pub audit: Vec<(String, String, String)>,
+    pub failure_dismissals: HashMap<String, bool>,
 }
 impl BudgetRepository for InMemoryRepositories {
     fn create_budget(&mut self, v: &Budget) -> Result<(), RepositoryError> {
@@ -253,6 +260,13 @@ impl AuditRepository for InMemoryRepositories {
     fn append_audit(&mut self, e: &str, id: &str, op: &str) -> Result<(), RepositoryError> {
         self.audit.push((e.into(), id.into(), op.into()));
         Ok(())
+    }
+}
+impl InboxRepository for InMemoryRepositories {
+    fn toggle_failure_dismissal(&mut self, id: &str) -> Result<Option<bool>, RepositoryError> {
+        let before = self.failure_dismissals.get(id).copied().unwrap_or(false);
+        self.failure_dismissals.insert(id.to_owned(), !before);
+        Ok(Some(before))
     }
 }
 

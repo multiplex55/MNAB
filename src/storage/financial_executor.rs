@@ -245,6 +245,21 @@ fn apply<R: Repositories>(
                 id.to_string(),
             )
         }
+        FinancialCommand::Inbox(InboxCommand::Resolve {
+            item_id: crate::app::inbox::InboxItemId::FailedOperation(id),
+            action: InboxAction::Dismiss,
+        }) => {
+            r.toggle_failure_dismissal(id).map_err(repository)?;
+            (
+                "Dismiss operation failure",
+                vec![],
+                // Dismissal is implemented as a toggle, so replaying the same semantic command is
+                // a lossless inverse even if the projection disappeared before execution.
+                Some(UndoData::Command(c.clone())),
+                "operation_failure",
+                id.clone(),
+            )
+        }
         _ => return Err(safe("financial command is not supported")),
     };
     r.append_audit(entity, &id, &format!("{label}; correlation={correlation}"))
