@@ -5,13 +5,14 @@ use std::{
 };
 use thiserror::Error;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 5;
+pub const LATEST_SCHEMA_VERSION: i64 = 6;
 const INITIAL_SQL: &str = include_str!("migrations/0001_initial.sql");
 const RECONCILIATION_SQL: &str = include_str!("migrations/0002_reconciliation_history.sql");
 const CREDIT_CARD_SQL: &str = include_str!("migrations/0003_credit_card_payment_categories.sql");
 const PERSISTENCE_AND_IMPORTS_SQL: &str =
     include_str!("migrations/0004_persistence_and_imports.sql");
 const IMPORT_WORKFLOW_SQL: &str = include_str!("migrations/0005_import_workflow.sql");
+const INBOX_FAILURES_SQL: &str = include_str!("migrations/0006_inbox_failures.sql");
 
 struct ReleasedMigration {
     version: i64,
@@ -50,6 +51,12 @@ const RELEASED_MIGRATIONS: &[ReleasedMigration] = &[
         identifier: "0005_import_workflow",
         checksum: "0005-import-workflow-v1",
         sql: IMPORT_WORKFLOW_SQL,
+    },
+    ReleasedMigration {
+        version: 6,
+        identifier: "0006_inbox_failures",
+        checksum: "0006-inbox-failures-v1",
+        sql: INBOX_FAILURES_SQL,
     },
 ];
 

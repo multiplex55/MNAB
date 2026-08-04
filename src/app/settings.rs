@@ -15,6 +15,7 @@ pub const SETTINGS_VERSION: u32 = 1;
 pub const DEFAULT_PALETTE_SHORTCUT: &str = "Ctrl+P";
 const TEMP_PREFIX: &str = ".settings.json.tmp-";
 
+#[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WindowBounds {
@@ -76,13 +77,17 @@ impl Default for RegisterColumns {
 #[serde(default, deny_unknown_fields)]
 pub struct InboxThresholds {
     pub duplicate_window_days: u16,
-    pub upcoming_days: u16,
+    pub due_soon_days: u16,
+    pub uncleared_age_days: u16,
+    pub reconciliation_cadence_days: u16,
 }
 impl Default for InboxThresholds {
     fn default() -> Self {
         Self {
             duplicate_window_days: 7,
-            upcoming_days: 14,
+            due_soon_days: 7,
+            uncleared_age_days: 30,
+            reconciliation_cadence_days: 30,
         }
     }
 }

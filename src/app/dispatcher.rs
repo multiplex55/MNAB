@@ -67,6 +67,18 @@ pub fn submit_financial<S: CommandSubmitter>(
 pub fn invalidations_for(command: &FinancialCommand) -> ViewInvalidations {
     use ViewInvalidation as V;
     match command {
+        FinancialCommand::ResolveInbox { .. } => [
+            V::Inbox,
+            V::Accounts,
+            V::AllAccountRegisters,
+            V::Reports,
+            V::Targets,
+            V::Search,
+            V::LookupData,
+            V::Inspectors,
+        ]
+        .into_iter()
+        .collect(),
         FinancialCommand::Assign { month, .. } => [
             V::BudgetMonth(*month),
             V::BudgetRolloverFrom(*month),
