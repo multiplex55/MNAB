@@ -710,6 +710,7 @@ mod tests {
         let report = catalog
             .repair(&paths, id, crate::storage::repair::RepairRequest::Reindex)
             .unwrap();
-        assert_eq!(report.replacement, paths.database);
+        let fixed_database = fs::canonicalize(&paths.database).unwrap();
+        assert_eq!(report.replacement, fixed_database);
     }
 }
