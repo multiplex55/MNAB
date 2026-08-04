@@ -14,6 +14,7 @@ pub struct CommandContext {
     pub budget_open: bool,
     pub account_register: bool,
     pub budget_workspace: bool,
+    pub mutations_disabled: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,8 +34,12 @@ pub enum ExecuteError {
     NotFound,
 }
 
-fn available(required: RequiredContext, context: CommandContext) -> (bool, Option<String>) {
-    let explanation = match required {
+fn available(
+    required: RequiredContext,
+    context: CommandContext,
+    command: AppCommand,
+) -> (bool, Option<String>) {
+    let mut explanation = match required {
         RequiredContext::Always => None,
         RequiredContext::BudgetOpen if !context.budget_open => Some("Open a budget first"),
         RequiredContext::AccountRegister if !context.account_register => {
@@ -45,6 +50,9 @@ fn available(required: RequiredContext, context: CommandContext) -> (bool, Optio
         }
         _ => None,
     };
+    if explanation.is_none() && context.mutations_disabled && mutation_command(command) {
+        explanation = Some("Mutations are disabled while the budget is in recovery mode");
+    }
     (explanation.is_none(), explanation.map(str::to_owned))
 }
 
@@ -108,7 +116,7 @@ pub fn commands_for(context: CommandContext) -> Vec<CommandDescriptor> {
     ]
     .into_iter()
     .map(|(command, title, keys, required_context)| {
-        let (enabled, disabled_explanation) = available(required_context, context);
+        let (enabled, disabled_explanation) = available(required_context, context, command);
         CommandDescriptor {
             command,
             title: title.into(),
@@ -125,11 +133,26 @@ pub fn commands_for(context: CommandContext) -> Vec<CommandDescriptor> {
 /// Descriptors for an application with an open budget. Prefer [`commands_for`]
 /// when the current workspace is available.
 #[must_use]
+fn mutation_command(command: AppCommand) -> bool {
+    matches!(
+        command,
+        AppCommand::ContextualNew
+            | AppCommand::AddAccount
+            | AppCommand::Import
+            | AppCommand::Undo
+            | AppCommand::Redo
+            | AppCommand::Commit
+            | AppCommand::Delete
+            | AppCommand::Rename
+    )
+}
+
 pub fn commands() -> Vec<CommandDescriptor> {
     commands_for(CommandContext {
         budget_open: true,
         account_register: false,
         budget_workspace: true,
+        mutations_disabled: false,
     })
 }
 #[must_use]
@@ -290,11 +313,36 @@ mod command_tests {
     }
 
     #[test]
+    fn read_only_mode_disables_mutations_but_keeps_safe_reads_available() {
+        let items = commands_for(CommandContext {
+            budget_open: true,
+            account_register: true,
+            budget_workspace: true,
+            mutations_disabled: true,
+        });
+        let new_transaction = items
+            .iter()
+            .find(|item| item.command == AppCommand::ContextualNew)
+            .unwrap();
+        assert!(!new_transaction.enabled);
+        assert_eq!(
+            new_transaction.disabled_explanation.as_deref(),
+            Some("Mutations are disabled while the budget is in recovery mode")
+        );
+        let reports = items
+            .iter()
+            .find(|item| item.command == AppCommand::NavigateReports)
+            .unwrap();
+        assert!(reports.enabled);
+    }
+
+    #[test]
     fn fuzzy_prefers_title_prefix() {
         let items = commands_for(CommandContext {
             budget_open: true,
             account_register: true,
             budget_workspace: true,
+            mutations_disabled: false,
         });
         assert_eq!(
             fuzzy("open rep", &items)[0].command,

@@ -24,6 +24,53 @@ pub enum RepairRequest {
 pub struct RepairReport {
     pub replacement: PathBuf,
     pub findings: Vec<Finding>,
+    pub backup: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedRepairPlan {
+    pub selected_budget_path: PathBuf,
+    pub request: RepairRequest,
+    pub preview_findings: Vec<Finding>,
+    pub proposed_actions: Vec<&'static str>,
+}
+
+impl ManagedRepairPlan {
+    pub fn for_explicit_selection(
+        path: &Path,
+        request: RepairRequest,
+    ) -> Result<Self, RepairError> {
+        if !path.is_file() {
+            return Err(RepairError::ExplicitSelectionRequired);
+        }
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let preview_findings = diagnostics::all(&connection, true)?;
+        Ok(Self {
+            selected_budget_path: path.to_owned(),
+            request,
+            preview_findings,
+            proposed_actions: match request {
+                RepairRequest::WalRecoveryAndCheckpoint => {
+                    vec!["Recover WAL contents", "Checkpoint the database"]
+                }
+                RepairRequest::Reindex => vec!["Rebuild SQLite indexes"],
+                RepairRequest::Reconstruct => {
+                    vec!["Copy reachable SQLite pages into a replacement database"]
+                }
+                RepairRequest::CompleteMigrations => vec!["Run missing immutable migrations"],
+            },
+        })
+    }
+}
+
+pub fn repair_managed(
+    plan: &ManagedRepairPlan,
+    confirmed_path: &Path,
+) -> Result<RepairReport, RepairError> {
+    if plan.selected_budget_path != confirmed_path {
+        return Err(RepairError::ExplicitSelectionRequired);
+    }
+    repair(&plan.selected_budget_path, plan.request)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +83,10 @@ pub enum RepairError {
     Migration(#[from] migration::MigrationError),
     #[error("repaired copy failed complete diagnostics")]
     Validation { findings: Vec<Finding> },
+    #[error("repair requires an explicitly selected managed budget")]
+    ExplicitSelectionRequired,
+    #[error("mandatory repair backup failed validation")]
+    BackupValidation,
 }
 
 /// Repairs a private copy, validates it completely, then uses an original-preserving
@@ -53,6 +104,7 @@ pub fn repair(path: &Path, request: RepairRequest) -> Result<RepairReport, Repai
         Uuid::new_v4()
     ));
     let result = (|| {
+        let backup = verified_safety_backup(path)?;
         reconstruct_copy(path, &candidate, request)?;
         let validation = Connection::open_with_flags(&candidate, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let findings = diagnostics::all(&validation, true)?;
@@ -86,12 +138,35 @@ pub fn repair(path: &Path, request: RepairRequest) -> Result<RepairReport, Repai
         Ok(RepairReport {
             replacement: path.to_owned(),
             findings,
+            backup,
         })
     })();
     if result.is_err() {
         let _ = fs::remove_file(&candidate);
     }
     result
+}
+
+fn verified_safety_backup(path: &Path) -> Result<PathBuf, RepairError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("database has no parent"))?;
+    let backup = parent.join(format!(
+        "{}.mandatory-pre-repair-{}",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("budget.sqlite3"),
+        Uuid::new_v4()
+    ));
+    fs::copy(path, &backup)?;
+    let validation = Connection::open_with_flags(&backup, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    if diagnostics::all(&validation, true)?
+        .iter()
+        .any(|finding| finding.severity == Severity::Error)
+    {
+        return Err(RepairError::BackupValidation);
+    }
+    Ok(backup)
 }
 
 fn reconstruct_copy(
