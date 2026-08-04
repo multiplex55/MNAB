@@ -993,3 +993,103 @@ mod report_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod large_fixture_tests {
+    use super::*;
+
+    fn fixture(row_count: usize) -> (tempfile::TempDir, Connection, BudgetId, AccountId) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut connection =
+            crate::storage::connection::open_primary(&directory.path().join("large.sqlite3"))
+                .unwrap();
+        let budget = BudgetId::new();
+        let account = AccountId::new();
+        connection.execute("INSERT INTO budgets(id,name,created_at,modified_at,archived) VALUES(?1,'Large',datetime('now'),datetime('now'),0)",[budget.to_string()]).unwrap();
+        connection.execute("INSERT INTO accounts(id,budget_id,name,account_type,sort_order,created_at,modified_at) VALUES(?1,?2,'Checking','checking',0,datetime('now'),datetime('now'))",(account.to_string(),budget.to_string())).unwrap();
+        let transaction = connection.transaction().unwrap();
+        {
+            let mut insert = transaction.prepare("INSERT INTO transactions(id,budget_id,account_id,transaction_date,amount,cleared_state,approval_state,created_at,modified_at) VALUES(?1,?2,?3,?4,1,'uncleared','approved',datetime('now'),datetime('now'))").unwrap();
+            for index in 0..row_count {
+                // Repeated dates exercise the id tie-breaker as well as date progression.
+                let day = index % 28 + 1;
+                let month = index / 28 % 12 + 1;
+                insert
+                    .execute((
+                        crate::domain::TransactionId::new().to_string(),
+                        budget.to_string(),
+                        account.to_string(),
+                        format!("2026-{month:02}-{day:02}"),
+                    ))
+                    .unwrap();
+            }
+        }
+        transaction.commit().unwrap();
+        (directory, connection, budget, account)
+    }
+
+    #[test]
+    fn large_register_pages_are_bounded_and_cursor_progression_is_stable() {
+        let (_directory, connection, budget, account) = fixture(5_000);
+        let store = QueryStore::new(&connection);
+        let first = store
+            .register_page(
+                RegisterScope::AllAccounts(budget),
+                &RegisterFilter::default(),
+                None,
+                usize::MAX,
+            )
+            .unwrap();
+        assert_eq!(first.rows.len(), MAX_REGISTER_PAGE_SIZE);
+        let cursor = first.next_cursor.as_ref().unwrap();
+        let second = store
+            .register_page(
+                RegisterScope::Account(account),
+                &RegisterFilter::default(),
+                Some(cursor),
+                MAX_REGISTER_PAGE_SIZE,
+            )
+            .unwrap();
+        assert_eq!(second.rows.len(), MAX_REGISTER_PAGE_SIZE);
+        assert!(second.rows.iter().all(|row| {
+            (row.date.as_str(), row.transaction_id.as_str())
+                < (
+                    cursor.transaction_date.as_str(),
+                    cursor.transaction_id.as_str(),
+                )
+        }));
+        assert!(first.rows.iter().all(|row| {
+            !second
+                .rows
+                .iter()
+                .any(|next| next.transaction_id == row.transaction_id)
+        }));
+    }
+
+    #[test]
+    fn large_register_plan_uses_the_forward_migration_index() {
+        let (_directory, connection, budget, _account) = fixture(1_000);
+        let mut statement = connection.prepare(
+            "EXPLAIN QUERY PLAN SELECT id FROM transactions WHERE budget_id=?1 AND archived=0 AND (transaction_date<?2 OR (transaction_date=?2 AND id<?3)) ORDER BY transaction_date DESC,id DESC LIMIT 201",
+        ).unwrap();
+        let plan = statement
+            .query_map(
+                (
+                    budget.to_string(),
+                    "2026-12-31",
+                    "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                ),
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        // Assert only the required access path, not SQLite's complete/version-specific plan.
+        assert!(
+            plan.contains("idx_transactions_budget_register_page"),
+            "{plan}"
+        );
+        assert!(!plan.contains("SCAN transactions"), "{plan}");
+    }
+}

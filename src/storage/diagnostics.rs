@@ -21,6 +21,14 @@ pub struct Finding {
     pub remediation: String,
 }
 
+/// Quick is suitable for a familiar, clean open. Full substitutes SQLite's
+/// exhaustive integrity check and is required after an unclean shutdown or repair.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticSuite {
+    Quick,
+    Full,
+}
+
 pub fn quick_check(connection: &Connection) -> Result<Vec<Finding>, rusqlite::Error> {
     pragma_text_check(connection, "quick_check")
 }
@@ -30,7 +38,23 @@ pub fn integrity_check(connection: &Connection) -> Result<Vec<Finding>, rusqlite
 }
 
 pub fn all(connection: &Connection, thorough: bool) -> Result<Vec<Finding>, rusqlite::Error> {
-    let mut findings = if thorough {
+    run(
+        connection,
+        if thorough {
+            DiagnosticSuite::Full
+        } else {
+            DiagnosticSuite::Quick
+        },
+    )
+}
+
+/// Runs the named suite. Both suites include relational and financial checks;
+/// only the underlying SQLite page-level check differs.
+pub fn run(
+    connection: &Connection,
+    suite: DiagnosticSuite,
+) -> Result<Vec<Finding>, rusqlite::Error> {
+    let mut findings = if suite == DiagnosticSuite::Full {
         integrity_check(connection)?
     } else {
         quick_check(connection)?
