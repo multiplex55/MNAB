@@ -110,7 +110,7 @@ pub enum TypedResult {
     ImportStaged(crate::app::view_model::CommandOutcomeView),
     ImportApplied(crate::app::view_model::CommandOutcomeView),
     Diagnostics(crate::app::view_model::DiagnosticsView),
-    OccurrencesGenerated(crate::app::view_model::OccurrencesView),
+    Occurrences(crate::app::view_model::OccurrencesView),
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SafeUserError {
@@ -488,7 +488,7 @@ fn execute_operation(
             .map_err(|e| WorkerError::Repository(e.to_string())),
         WorkerOperation::Occurrences(operation) => {
             crate::storage::mapping::occurrences(c, operation.through, generation)
-                .map(TypedResult::OccurrencesGenerated)
+                .map(TypedResult::Occurrences)
                 .map_err(|e| WorkerError::Repository(e.to_string()))
         }
         WorkerOperation::Financial(FinancialOperation::Command(envelope)) => {

@@ -7,7 +7,11 @@ use time::OffsetDateTime;
 /// Lifecycle state. Invalidity is retained rather than deleting historical input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ReconciliationState {
+    NotReconciling,
+    EnteringStatement,
     Active,
+    ReviewingAdjustment,
+    Completing,
     Completed,
     PotentiallyInvalid,
 }

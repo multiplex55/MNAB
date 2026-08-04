@@ -272,7 +272,7 @@ impl ScheduledRepository for SqliteRepositories<'_> {
             Recurrence::Yearly => ("yearly", None),
             Recurrence::CustomDays(n) => ("custom_days", Some(n)),
         };
-        self.transaction.execute("INSERT INTO scheduled_transactions(id,budget_id,account_id,payee_id,category_id,start_date,recurrence,custom_interval_days,end_date,amount,sort_order,active) SELECT ?1,a.budget_id,?2,?3,?4,?5,?6,?7,?8,?9,0,?10 FROM accounts a WHERE a.id=?2 ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,payee_id=excluded.payee_id,category_id=excluded.category_id,start_date=excluded.start_date,recurrence=excluded.recurrence,custom_interval_days=excluded.custom_interval_days,end_date=excluded.end_date,amount=excluded.amount,active=excluded.active", (v.id.to_string(), v.account_id.to_string(), v.payee_id.map(|x| x.to_string()), v.category_id.map(|x| x.to_string()), v.start_date.to_string(), recurrence, interval, v.end_date.map(|x| x.to_string()), v.amount.minor_units(), v.active)).map(|_| ()).map_err(repo)
+        self.transaction.execute("INSERT INTO scheduled_transactions(id,budget_id,account_id,payee_id,category_id,start_date,recurrence,custom_interval_days,end_date,amount,sort_order,active,version) SELECT ?1,a.budget_id,?2,?3,?4,?5,?6,?7,?8,?9,0,?10,?11 FROM accounts a WHERE a.id=?2 ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,payee_id=excluded.payee_id,category_id=excluded.category_id,start_date=excluded.start_date,recurrence=excluded.recurrence,custom_interval_days=excluded.custom_interval_days,end_date=excluded.end_date,amount=excluded.amount,active=excluded.active,version=excluded.version", (v.id.to_string(), v.account_id.to_string(), v.payee_id.map(|x| x.to_string()), v.category_id.map(|x| x.to_string()), v.start_date.to_string(), recurrence, interval, v.end_date.map(|x| x.to_string()), v.amount.minor_units(), v.active, v.version)).map(|_| ()).map_err(repo)
     }
     fn delete_scheduled(&mut self, id: ScheduledTransactionId) -> Result<(), RepositoryError> {
         self.transaction
@@ -287,7 +287,11 @@ impl ScheduledRepository for SqliteRepositories<'_> {
 impl ReconciliationRepository for SqliteRepositories<'_> {
     fn put_reconciliation(&mut self, v: &Reconciliation) -> Result<(), RepositoryError> {
         let state = match v.state {
+            ReconciliationState::NotReconciling => "not_reconciling",
+            ReconciliationState::EnteringStatement => "entering_statement",
             ReconciliationState::Active => "active",
+            ReconciliationState::ReviewingAdjustment => "reviewing_adjustment",
+            ReconciliationState::Completing => "completing",
             ReconciliationState::Completed => "completed",
             ReconciliationState::PotentiallyInvalid => "potentially_invalid",
         };

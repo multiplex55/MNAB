@@ -21,6 +21,8 @@ pub enum Recurrence {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ScheduledTransaction {
     pub id: ScheduledTransactionId,
+    /// Incremented by edits that change generated occurrence identity.
+    pub version: u32,
     pub account_id: AccountId,
     pub start_date: Date,
     pub amount: Money,
@@ -40,9 +42,41 @@ pub enum OccurrenceDisposition {
     Entered(TransactionId),
 }
 
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct OccurrenceIdentity(pub String);
+
+impl OccurrenceIdentity {
+    #[must_use]
+    pub fn scheduled(schedule_id: ScheduledTransactionId, date: Date, version: u32) -> Self {
+        Self(format!(
+            "schedule:{schedule_id}:date:{date}:version:{version}"
+        ))
+    }
+    #[must_use]
+    pub fn modified(
+        schedule_id: ScheduledTransactionId,
+        original_date: Date,
+        date: Date,
+        version: u32,
+    ) -> Self {
+        Self(format!(
+            "schedule:{schedule_id}:original:{original_date}:date:{date}:version:{version}:modified"
+        ))
+    }
+    #[must_use]
+    pub fn occurrence_id(&self) -> ScheduledOccurrenceId {
+        ScheduledOccurrenceId::from_uuid(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            self.0.as_bytes(),
+        ))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ScheduledOccurrence {
     pub id: ScheduledOccurrenceId,
+    /// Stable uniqueness key: schedule/date/version unless explicitly modified.
+    pub identity: OccurrenceIdentity,
     pub schedule_id: ScheduledTransactionId,
     pub sequence: u32,
     pub date: Date,
@@ -62,6 +96,8 @@ pub enum ScheduleError {
     EndBeforeStart,
     #[error("date calculation is outside the supported range")]
     DateOutOfRange,
+    #[error("duplicate generated occurrence identity")]
+    DuplicateOccurrenceIdentity,
     #[error("look-ahead window cannot be negative")]
     InvalidLookAhead,
     #[error("occurrence was not found or is no longer pending")]
@@ -84,6 +120,7 @@ impl ScheduledTransaction {
         }
         Ok(Self {
             id: ScheduledTransactionId::new(),
+            version: 1,
             account_id,
             start_date,
             amount,
@@ -183,9 +220,17 @@ impl OccurrenceStore {
                 continue;
             }
             let key = (schedule.id, sequence);
+            let identity = OccurrenceIdentity::scheduled(schedule.id, date, schedule.version);
+            if self.values.values().any(|existing| {
+                existing.identity == identity && existing.schedule_id == schedule.id
+            }) && !self.values.contains_key(&key)
+            {
+                return Err(ScheduleError::DuplicateOccurrenceIdentity);
+            }
             if let std::collections::btree_map::Entry::Vacant(slot) = self.values.entry(key) {
                 let value = ScheduledOccurrence {
-                    id: ScheduledOccurrenceId::new(),
+                    id: identity.occurrence_id(),
+                    identity,
                     schedule_id: schedule.id,
                     sequence,
                     date,
@@ -240,6 +285,7 @@ impl OccurrenceStore {
         amount: Money,
     ) -> Result<(), ScheduleError> {
         let v = self.pending_mut(id)?;
+        v.identity = OccurrenceIdentity::modified(v.schedule_id, v.date, date, v.sequence);
         v.date = date;
         v.amount = amount;
         Ok(())
@@ -257,6 +303,7 @@ impl OccurrenceStore {
         if end_date.is_some_and(|d| d < schedule.start_date) {
             return Err(ScheduleError::EndBeforeStart);
         }
+        schedule.version = schedule.version.saturating_add(1);
         schedule.amount = amount;
         schedule.recurrence = recurrence;
         schedule.end_date = end_date;
