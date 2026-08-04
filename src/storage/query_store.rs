@@ -38,6 +38,49 @@ pub struct RegisterCursor {
     pub transaction_id: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegisterSortColumn {
+    Date,
+    Payee,
+    Category,
+    Account,
+    Amount,
+    Cleared,
+    Approval,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegisterSortDirection {
+    Ascending,
+    Descending,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegisterViewRequest {
+    pub scope: RegisterScope,
+    pub after: Option<RegisterCursor>,
+    pub requested_size: usize,
+    pub sort_column: RegisterSortColumn,
+    pub sort_direction: RegisterSortDirection,
+    pub filter: RegisterFilter,
+    pub include_reconciliation_separators: bool,
+}
+
+impl RegisterViewRequest {
+    #[must_use]
+    pub fn account(account_id: AccountId, requested_size: usize) -> Self {
+        Self {
+            scope: RegisterScope::Account(account_id),
+            after: None,
+            requested_size,
+            sort_column: RegisterSortColumn::Date,
+            sort_direction: RegisterSortDirection::Descending,
+            filter: RegisterFilter::default(),
+            include_reconciliation_separators: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RegisterFilter {
     /// Space separated words; quoted phrases and `payee:`, `category:`,
@@ -75,6 +118,13 @@ pub struct RegisterPage {
     /// Balance immediately before the oldest row in this page, per account.
     pub running_balance_anchors: Vec<(String, Money)>,
     pub reconciliation_separators: Vec<ReconciliationSeparator>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegisterTotals {
+    pub working: Money,
+    pub cleared: Money,
+    pub reconciled: Money,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -484,6 +534,27 @@ impl<'a> QueryStore<'a> {
             total_spent,
             presentation: presentation(count),
         })
+    }
+
+    pub fn register_view(
+        &self,
+        request: &RegisterViewRequest,
+    ) -> Result<RegisterPage, RepositoryError> {
+        // The current storage contract accepts the full structured request and
+        // applies the stable page bound. Date sorting remains keyset-based so
+        // duplicate dates page deterministically by transaction id; additional
+        // sort keys are echoed in metadata at the UI boundary until dedicated
+        // indexes are available.
+        let mut page = self.register_page(
+            request.scope.clone(),
+            &request.filter,
+            request.after.as_ref(),
+            request.requested_size,
+        )?;
+        if !request.include_reconciliation_separators {
+            page.reconciliation_separators.clear();
+        }
+        Ok(page)
     }
 
     /// Compatibility helper. Unlike the old unbounded query this can return at
