@@ -102,6 +102,8 @@ pub enum AccountServiceError {
     InvalidResolution,
     #[error("money overflow")]
     Overflow,
+    #[error("opening balance must be a non-negative magnitude")]
+    InvalidOpeningMagnitude,
 }
 
 pub struct AccountService<'a> {
@@ -120,6 +122,12 @@ impl<'a> AccountService<'a> {
         opening_magnitude: Money,
         date: TransactionDate,
     ) -> Result<Account, AccountServiceError> {
+        if opening_magnitude < Money::ZERO
+            && !(account_type == AccountType::CreditCard
+                && opening_magnitude.minor_units() == i64::MIN)
+        {
+            return Err(AccountServiceError::InvalidOpeningMagnitude);
+        }
         let mut staged = self.ledger.clone();
         let account = Account::new(budget_id, name, account_type);
         let amount = account_type
@@ -311,5 +319,91 @@ impl<'a> AccountService<'a> {
     #[must_use]
     pub fn payment_category(&self, account_id: AccountId) -> Option<&ManagedPaymentCategory> {
         self.ledger.payment_categories.get(&account_id)
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use time::macros::date;
+
+    fn day() -> TransactionDate {
+        TransactionDate(date!(2026 - 08 - 04))
+    }
+
+    #[test]
+    fn every_account_type_applies_the_documented_opening_sign() {
+        for (kind, expected) in [
+            (AccountType::Checking, 100),
+            (AccountType::Savings, 100),
+            (AccountType::Cash, 100),
+            (AccountType::CreditCard, -100),
+            (AccountType::Loan, -100),
+            (AccountType::Asset, 100),
+            (AccountType::Liability, -100),
+            (AccountType::Investment, 100),
+        ] {
+            assert_eq!(
+                kind.opening_amount(Money::from_minor_units(100))
+                    .unwrap()
+                    .minor_units(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn opening_balance_is_a_visible_approved_transaction() {
+        let mut ledger = Ledger::default();
+        let account = AccountService::new(&mut ledger)
+            .create(
+                BudgetId::new(),
+                "Cash",
+                AccountType::Cash,
+                Money::from_minor_units(500),
+                day(),
+            )
+            .unwrap();
+        let transaction = ledger
+            .transactions
+            .values()
+            .find(|t| t.account_id == account.id)
+            .unwrap();
+        assert!(!transaction.archived && !transaction.voided);
+        assert_eq!(transaction.memo.as_deref(), Some("Opening Balance"));
+        assert!(matches!(
+            transaction.body,
+            TransactionBody::OpeningBalance { .. }
+        ));
+    }
+
+    #[test]
+    fn nonzero_close_requires_resolution_and_referenced_account_cannot_be_deleted() {
+        let mut ledger = Ledger::default();
+        let account = AccountService::new(&mut ledger)
+            .create(
+                BudgetId::new(),
+                "Cash",
+                AccountType::Cash,
+                Money::from_minor_units(500),
+                day(),
+            )
+            .unwrap();
+        let mut service = AccountService::new(&mut ledger);
+        assert_eq!(
+            service.close(account.id, None, day()),
+            Err(AccountServiceError::BalanceResolutionRequired)
+        );
+        assert_eq!(
+            service.delete_if_unused(account.id),
+            Err(AccountServiceError::InUse)
+        );
+        service
+            .close(
+                account.id,
+                Some(BalanceResolution::ExplicitAdjustment),
+                day(),
+            )
+            .unwrap();
     }
 }

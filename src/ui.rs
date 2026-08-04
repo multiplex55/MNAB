@@ -6,3 +6,4 @@ pub mod keyboard;
 pub mod shell;
 pub mod sidebar;
 pub mod widgets;
+pub mod workspaces;

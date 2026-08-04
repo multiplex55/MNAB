@@ -1,4 +1,5 @@
 //! Persistence-free account register state; commands are committed by services.
+use crate::app::view_model::RegisterPageView;
 use crate::domain::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,6 +41,61 @@ pub enum EditField {
     Category,
     Memo,
     Amount,
+}
+
+/// Semantic register intent. Widgets never mutate domain or persistence objects.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RegisterAction {
+    Select(TransactionId),
+    BeginCreate {
+        account_id: AccountId,
+    },
+    CommitCreate {
+        account_id: AccountId,
+        draft: TransactionDraft,
+    },
+    BeginEdit(TransactionId),
+    Delete(TransactionId),
+}
+
+/// Render an immutable query snapshot and emit only stable-ID actions.
+pub fn show(ui: &mut egui::Ui, page: &RegisterPageView, actions: &mut Vec<RegisterAction>) {
+    if ui.button("New transaction").clicked() {
+        actions.push(RegisterAction::BeginCreate {
+            account_id: page.account_id,
+        });
+    }
+    egui::Grid::new(("register", page.account_id))
+        .striped(true)
+        .show(ui, |ui| {
+            for heading in [
+                "Date", "Payee", "Category", "Memo", "Outflow", "Inflow", "Balance",
+            ] {
+                ui.strong(heading);
+            }
+            ui.end_row();
+            for row in &page.rows {
+                let response = ui.selectable_label(false, row.date.to_string());
+                if response.clicked() {
+                    actions.push(RegisterAction::Select(row.transaction_id));
+                }
+                ui.label(&row.payee);
+                ui.label(&row.category);
+                ui.label(row.memo.as_deref().unwrap_or_default());
+                ui.label(if row.amount_cents < 0 {
+                    (-row.amount_cents).to_string()
+                } else {
+                    String::new()
+                });
+                ui.label(if row.amount_cents >= 0 {
+                    row.amount_cents.to_string()
+                } else {
+                    String::new()
+                });
+                ui.label(row.running_balance_cents.to_string());
+                ui.end_row();
+            }
+        });
 }
 
 /// Non-transaction rows retained in register ordering for historical inspection.

@@ -1,6 +1,4 @@
-use crate::app::{
-    command::AppCommand, dispatcher::ActionCollector, navigation::Workspace, state::AppState,
-};
+use crate::app::{dispatcher::ActionCollector, navigation::Workspace, state::AppState};
 pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionCollector) {
     let modal = state.dialog.is_some();
     let editor = ctx.memory(|m| m.focused().is_some_and(|id| id == state.search_id));
@@ -44,31 +42,12 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
             .show(ctx, |ui| super::inspector::show(ui, state, actions));
         state.inspector_width = right.response.rect.width();
     }
-    egui::CentralPanel::default().show(ctx, |ui| {
-        match state.navigation.workspace {
-            Workspace::Budget => ui.heading(format!(
-                "Budget · {}-{:02}",
-                state.selected_month.year(),
-                state.selected_month.month()
-            )),
-            Workspace::Reports => ui.heading("Reports"),
-            Workspace::AllAccounts => ui.heading("All Accounts"),
-            Workspace::Account(_) => ui.heading("Account Transactions"),
-        };
-        if state.active_budget.is_none() {
-            ui.label("Open or create a budget to begin.");
-            if ui.button("Create budget").clicked() {
-                actions.push(AppCommand::CreateBudget);
-            }
-        } else if state.accounts.is_empty() {
-            ui.label("No rows yet. Use the actions below from the keyboard or mouse.");
-            if ui.button("Add account").clicked() {
-                actions.push(AppCommand::AddAccount);
-            }
-            if ui.button("Import transactions").clicked() {
-                actions.push(AppCommand::Import);
-            }
-        }
+    egui::CentralPanel::default().show(ctx, |ui| match state.navigation.workspace {
+        Workspace::Budget => super::workspaces::budget::show(ui, state, actions),
+        Workspace::Reports => super::workspaces::reports::show(ui, state, actions),
+        Workspace::AllAccounts => super::workspaces::all_accounts::show(ui, state, actions),
+        Workspace::Inbox => super::workspaces::inbox::show(ui, state, actions),
+        Workspace::Account(id) => super::workspaces::register::show(ui, state, id, actions),
     });
 }
 

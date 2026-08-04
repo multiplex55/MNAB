@@ -6,6 +6,7 @@ pub enum Workspace {
     Budget,
     Reports,
     AllAccounts,
+    Inbox,
     Account(AccountId),
 }
 
