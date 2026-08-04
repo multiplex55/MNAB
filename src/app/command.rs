@@ -426,3 +426,204 @@ mod tests {
         assert_eq!(h.redo_len(), 0);
     }
 }
+
+/// High-level workspace used by the centralized command availability evaluator.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CommandWorkspace {
+    #[default]
+    None,
+    Budget,
+    Reports,
+    AllAccounts,
+    Inbox,
+    AccountRegister,
+}
+
+/// Snapshot of UI and lifecycle state needed to evaluate semantic commands.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CommandAvailabilityContext {
+    pub budget_open: bool,
+    pub workspace: CommandWorkspace,
+    pub has_selection: bool,
+    pub editing: bool,
+    pub dialog_open: bool,
+    pub text_editor_owns_shortcuts: bool,
+    pub lifecycle_busy: bool,
+    pub read_only: bool,
+    pub operation_locked: bool,
+    pub can_undo: bool,
+    pub can_redo: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandAvailability {
+    pub command: AppCommand,
+    pub enabled: bool,
+    pub disabled_reason: Option<&'static str>,
+    pub exposed_in_palette: bool,
+}
+
+impl CommandAvailability {
+    const fn enabled(command: AppCommand) -> Self {
+        Self {
+            command,
+            enabled: true,
+            disabled_reason: None,
+            exposed_in_palette: true,
+        }
+    }
+    const fn disabled(command: AppCommand, reason: &'static str) -> Self {
+        Self {
+            command,
+            enabled: false,
+            disabled_reason: Some(reason),
+            exposed_in_palette: true,
+        }
+    }
+}
+
+pub const MAJOR_WORKFLOW_COMMANDS: &[AppCommand] = &[
+    AppCommand::ContextualNew,
+    AppCommand::CreateBudget,
+    AppCommand::AddAccount,
+    AppCommand::Import,
+    AppCommand::FocusSearch,
+    AppCommand::Undo,
+    AppCommand::Redo,
+    AppCommand::Commit,
+    AppCommand::Cancel,
+    AppCommand::Edit,
+    AppCommand::Delete,
+    AppCommand::MoveUp,
+    AppCommand::MoveDown,
+    AppCommand::ToggleSelection,
+    AppCommand::Rename,
+    AppCommand::NavigateBudget,
+    AppCommand::NavigateReports,
+    AppCommand::NavigateAccounts,
+    AppCommand::PreviousMonth,
+    AppCommand::NextMonth,
+    AppCommand::Settings,
+    AppCommand::Backup,
+    AppCommand::ToggleInspector,
+    AppCommand::RetryOperation,
+    AppCommand::CancelOperation,
+    AppCommand::Exit,
+];
+
+#[must_use]
+pub fn command_availability(
+    ctx: CommandAvailabilityContext,
+    command: AppCommand,
+) -> CommandAvailability {
+    use AppCommand::*;
+    if ctx.text_editor_owns_shortcuts
+        && matches!(
+            command,
+            ContextualNew
+                | FocusSearch
+                | Import
+                | AddAccount
+                | Delete
+                | Rename
+                | MoveUp
+                | MoveDown
+                | ToggleSelection
+                | PreviousMonth
+                | NextMonth
+        )
+    {
+        return CommandAvailability::disabled(command, "Text editing has focus");
+    }
+    if ctx.dialog_open {
+        return match command {
+            Commit | Cancel => CommandAvailability::enabled(command),
+            _ => CommandAvailability::disabled(command, "Finish the open dialog first"),
+        };
+    }
+    if ctx.lifecycle_busy && !matches!(command, CancelOperation | RetryOperation | Exit) {
+        return CommandAvailability::disabled(command, "A budget lifecycle operation is running");
+    }
+    let needs_budget = matches!(
+        command,
+        ContextualNew
+            | AddAccount
+            | Import
+            | FocusSearch
+            | Undo
+            | Redo
+            | Commit
+            | Edit
+            | Delete
+            | ToggleSelection
+            | Rename
+            | NavigateBudget
+            | NavigateReports
+            | NavigateAccounts
+            | PreviousMonth
+            | NextMonth
+            | Backup
+    );
+    if needs_budget && !ctx.budget_open {
+        return CommandAvailability::disabled(command, "Open a budget first");
+    }
+    let mutating = matches!(
+        command,
+        ContextualNew | AddAccount | Import | Commit | Delete | Rename | Undo | Redo
+    );
+    if mutating && ctx.read_only {
+        return CommandAvailability::disabled(command, "Budget is open read-only");
+    }
+    if mutating && ctx.operation_locked {
+        return CommandAvailability::disabled(command, "Another operation must finish first");
+    }
+    match command {
+        ContextualNew | Import if ctx.workspace != CommandWorkspace::AccountRegister => {
+            CommandAvailability::disabled(command, "Open an account register first")
+        }
+        FocusSearch
+            if !matches!(
+                ctx.workspace,
+                CommandWorkspace::AccountRegister
+                    | CommandWorkspace::AllAccounts
+                    | CommandWorkspace::Inbox
+            ) =>
+        {
+            CommandAvailability::disabled(command, "Open a searchable workspace first")
+        }
+        Commit if !ctx.editing => {
+            CommandAvailability::disabled(command, "Start editing before committing")
+        }
+        Edit if ctx.editing => CommandAvailability::disabled(command, "Already editing"),
+        Edit | Delete | Rename if !ctx.has_selection => {
+            CommandAvailability::disabled(command, "Select an item first")
+        }
+        ToggleSelection if !ctx.has_selection => {
+            CommandAvailability::disabled(command, "Move to an item before changing selection")
+        }
+        MoveUp | MoveDown if ctx.editing => {
+            CommandAvailability::disabled(command, "Finish editing before navigating rows")
+        }
+        Undo if !ctx.can_undo => CommandAvailability::disabled(command, "Nothing to undo"),
+        Redo if !ctx.can_redo => CommandAvailability::disabled(command, "Nothing to redo"),
+        PreviousMonth | NextMonth if ctx.workspace != CommandWorkspace::Budget => {
+            CommandAvailability::disabled(command, "Open the budget workspace first")
+        }
+        CancelOperation if !ctx.operation_locked && !ctx.lifecycle_busy => {
+            CommandAvailability::disabled(command, "No cancellable operation is running")
+        }
+        RetryOperation if !ctx.operation_locked => {
+            CommandAvailability::disabled(command, "No failed operation is selected")
+        }
+        _ => CommandAvailability::enabled(command),
+    }
+}
+
+#[must_use]
+pub fn command_catalog(ctx: CommandAvailabilityContext) -> Vec<CommandAvailability> {
+    MAJOR_WORKFLOW_COMMANDS
+        .iter()
+        .copied()
+        .map(|c| command_availability(ctx, c))
+        .collect()
+}

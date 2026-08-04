@@ -1,5 +1,7 @@
 //! Deterministic command-palette matching, context gating, and focus lifecycle.
-use super::command::AppCommand;
+use super::command::{
+    AppCommand, CommandAvailabilityContext, CommandWorkspace, command_availability,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequiredContext {
@@ -15,6 +17,14 @@ pub struct CommandContext {
     pub account_register: bool,
     pub budget_workspace: bool,
     pub mutations_disabled: bool,
+    pub has_selection: bool,
+    pub editing: bool,
+    pub dialog_open: bool,
+    pub text_editor_owns_shortcuts: bool,
+    pub lifecycle_busy: bool,
+    pub operation_locked: bool,
+    pub can_undo: bool,
+    pub can_redo: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,30 +44,44 @@ pub enum ExecuteError {
     NotFound,
 }
 
+fn availability_context(context: CommandContext) -> CommandAvailabilityContext {
+    CommandAvailabilityContext {
+        budget_open: context.budget_open,
+        workspace: if context.account_register {
+            CommandWorkspace::AccountRegister
+        } else if context.budget_workspace {
+            CommandWorkspace::Budget
+        } else if context.budget_open {
+            CommandWorkspace::AllAccounts
+        } else {
+            CommandWorkspace::None
+        },
+        has_selection: context.has_selection,
+        editing: context.editing,
+        dialog_open: context.dialog_open,
+        text_editor_owns_shortcuts: context.text_editor_owns_shortcuts,
+        lifecycle_busy: context.lifecycle_busy,
+        read_only: context.mutations_disabled,
+        operation_locked: context.operation_locked,
+        can_undo: context.can_undo,
+        can_redo: context.can_redo,
+    }
+}
+
 fn available(
-    required: RequiredContext,
+    _required: RequiredContext,
     context: CommandContext,
     command: AppCommand,
 ) -> (bool, Option<String>) {
-    let mut explanation = match required {
-        RequiredContext::Always => None,
-        RequiredContext::BudgetOpen if !context.budget_open => Some("Open a budget first"),
-        RequiredContext::AccountRegister if !context.account_register => {
-            Some("Open an account register first")
-        }
-        RequiredContext::BudgetWorkspace if !context.budget_workspace => {
-            Some("Open the budget workspace first")
-        }
-        _ => None,
-    };
-    if explanation.is_none() && context.mutations_disabled && mutation_command(command) {
-        explanation = Some("Mutations are disabled while the budget is in recovery mode");
-    }
-    (explanation.is_none(), explanation.map(str::to_owned))
+    let availability = command_availability(availability_context(context), command);
+    (
+        availability.enabled,
+        availability.disabled_reason.map(str::to_owned),
+    )
 }
 
-/// The allowlist intentionally contains only commands with a working dispatch path.
-/// Backup, retry, and operation cancellation stay hidden until implemented end-to-end.
+/// User-facing palette entries for major implemented workflows.
+/// Availability and disabled explanations come from the centralized evaluator.
 #[must_use]
 pub fn commands_for(context: CommandContext) -> Vec<CommandDescriptor> {
     use AppCommand::*;
@@ -95,6 +119,20 @@ pub fn commands_for(context: CommandContext) -> Vec<CommandDescriptor> {
             BudgetOpen,
         ),
         (Settings, "Open settings", "preferences appearance", Always),
+        (FocusSearch, "Find", "search filter", BudgetOpen),
+        (Undo, "Undo", "history revert", BudgetOpen),
+        (Redo, "Redo", "history reapply", BudgetOpen),
+        (Commit, "Commit edit", "save enter", BudgetOpen),
+        (Cancel, "Cancel", "escape close", Always),
+        (Edit, "Edit selected item", "enter edit", BudgetOpen),
+        (Delete, "Delete selected item", "remove", BudgetOpen),
+        (
+            ToggleSelection,
+            "Toggle row selection",
+            "space select clear",
+            BudgetOpen,
+        ),
+        (Backup, "Create backup", "validate backup", BudgetOpen),
         (
             NavigateAccounts,
             "Manage accounts",
@@ -133,26 +171,20 @@ pub fn commands_for(context: CommandContext) -> Vec<CommandDescriptor> {
 /// Descriptors for an application with an open budget. Prefer [`commands_for`]
 /// when the current workspace is available.
 #[must_use]
-fn mutation_command(command: AppCommand) -> bool {
-    matches!(
-        command,
-        AppCommand::ContextualNew
-            | AppCommand::AddAccount
-            | AppCommand::Import
-            | AppCommand::Undo
-            | AppCommand::Redo
-            | AppCommand::Commit
-            | AppCommand::Delete
-            | AppCommand::Rename
-    )
-}
-
 pub fn commands() -> Vec<CommandDescriptor> {
     commands_for(CommandContext {
         budget_open: true,
         account_register: false,
         budget_workspace: true,
         mutations_disabled: false,
+        has_selection: false,
+        editing: false,
+        dialog_open: false,
+        text_editor_owns_shortcuts: false,
+        lifecycle_busy: false,
+        operation_locked: false,
+        can_undo: false,
+        can_redo: false,
     })
 }
 #[must_use]
@@ -297,10 +329,7 @@ mod command_tests {
     #[test]
     fn unfinished_commands_are_excluded_and_context_is_explained() {
         let items = commands_for(CommandContext::default());
-        assert!(!items.iter().any(|item| matches!(
-            item.command,
-            AppCommand::Backup | AppCommand::RetryOperation | AppCommand::CancelOperation
-        )));
+        assert!(items.iter().any(|item| item.command == AppCommand::Backup));
         let transaction = items
             .iter()
             .find(|item| item.command == AppCommand::ContextualNew)
@@ -308,7 +337,7 @@ mod command_tests {
         assert!(!transaction.enabled);
         assert_eq!(
             transaction.disabled_explanation.as_deref(),
-            Some("Open an account register first")
+            Some("Open a budget first")
         );
     }
 
@@ -319,6 +348,7 @@ mod command_tests {
             account_register: true,
             budget_workspace: true,
             mutations_disabled: true,
+            ..CommandContext::default()
         });
         let new_transaction = items
             .iter()
@@ -327,7 +357,7 @@ mod command_tests {
         assert!(!new_transaction.enabled);
         assert_eq!(
             new_transaction.disabled_explanation.as_deref(),
-            Some("Mutations are disabled while the budget is in recovery mode")
+            Some("Budget is open read-only")
         );
         let reports = items
             .iter()
@@ -342,7 +372,7 @@ mod command_tests {
             budget_open: true,
             account_register: true,
             budget_workspace: true,
-            mutations_disabled: false,
+            ..CommandContext::default()
         });
         assert_eq!(
             fuzzy("open rep", &items)[0].command,
