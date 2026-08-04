@@ -91,7 +91,11 @@ pub struct StorageRequest {
 pub enum TypedResult {
     Healthy,
     Count(i64),
-    Completed,
+    /// A transaction committed successfully. Only this result is eligible for undo history.
+    Mutation {
+        command: crate::app::command::FinancialCommand,
+        inverse: crate::app::command::FinancialCommand,
+    },
     Report(crate::domain::ReportResult),
     RegisterPage,
     SearchResults,
@@ -115,6 +119,8 @@ pub struct DiagnosticContext {
 pub enum StorageResponse {
     Completed {
         id: RequestId,
+        command_id: Option<crate::app::command::CommandId>,
+        correlation_id: Option<crate::app::command::CorrelationId>,
         generation: Generation,
         result: Result<TypedResult, WorkerError>,
         invalidations: Option<crate::app::view_invalidation::ViewInvalidations>,
@@ -124,6 +130,8 @@ pub enum StorageResponse {
     },
     Progress {
         id: RequestId,
+        command_id: Option<crate::app::command::CommandId>,
+        correlation_id: Option<crate::app::command::CorrelationId>,
         generation: Generation,
         completed: u64,
         total: Option<u64>,
@@ -235,6 +243,12 @@ fn run(
         match message {
             Message::Shutdown => break,
             Message::Work(request) => {
+                let association = match &request.operation {
+                    WorkerOperation::Financial(FinancialOperation::Command(e)) => {
+                        (Some(e.command_id), Some(e.correlation_id))
+                    }
+                    _ => (None, None),
+                };
                 if matches!(
                     request.operation,
                     WorkerOperation::Import(_)
@@ -244,6 +258,8 @@ fn run(
                 ) {
                     let _ = tx.send(StorageResponse::Progress {
                         id: request.id,
+                        command_id: association.0,
+                        correlation_id: association.1,
                         generation: request.generation,
                         completed: 0,
                         total: None,
@@ -258,6 +274,8 @@ fn run(
                 repaint();
                 let _ = tx.send(StorageResponse::Completed {
                     id: request.id,
+                    command_id: association.0,
+                    correlation_id: association.1,
                     generation: request.generation,
                     result,
                     invalidations: None,
@@ -271,6 +289,16 @@ fn run(
         repaint();
         let _ = tx.send(StorageResponse::Completed {
             id: r.id,
+            command_id: match &r.operation {
+                WorkerOperation::Financial(FinancialOperation::Command(e)) => Some(e.command_id),
+                _ => None,
+            },
+            correlation_id: match &r.operation {
+                WorkerOperation::Financial(FinancialOperation::Command(e)) => {
+                    Some(e.correlation_id)
+                }
+                _ => None,
+            },
             generation: r.generation,
             result: Err(WorkerError::Cancelled),
             invalidations: None,
@@ -398,7 +426,18 @@ fn execute(
         WorkerOperation::Import(ImportOperation::Apply) => Ok(TypedResult::ImportApplied),
         WorkerOperation::Diagnostics(_) => Ok(TypedResult::Diagnostics),
         WorkerOperation::Occurrences(_) => Ok(TypedResult::OccurrencesGenerated),
-        WorkerOperation::Financial(_) => Ok(TypedResult::Completed),
+        WorkerOperation::Financial(FinancialOperation::Command(envelope)) => {
+            let crate::app::command::ApplicationAction::Financial(command) = &envelope.payload
+            else {
+                return Err(WorkerError::Repository(
+                    "non-financial command in financial request".into(),
+                ));
+            };
+            Ok(TypedResult::Mutation {
+                command: command.clone(),
+                inverse: command.clone(),
+            })
+        }
     }
 }
 
