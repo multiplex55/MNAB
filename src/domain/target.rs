@@ -130,6 +130,19 @@ impl Target {
         })
     }
 
+    /// Revalidates edits while preserving the immutable target identity.
+    pub fn edit(
+        &mut self,
+        association: TargetAssociation,
+        kind: TargetKind,
+        today: Date,
+    ) -> Result<(), TargetError> {
+        let replacement = Self::new(association, kind, today)?;
+        self.association = replacement.association;
+        self.kind = replacement.kind;
+        Ok(())
+    }
+
     /// Calculates advice only. No assignment or account value is mutated.
     pub fn recommend(
         &self,

@@ -29,6 +29,7 @@ pub struct ScheduledTransaction {
     pub recurrence: Recurrence,
     /// Inclusive: an occurrence exactly on this date is generated.
     pub end_date: Option<Date>,
+    pub active: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -53,6 +54,8 @@ pub struct ScheduledOccurrence {
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum ScheduleError {
+    #[error("schedule was not found")]
+    ScheduleNotFound,
     #[error("custom interval must contain at least one day")]
     InvalidCustomInterval,
     #[error("schedule end date precedes its start date")]
@@ -88,7 +91,14 @@ impl ScheduledTransaction {
             category_id: None,
             recurrence,
             end_date,
+            active: true,
         })
+    }
+    pub fn activate(&mut self) {
+        self.active = true;
+    }
+    pub fn deactivate(&mut self) {
+        self.active = false;
     }
     pub fn occurrence_date(&self, sequence: u32) -> Result<Option<Date>, ScheduleError> {
         let date = match self.recurrence {
@@ -155,6 +165,9 @@ impl OccurrenceStore {
         today: Date,
         look_ahead_days: u32,
     ) -> Result<Vec<ScheduledOccurrenceId>, ScheduleError> {
+        if !schedule.active {
+            return Ok(vec![]);
+        }
         let through = today
             .checked_add(Duration::days(i64::from(look_ahead_days)))
             .ok_or(ScheduleError::InvalidLookAhead)?;
@@ -191,6 +204,9 @@ impl OccurrenceStore {
         self.values
             .values()
             .filter(|v| v.disposition == OccurrenceDisposition::Pending)
+    }
+    pub fn occurrence(&self, id: ScheduledOccurrenceId) -> Option<&ScheduledOccurrence> {
+        self.values.values().find(|value| value.id == id)
     }
     fn pending_mut(
         &mut self,
