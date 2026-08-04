@@ -1,34 +1,97 @@
-//! Durable import state and review policies.  A batch is persisted in `ParsedStaged`
-//! before it can move to `AwaitingReview`; the UI never owns the authoritative copy.
+//! Durable import workflow state and review policies. Parsing produces inert previews;
+//! staging persists batches/candidates separately from financial transactions; applying
+//! is the first workflow step allowed to create or update financial records.
 use super::{
-    deduplication::CandidateClassification, preview::ReviewDecision, source::SourceAccount,
+    deduplication::{CandidateClassification, MatchEvidence},
+    preview::ReviewDecision,
+    source::{ImportedTransaction, SourceAccount, SourceLocation},
 };
+use crate::domain::{AccountId, BudgetMonth, CategoryId, ImportBatchId, TransactionId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BatchState {
-    Selected,
-    ParsedStaged,
-    AwaitingReview,
-    Applied,
-    ArchivePending,
-    Archived,
+pub enum ImportWorkflowState {
+    SelectingFile,
+    DetectingFormat,
+    ConfiguringCsv,
+    Parsing,
+    Staging,
+    Reviewing,
+    Applying,
+    Archiving,
+    Completed,
     Failed,
 }
-impl BatchState {
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShutdownOperation {
+    CancelImmediately,
+    PromptUser,
+    WaitForSafePoint,
+    BlockUntilFinished,
+}
+
+impl ImportWorkflowState {
     #[must_use]
     pub const fn can_transition_to(self, next: Self) -> bool {
+        use ImportWorkflowState as S;
         matches!(
             (self, next),
-            (Self::Selected, Self::ParsedStaged | Self::Failed)
-                | (Self::ParsedStaged, Self::AwaitingReview | Self::Failed)
-                | (Self::AwaitingReview, Self::Applied | Self::Failed)
-                | (Self::Applied, Self::ArchivePending | Self::Archived)
-                | (Self::ArchivePending, Self::Archived | Self::Failed)
+            (S::SelectingFile, S::DetectingFormat | S::Failed)
+                | (
+                    S::DetectingFormat,
+                    S::ConfiguringCsv | S::Parsing | S::Failed
+                )
+                | (S::ConfiguringCsv, S::Parsing | S::SelectingFile | S::Failed)
+                | (S::Parsing, S::Staging | S::ConfiguringCsv | S::Failed)
+                | (S::Staging, S::Reviewing | S::Failed)
+                | (S::Reviewing, S::Applying | S::ConfiguringCsv | S::Failed)
+                | (S::Applying, S::Archiving | S::Failed)
+                | (S::Archiving, S::Completed | S::Failed)
+                | (
+                    S::Failed,
+                    S::SelectingFile
+                        | S::ConfiguringCsv
+                        | S::Parsing
+                        | S::Staging
+                        | S::Reviewing
+                        | S::Archiving
+                )
         )
     }
+    #[must_use]
+    pub const fn is_cancellable(self) -> bool {
+        !matches!(self, Self::Applying | Self::Archiving | Self::Completed)
+    }
+    #[must_use]
+    pub const fn failure_is_resumable(self) -> bool {
+        matches!(
+            self,
+            Self::ConfiguringCsv
+                | Self::Parsing
+                | Self::Staging
+                | Self::Reviewing
+                | Self::Archiving
+        )
+    }
+    #[must_use]
+    pub const fn shutdown_operation(self) -> ShutdownOperation {
+        match self {
+            Self::SelectingFile
+            | Self::DetectingFormat
+            | Self::ConfiguringCsv
+            | Self::Parsing
+            | Self::Staging => ShutdownOperation::CancelImmediately,
+            Self::Reviewing => ShutdownOperation::PromptUser,
+            Self::Applying => ShutdownOperation::WaitForSafePoint,
+            Self::Archiving => ShutdownOperation::BlockUntilFinished,
+            Self::Completed | Self::Failed => ShutdownOperation::CancelImmediately,
+        }
+    }
 }
+
+pub type BatchState = ImportWorkflowState;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StatementDetails {
@@ -37,11 +100,51 @@ pub struct StatementDetails {
     pub account_mismatch: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct StoredImportBatch {
+    pub id: ImportBatchId,
+    pub workflow_state: ImportWorkflowState,
+    pub source_name: String,
+    pub source_account_identifier: Option<String>,
+    pub selected_destination_account: AccountId,
+    pub archive_path: Option<String>,
+    pub applied_generation: Option<u64>,
+    pub applied_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MatchCandidateProjection {
+    pub transaction_id: TransactionId,
+    pub classification: CandidateClassification,
+    pub evidence: Vec<MatchEvidence>,
+    pub explanation: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct StoredImportCandidate {
+    pub batch_id: ImportBatchId,
+    pub sort_order: u32,
+    /// Immutable parser output. Review edits must only change proposed fields below.
+    pub original: ImportedTransaction,
+    pub proposed_payee: Option<String>,
+    pub proposed_category: Option<CategoryId>,
+    pub proposed_memo: Option<String>,
+    pub duplicate_classification: CandidateClassification,
+    pub match_candidates: Vec<MatchCandidateProjection>,
+    pub warnings: Vec<String>,
+    pub decision: ReviewDecision,
+    pub source_account_identifier: Option<String>,
+    pub selected_destination_account: AccountId,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DecisionError {
     ExactDuplicateOverrideRequired,
     UnsafeBulkOperation,
     MatchTargetRequired,
+    AllCandidatesRequireDecision,
+    InvalidDestinationReference,
+    StaleBudgetRevision,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,7 +162,7 @@ pub fn validate_decision(
     override_confirmation: Option<ExactDuplicateOverride>,
 ) -> Result<(), DecisionError> {
     if matches!(decision, ReviewDecision::Accept)
-        && classification == CandidateClassification::ExactDuplicate
+        && classification == CandidateClassification::ExactImportIdDuplicate
         && override_confirmation.is_none()
     {
         return Err(DecisionError::ExactDuplicateOverrideRequired);
@@ -70,8 +173,6 @@ pub fn validate_decision(
     Ok(())
 }
 
-/// Bulk acceptance is limited to new rows. Duplicates and suggested matches must
-/// be considered individually; bulk ignore is safe for every classification.
 pub fn apply_bulk(
     decisions: &mut [(CandidateClassification, ReviewDecision)],
     decision: ReviewDecision,
@@ -92,21 +193,99 @@ pub fn apply_bulk(
     Ok(())
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportInvalidationPlan {
+    pub registers: Vec<AccountId>,
+    pub balances: Vec<AccountId>,
+    pub affected_budget_months: Vec<BudgetMonth>,
+    pub inbox: bool,
+    pub reports: bool,
+    pub search: bool,
+    pub targets: bool,
+    pub inspector_projections: Vec<TransactionId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApplyCandidateDecision {
+    pub candidate_index: u32,
+    pub decision: ReviewDecision,
+    pub destination_account: AccountId,
+    pub expected_budget_generation: u64,
+    pub expected_budget_revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewedImportCommand {
+    pub batch_id: ImportBatchId,
+    pub decisions: Vec<ApplyCandidateDecision>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RowDiagnostic {
+    pub location: SourceLocation,
+    pub field: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParsePreview {
+    pub details: StatementDetails,
+    pub rows: Vec<ImportedTransaction>,
+    pub diagnostics: Vec<RowDiagnostic>,
+}
+
+impl ParsePreview {
+    #[must_use]
+    pub fn read_only_from_statement(statement: super::source::ImportedStatement) -> Self {
+        Self {
+            details: StatementDetails {
+                account: statement.account,
+                currency: statement.currency,
+                account_mismatch: None,
+            },
+            rows: statement.transactions,
+            diagnostics: Vec::new(),
+        }
+    }
+}
+
+#[must_use]
+pub const fn parsing_creates_financial_records() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn state_machine_prevents_review_before_staging() {
-        assert!(!BatchState::Selected.can_transition_to(BatchState::AwaitingReview));
-        assert!(BatchState::Selected.can_transition_to(BatchState::ParsedStaged));
-        assert!(BatchState::ParsedStaged.can_transition_to(BatchState::AwaitingReview));
-        assert!(!BatchState::Archived.can_transition_to(BatchState::Applied));
+    fn explicit_state_machine_and_lifecycle_classification() {
+        assert!(
+            ImportWorkflowState::SelectingFile
+                .can_transition_to(ImportWorkflowState::DetectingFormat)
+        );
+        assert!(
+            !ImportWorkflowState::SelectingFile.can_transition_to(ImportWorkflowState::Reviewing)
+        );
+        assert!(ImportWorkflowState::Parsing.is_cancellable());
+        assert_eq!(
+            ImportWorkflowState::Reviewing.shutdown_operation(),
+            ShutdownOperation::PromptUser
+        );
+        assert_eq!(
+            ImportWorkflowState::Applying.shutdown_operation(),
+            ShutdownOperation::WaitForSafePoint
+        );
+        assert_eq!(
+            ImportWorkflowState::Archiving.shutdown_operation(),
+            ShutdownOperation::BlockUntilFinished
+        );
+        assert!(ImportWorkflowState::Archiving.failure_is_resumable());
     }
     #[test]
     fn exact_duplicates_need_individual_override() {
         assert_eq!(
             validate_decision(
-                CandidateClassification::ExactDuplicate,
+                CandidateClassification::ExactImportIdDuplicate,
                 &ReviewDecision::Accept,
                 None
             ),
@@ -114,7 +293,7 @@ mod tests {
         );
         assert!(
             validate_decision(
-                CandidateClassification::ExactDuplicate,
+                CandidateClassification::ExactImportIdDuplicate,
                 &ReviewDecision::Accept,
                 Some(ExactDuplicateOverride::confirmed())
             )
