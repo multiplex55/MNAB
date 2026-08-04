@@ -36,6 +36,9 @@ pub struct ReportFilter {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ReportKind {
     Spending,
+    SpendingByCategory,
+    SpendingByPayee,
+    MonthlySpendingTrend,
     IncomeExpense,
     NetWorth,
     BudgetProgress,
@@ -576,7 +579,12 @@ pub fn budget_progress(data: &ReportData<'_>, filter: &ReportFilter) -> BudgetPr
 #[must_use]
 pub fn calculate(request: &ReportRequest, data: &ReportData<'_>) -> ReportResult {
     match request.kind {
-        ReportKind::Spending => ReportResult::Spending(spending(data, &request.filter)),
+        ReportKind::Spending
+        | ReportKind::SpendingByCategory
+        | ReportKind::SpendingByPayee
+        | ReportKind::MonthlySpendingTrend => {
+            ReportResult::Spending(spending(data, &request.filter))
+        }
         ReportKind::IncomeExpense => {
             ReportResult::IncomeExpense(income_expense(data, &request.filter))
         }

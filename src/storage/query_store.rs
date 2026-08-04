@@ -34,6 +34,28 @@ pub struct RegisterRow {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchHighlightSpan {
+    pub field: String,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchRow {
+    pub transaction_id: String,
+    pub account_id: String,
+    pub account: String,
+    pub date: String,
+    pub payee: String,
+    pub category: String,
+    pub memo: String,
+    pub amount: Money,
+    pub approved: bool,
+    pub clearance: String,
+    pub highlights: Vec<SearchHighlightSpan>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegisterCursor {
     pub transaction_date: String,
     pub transaction_id: String,
@@ -167,7 +189,10 @@ impl<'a> QueryStore<'a> {
         request: &ReportRequest,
     ) -> Result<ReportResult, RepositoryError> {
         match request.kind {
-            ReportKind::Spending => self
+            ReportKind::Spending
+            | ReportKind::SpendingByCategory
+            | ReportKind::SpendingByPayee
+            | ReportKind::MonthlySpendingTrend => self
                 .spending_report(budget, &request.filter)
                 .map(ReportResult::Spending),
             ReportKind::IncomeExpense => self
@@ -190,7 +215,11 @@ impl<'a> QueryStore<'a> {
         kind: ReportKind,
     ) -> Result<u64, RepositoryError> {
         let tables = match kind {
-            ReportKind::Spending | ReportKind::IncomeExpense => {
+            ReportKind::Spending
+            | ReportKind::SpendingByCategory
+            | ReportKind::SpendingByPayee
+            | ReportKind::MonthlySpendingTrend
+            | ReportKind::IncomeExpense => {
                 "'transactions','subtransactions','accounts','categories','category_groups','payees'"
             }
             ReportKind::NetWorth => "'transactions','accounts'",
@@ -556,6 +585,54 @@ impl<'a> QueryStore<'a> {
             page.reconciliation_separators.clear();
         }
         Ok(page)
+    }
+
+    pub fn search(&self, expression: &str, limit: u32) -> Result<Vec<SearchRow>, RepositoryError> {
+        let ast = crate::app::search::parse(expression).map_err(|diagnostics| {
+            repo(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                diagnostics
+                    .first()
+                    .map_or("invalid search expression".into(), |d| d.message.clone()),
+            ))
+        })?;
+        let (filter_sql, mut values) = transaction_filter_sql(&ast, "t");
+        values.push(i64::from(limit.clamp(1, 100)).into());
+        let sql = format!(
+            r#"SELECT t.id,t.account_id,a.name,t.transaction_date,
+                      COALESCE(p.name,t.payee_snapshot,''),COALESCE(c.name,''),COALESCE(t.memo,''),t.amount,
+                      t.approval_state,t.cleared_state
+               FROM transactions t
+               JOIN accounts a ON a.id=t.account_id
+               LEFT JOIN payees p ON p.id=t.payee_id
+               LEFT JOIN categories c ON c.id=t.category_id
+               WHERE t.archived=0 AND COALESCE(t.voided,0)=0 {filter_sql}
+               ORDER BY t.transaction_date DESC,t.id DESC LIMIT ?"#
+        );
+        let mut stmt = self.connection.prepare(&sql).map_err(repo)?;
+        let terms = ast.terms.clone();
+        stmt.query_map(params_from_iter(values), |r| {
+            let account: String = r.get(2)?;
+            let payee: String = r.get(4)?;
+            let category: String = r.get(5)?;
+            let memo: String = r.get(6)?;
+            Ok(SearchRow {
+                transaction_id: r.get(0)?,
+                account_id: r.get(1)?,
+                account: account.clone(),
+                date: r.get(3)?,
+                payee: payee.clone(),
+                category: category.clone(),
+                memo: memo.clone(),
+                amount: Money::from_minor_units(r.get(7)?),
+                approved: r.get::<_, String>(8)? == "approved",
+                clearance: r.get(9)?,
+                highlights: highlight_spans(&terms, &account, &payee, &category, &memo),
+            })
+        })
+        .map_err(repo)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(repo)
     }
 
     /// Compatibility helper. Unlike the old unbounded query this can return at
@@ -1057,6 +1134,116 @@ fn escape_like(value: &str) -> String {
         .replace('%', "\\%")
         .replace('_', "\\_")
 }
+fn transaction_filter_sql(
+    ast: &crate::app::search::SearchAst,
+    alias: &str,
+) -> (String, Vec<Value>) {
+    use crate::app::search::{Comparison, SearchTerm};
+    let mut clauses = Vec::new();
+    let mut values = Vec::new();
+    for term in &ast.terms {
+        match term {
+            SearchTerm::Text(v) => {
+                clauses.push(format!("(LOWER(COALESCE(p.name,{alias}.payee_snapshot,'')||' '||COALESCE(c.name,'')||' '||COALESCE({alias}.memo,'')||' '||a.name) LIKE ? ESCAPE '\\\\')"));
+                values.push(format!("%{}%", escape_like(&v.to_lowercase())).into());
+            }
+            SearchTerm::Account(v)
+            | SearchTerm::Category(v)
+            | SearchTerm::Payee(v)
+            | SearchTerm::Memo(v) => {
+                let col = match term {
+                    SearchTerm::Account(_) => "a.name",
+                    SearchTerm::Category(_) => "COALESCE(c.name,'')",
+                    SearchTerm::Payee(_) => &format!("COALESCE(p.name,{alias}.payee_snapshot,'')"),
+                    _ => &format!("COALESCE({alias}.memo,'')"),
+                };
+                clauses.push(format!("LOWER({col}) LIKE ? ESCAPE '\\\\'"));
+                values.push(format!("%{}%", escape_like(&v.to_lowercase())).into());
+            }
+            SearchTerm::Amount { comparison, value } => {
+                let op = match comparison {
+                    Comparison::Less => "<",
+                    Comparison::LessEqual => "<=",
+                    Comparison::Equal => "=",
+                    Comparison::GreaterEqual => ">=",
+                    Comparison::Greater => ">",
+                };
+                clauses.push(format!("{alias}.amount {op} ?"));
+                values.push(value.minor_units().into());
+            }
+            SearchTerm::Before(v) => {
+                clauses.push(format!("{alias}.transaction_date < ?"));
+                values.push(v.to_string().into());
+            }
+            SearchTerm::After(v) => {
+                clauses.push(format!("{alias}.transaction_date > ?"));
+                values.push(v.to_string().into());
+            }
+            SearchTerm::Cleared(v) => {
+                clauses.push(if *v {
+                    format!("{alias}.cleared_state <> ?")
+                } else {
+                    format!("{alias}.cleared_state = ?")
+                });
+                values.push(String::from("uncleared").into());
+            }
+            SearchTerm::Approved(v) => {
+                clauses.push(format!("{alias}.approval_state = ?"));
+                values.push(String::from(if *v { "approved" } else { "unapproved" }).into());
+            }
+        }
+    }
+    (
+        if clauses.is_empty() {
+            String::new()
+        } else {
+            format!(" AND {}", clauses.join(" AND "))
+        },
+        values,
+    )
+}
+
+fn highlight_spans(
+    terms: &[crate::app::search::SearchTerm],
+    account: &str,
+    payee: &str,
+    category: &str,
+    memo: &str,
+) -> Vec<SearchHighlightSpan> {
+    let mut out = Vec::new();
+    for term in terms {
+        let (field, text) = match term {
+            crate::app::search::SearchTerm::Text(v) => ("payee", v.as_str()),
+            crate::app::search::SearchTerm::Account(v) => ("account", v.as_str()),
+            crate::app::search::SearchTerm::Category(v) => ("category", v.as_str()),
+            crate::app::search::SearchTerm::Payee(v) => ("payee", v.as_str()),
+            crate::app::search::SearchTerm::Memo(v) => ("memo", v.as_str()),
+            _ => continue,
+        };
+        let hay = match field {
+            "account" => account,
+            "category" => category,
+            "memo" => memo,
+            _ => payee,
+        };
+        if let Some(byte) = hay.to_lowercase().find(&text.to_lowercase()) {
+            let end = byte
+                + hay[byte..]
+                    .chars()
+                    .take(text.chars().count())
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+            if hay.is_char_boundary(byte) && hay.is_char_boundary(end) {
+                out.push(SearchHighlightSpan {
+                    field: field.into(),
+                    start: byte,
+                    end,
+                });
+            }
+        }
+    }
+    out
+}
 fn repo<E: std::error::Error + Send + Sync + 'static>(source: E) -> RepositoryError {
     RepositoryError::Failed {
         source: Box::new(source),
@@ -1092,6 +1279,9 @@ mod report_tests {
         let store = QueryStore::new(&connection);
         for kind in [
             ReportKind::Spending,
+            ReportKind::SpendingByCategory,
+            ReportKind::SpendingByPayee,
+            ReportKind::MonthlySpendingTrend,
             ReportKind::IncomeExpense,
             ReportKind::NetWorth,
             ReportKind::BudgetProgress,

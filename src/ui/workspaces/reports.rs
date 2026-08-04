@@ -30,7 +30,9 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, _commands: &mut ActionCollector
         egui::ComboBox::from_label("Report")
             .selected_text(
                 [
-                    "Spending",
+                    "Spending by category",
+                    "Spending by payee",
+                    "Monthly spending trend",
                     "Income vs expense",
                     "Net worth",
                     "Budget progress",
@@ -38,7 +40,9 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, _commands: &mut ActionCollector
             )
             .show_ui(ui, |ui| {
                 for (index, label) in [
-                    "Spending",
+                    "Spending by category",
+                    "Spending by payee",
+                    "Monthly spending trend",
                     "Income vs expense",
                     "Net worth",
                     "Budget progress",

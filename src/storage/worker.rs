@@ -399,53 +399,10 @@ fn execute_operation(
             .map_err(|e| WorkerError::Repository(e.to_string()))
         }
         WorkerOperation::Search(search) => {
-            // Parsing and planning live beside the worker-side database execution;
-            // the UI thread only schedules debounced text and renders typed results.
-            let ast = crate::app::search::parse(&search.text)
-                .map_err(|_| WorkerError::Repository("invalid search expression".into()))?;
-            let plan = crate::app::search::compile(&ast);
-            let bounded_limit = search.limit.clamp(1, 100);
-            let sql = format!(
-                "SELECT transactions.id FROM transactions \
-                 JOIN accounts ON accounts.id=transactions.account_id \
-                 LEFT JOIN payees ON payees.id=transactions.payee_id \
-                 LEFT JOIN categories ON categories.id=transactions.category_id \
-                 {} LIMIT ?",
-                if plan.where_sql.is_empty() {
-                    String::new()
-                } else {
-                    format!("WHERE {}", plan.where_sql)
-                }
-            );
-            let mut values = plan
-                .binds
-                .into_iter()
-                .map(|value| match value {
-                    crate::app::search::BindValue::Text(value) => {
-                        rusqlite::types::Value::Text(value)
-                    }
-                    crate::app::search::BindValue::Integer(value) => {
-                        rusqlite::types::Value::Integer(value)
-                    }
-                })
-                .collect::<Vec<_>>();
-            values.push(rusqlite::types::Value::Integer(i64::from(bounded_limit)));
-            let mut statement = c
-                .prepare(&sql)
-                .map_err(|error| WorkerError::Repository(error.to_string()))?;
-            let mut rows = statement
-                .query(rusqlite::params_from_iter(values))
-                .map_err(|error| WorkerError::Repository(error.to_string()))?;
-            let mut results = Vec::new();
-            while let Some(row) = rows
-                .next()
-                .map_err(|error| WorkerError::Repository(error.to_string()))?
-            {
-                let id: String = row
-                    .get(0)
-                    .map_err(|e| WorkerError::Repository(e.to_string()))?;
-                results.push(id);
-            }
+            let store = crate::storage::query_store::QueryStore::new(c);
+            let results = store
+                .search(&search.text, search.limit)
+                .map_err(|e| WorkerError::Repository(e.to_string()))?;
             let projection =
                 crate::storage::mapping::search_results(&search.text, results, generation)
                     .map_err(|e| WorkerError::Repository(e.to_string()))?;

@@ -13,6 +13,8 @@ use std::{
 
 pub const SETTINGS_VERSION: u32 = 1;
 pub const DEFAULT_PALETTE_SHORTCUT: &str = "Ctrl+P";
+pub const MAX_SAVED_FILTERS: usize = 50;
+pub const MAX_SEARCH_HISTORY: usize = 25;
 const TEMP_PREFIX: &str = ".settings.json.tmp-";
 
 #[allow(clippy::struct_field_names)]
@@ -166,6 +168,8 @@ pub struct Settings {
     pub display_density: DisplayDensity,
     pub command_palette_shortcut: String,
     pub inbox_thresholds: InboxThresholds,
+    pub saved_filters: Vec<PersistedFilter>,
+    pub search_history: Vec<SearchHistoryEntry>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -179,6 +183,52 @@ impl Default for Settings {
             display_density: DisplayDensity::default(),
             command_palette_shortcut: DEFAULT_PALETTE_SHORTCUT.into(),
             inbox_thresholds: InboxThresholds::default(),
+            saved_filters: Vec::new(),
+            search_history: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PersistedFilter {
+    pub version: u32,
+    pub name: String,
+    pub expression: String,
+    pub scope: String,
+    pub sort_key: String,
+    pub descending: bool,
+}
+impl Default for PersistedFilter {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            name: String::new(),
+            expression: String::new(),
+            scope: "all_accounts".into(),
+            sort_key: "date".into(),
+            descending: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SearchHistoryEntry {
+    pub version: u32,
+    pub expression: String,
+    pub scope: String,
+    pub sort_key: String,
+    pub descending: bool,
+}
+impl Default for SearchHistoryEntry {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            expression: String::new(),
+            scope: "global".into(),
+            sort_key: "relevance".into(),
+            descending: true,
         }
     }
 }
@@ -239,6 +289,7 @@ impl SettingsSession {
                     value.command_palette_shortcut = DEFAULT_PALETTE_SHORTCUT.into();
                 }
                 value.register_columns.repair();
+                value.repair_filters();
                 Self {
                     path,
                     value,
@@ -284,6 +335,83 @@ impl SettingsSession {
             ));
         }
         atomic_save(&self.path, &self.value)
+    }
+}
+
+impl Settings {
+    pub fn repair_filters(&mut self) {
+        let mut warnings = Vec::new();
+        self.saved_filters.retain(|f| {
+            let ok = f.version == 1
+                && !f.name.trim().is_empty()
+                && crate::app::search::parse(&f.expression).is_ok();
+            if !ok {
+                warnings.push(format!("Skipped incompatible saved filter `{}`", f.name));
+            }
+            ok
+        });
+        self.saved_filters.sort_by(|a, b| a.name.cmp(&b.name));
+        self.saved_filters.dedup_by(|a, b| a.name == b.name);
+        if self.saved_filters.len() > MAX_SAVED_FILTERS {
+            self.saved_filters.truncate(MAX_SAVED_FILTERS);
+        }
+        self.search_history
+            .retain(|h| h.version == 1 && crate::app::search::parse(&h.expression).is_ok());
+        if self.search_history.len() > MAX_SEARCH_HISTORY {
+            self.search_history.truncate(MAX_SEARCH_HISTORY);
+        }
+        if !warnings.is_empty() {
+            tracing::warn!("{}", warnings.join("; "));
+        }
+    }
+    pub fn save_filter(&mut self, mut filter: PersistedFilter) -> Result<(), String> {
+        if self
+            .saved_filters
+            .iter()
+            .any(|existing| existing.name == filter.name)
+        {
+            return Err("duplicate saved filter name".into());
+        }
+        filter.version = 1;
+        crate::app::search::parse(&filter.expression).map_err(|_| "invalid filter".to_owned())?;
+        self.saved_filters.insert(0, filter);
+        if self.saved_filters.len() > MAX_SAVED_FILTERS {
+            self.saved_filters.truncate(MAX_SAVED_FILTERS);
+        }
+        Ok(())
+    }
+    pub fn rename_filter(&mut self, old: &str, new: &str) -> Result<(), String> {
+        if self.saved_filters.iter().any(|f| f.name == new) {
+            return Err("duplicate saved filter name".into());
+        }
+        let f = self
+            .saved_filters
+            .iter_mut()
+            .find(|f| f.name == old)
+            .ok_or_else(|| "saved filter not found".to_owned())?;
+        f.name = new.into();
+        Ok(())
+    }
+    pub fn delete_filter(&mut self, name: &str) -> bool {
+        let old = self.saved_filters.len();
+        self.saved_filters.retain(|f| f.name != name);
+        old != self.saved_filters.len()
+    }
+    pub fn reapply_filter(&self, name: &str) -> Option<PersistedFilter> {
+        self.saved_filters.iter().find(|f| f.name == name).cloned()
+    }
+    pub fn remember_search(&mut self, mut entry: SearchHistoryEntry) {
+        entry.version = 1;
+        if crate::app::search::parse(&entry.expression).is_err() {
+            return;
+        }
+        self.search_history
+            .retain(|e| e.expression != entry.expression || e.scope != entry.scope);
+        self.search_history.insert(0, entry);
+        self.search_history.truncate(MAX_SEARCH_HISTORY);
+    }
+    pub fn clear_history(&mut self) {
+        self.search_history.clear();
     }
 }
 
@@ -435,6 +563,8 @@ mod tests {
                 "inspector_visible",
                 "last_opened_budget",
                 "register_columns",
+                "saved_filters",
+                "search_history",
                 "theme",
                 "version",
                 "window"
@@ -446,8 +576,8 @@ mod tests {
             "workspace",
             "selected_account",
             "viewed_month",
-            "search_history",
-            "saved_filters",
+            "selected_transaction",
+            "result_rows",
         ] {
             assert!(value.get(forbidden).is_none());
         }
@@ -515,6 +645,67 @@ mod tests {
                 .command_palette_shortcut,
             "Ctrl+P"
         );
+    }
+    #[test]
+    fn saved_filters_and_history_are_bounded_and_privacy_conscious() {
+        let mut s = Settings::default();
+        s.save_filter(PersistedFilter {
+            name: "Coffee".into(),
+            expression: "payee:Coffee".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            s.save_filter(PersistedFilter {
+                name: "Coffee".into(),
+                expression: "memo:beans".into(),
+                ..Default::default()
+            })
+            .is_err()
+        );
+        s.rename_filter("Coffee", "Cafe").unwrap();
+        assert_eq!(s.reapply_filter("Cafe").unwrap().expression, "payee:Coffee");
+        assert!(s.delete_filter("Cafe"));
+        for index in 0..(MAX_SEARCH_HISTORY + 5) {
+            s.remember_search(SearchHistoryEntry {
+                expression: format!("memo:item{index}"),
+                ..Default::default()
+            });
+        }
+        assert_eq!(s.search_history.len(), MAX_SEARCH_HISTORY);
+        let json = serde_json::to_value(&s).unwrap();
+        assert!(json.get("result_rows").is_none());
+        assert!(json.get("selected_transaction").is_none());
+        s.clear_history();
+        assert!(s.search_history.is_empty());
+    }
+
+    #[test]
+    fn malformed_saved_filters_are_skipped_on_repair() {
+        let mut s = Settings {
+            saved_filters: vec![
+                PersistedFilter {
+                    name: "Valid".into(),
+                    expression: "approved:false".into(),
+                    ..Default::default()
+                },
+                PersistedFilter {
+                    version: 999,
+                    name: "Future".into(),
+                    expression: "approved:false".into(),
+                    ..Default::default()
+                },
+                PersistedFilter {
+                    name: "Broken".into(),
+                    expression: "before:nope".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        s.repair_filters();
+        assert_eq!(s.saved_filters.len(), 1);
+        assert_eq!(s.saved_filters[0].name, "Valid");
     }
     #[test]
     fn theme_density_round_trip_and_column_repair() {

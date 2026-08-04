@@ -110,9 +110,47 @@ pub fn register_page(
 
 pub fn search_results(
     query: &str,
-    _ids: Vec<String>,
+    rows: Vec<crate::storage::query_store::SearchRow>,
     generation: crate::storage::worker::Generation,
 ) -> Result<crate::app::view_model::SearchResultsView, crate::error::RepositoryError> {
+    use crate::app::view_model::{DisplayMoney, HighlightSpanView, SearchResultItemView};
+    let results = rows
+        .into_iter()
+        .map(|row| {
+            let transaction_id = TransactionId::from_uuid(
+                uuid(&row.transaction_id, "transactions", &row.transaction_id)
+                    .map_err(projection_error)?,
+            );
+            let account_id = AccountId::from_uuid(
+                uuid(&row.account_id, "accounts", &row.account_id).map_err(projection_error)?,
+            );
+            let parsed_date =
+                date(&row.date, "transactions", &row.transaction_id).map_err(projection_error)?;
+            Ok(SearchResultItemView {
+                transaction_id,
+                account_id,
+                account: row.account.clone(),
+                date: parsed_date,
+                payee: row.payee.clone(),
+                category: row.category.clone(),
+                memo: row.memo.clone(),
+                amount: DisplayMoney::usd(row.amount.minor_units()),
+                approved: row.approved,
+                clearance: row.clearance.clone(),
+                title: row.payee,
+                subtitle: format!("{} · {} · {}", row.date, row.account, row.category),
+                highlights: row
+                    .highlights
+                    .into_iter()
+                    .map(|span| HighlightSpanView {
+                        field: span.field,
+                        start: span.start,
+                        end: span.end,
+                    })
+                    .collect(),
+            })
+        })
+        .collect::<Result<Vec<_>, crate::error::RepositoryError>>()?;
     Ok(crate::app::view_model::SearchResultsView {
         version: version(generation, 0),
         query: query.into(),
@@ -121,7 +159,7 @@ pub fn search_results(
             filter_summary: query.into(),
             ..Default::default()
         },
-        results: vec![],
+        results,
     })
 }
 
