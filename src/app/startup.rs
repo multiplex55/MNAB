@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::app::settings::SettingsSession;
 
@@ -7,15 +7,18 @@ use crate::app::settings::SettingsSession;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StartupContext {
     pub marker_was_absent: bool,
-    pub last_successfully_opened_budget: Option<PathBuf>,
+    pub fixed_database_exists: bool,
 }
 
 impl StartupContext {
     #[must_use]
-    pub fn capture(marker: &Path, settings: &SettingsSession) -> Self {
+    pub fn capture(marker: &Path, _settings: &SettingsSession) -> Self {
+        let fixed_database_exists = marker
+            .parent()
+            .is_some_and(|data| data.join("mnab.sqlite3").is_file());
         Self {
             marker_was_absent: !marker.exists(),
-            last_successfully_opened_budget: settings.value().last_opened_budget.clone(),
+            fixed_database_exists,
         }
     }
 }
@@ -25,19 +28,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn marker_presence_and_last_budget_are_captured() {
+    fn marker_presence_and_fixed_database_are_captured() {
         let dir = tempfile::tempdir().unwrap();
         let settings_path = dir.path().join("settings.json");
-        let mut settings = SettingsSession::load(&settings_path);
-        settings.value_mut().last_opened_budget = Some(dir.path().join("last.sqlite3"));
+        let settings = SettingsSession::load(&settings_path);
         let marker = dir.path().join(".clean-shutdown");
         assert!(StartupContext::capture(&marker, &settings).marker_was_absent);
+        std::fs::write(dir.path().join("mnab.sqlite3"), "not sqlite").unwrap();
         std::fs::write(&marker, "clean").unwrap();
         let context = StartupContext::capture(&marker, &settings);
         assert!(!context.marker_was_absent);
-        assert_eq!(
-            context.last_successfully_opened_budget,
-            settings.value().last_opened_budget
-        );
+        assert!(context.fixed_database_exists);
     }
 }

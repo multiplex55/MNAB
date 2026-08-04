@@ -5,6 +5,18 @@
 //! window commands.
 use std::collections::BTreeMap;
 
+/// Fixed database lifecycle state for startup/runtime policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DatabaseLifecycle {
+    #[default]
+    Initializing,
+    FirstRunRequired,
+    OpeningDatabase,
+    Ready,
+    RecoveryRequired,
+    ShuttingDown,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LifecycleState {
     #[default]

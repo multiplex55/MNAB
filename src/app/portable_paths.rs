@@ -10,6 +10,7 @@ use crate::error::StartupError;
 pub struct PortablePaths {
     pub executable: PathBuf,
     pub data: PathBuf,
+    pub database: PathBuf,
     pub budgets: PathBuf,
     pub backups: PathBuf,
     pub imports: PathBuf,
@@ -44,6 +45,7 @@ impl PortablePaths {
         let data = parent.join("mnab-data");
         let paths = Self {
             executable: absolute,
+            database: data.join("mnab.sqlite3"),
             budgets: data.join("budgets"),
             backups: data.join("backups"),
             imports: data.join("imports"),
@@ -98,6 +100,7 @@ mod tests {
         let root = sandbox("Portable app ü space");
         let paths = PortablePaths::from_executable(&root.join("MNAB application.exe")).unwrap();
         assert_eq!(paths.data, root.join("mnab-data"));
+        assert_eq!(paths.database, paths.data.join("mnab.sqlite3"));
         assert_eq!(paths.budgets, paths.data.join("budgets"));
         assert_eq!(paths.backups, paths.data.join("backups"));
         assert_eq!(paths.imports, paths.data.join("imports"));

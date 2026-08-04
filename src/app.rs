@@ -46,7 +46,7 @@ impl MnabApp {
                 false,
                 StartupContext {
                     marker_was_absent: false,
-                    last_successfully_opened_budget: None,
+                    fixed_database_exists: false,
                 },
             ),
         }

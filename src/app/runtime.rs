@@ -8,7 +8,7 @@ use crate::{
             OperationClass, RetryMetadata, Reversibility, RuntimeCommand,
         },
         dispatcher::{ActionCollector, requires_confirmation},
-        lifecycle::{Lifecycle, LifecycleEffect, LifecycleState},
+        lifecycle::{DatabaseLifecycle, Lifecycle, LifecycleEffect, LifecycleState},
         portable_paths::PortablePaths,
         session::BudgetSession,
         settings::SettingsSession,
@@ -37,6 +37,7 @@ pub struct ApplicationRuntime {
     settings: Option<SettingsSession>,
     accepting_commands: bool,
     lifecycle: Lifecycle,
+    database_lifecycle: DatabaseLifecycle,
     lifecycle_effects: Vec<LifecycleEffect>,
     shutdown_steps: ShutdownSteps,
     read_only: bool,
@@ -87,9 +88,7 @@ impl ApplicationRuntime {
         self.commit_session(prepared.session, prepared.worker);
         let committed = self.session.as_ref().expect("session was just committed");
         catalog.record_successful_open(committed);
-        if let Some(settings) = &mut self.settings {
-            settings.value_mut().last_opened_budget = Some(committed.database_path.clone());
-        }
+        let _ = committed;
         Ok(())
     }
 
@@ -156,6 +155,7 @@ impl ApplicationRuntime {
             settings,
             accepting_commands: true,
             lifecycle: Lifecycle::default(),
+            database_lifecycle: DatabaseLifecycle::Initializing,
             lifecycle_effects: Vec::new(),
             shutdown_steps: ShutdownSteps::default(),
             read_only: false,
@@ -165,24 +165,30 @@ impl ApplicationRuntime {
     }
 
     fn apply_startup(&mut self, startup: StartupContext) {
-        let Some(selected) = startup.last_successfully_opened_budget else {
-            if startup.marker_was_absent {
-                self.startup_notice(NotificationKind::Warning, "Startup checks pending", "The previous shutdown was unclean; select a budget to run complete diagnostics before opening.");
-            }
-            return;
-        };
         let Some(paths) = self.paths.clone() else {
+            self.database_lifecycle = DatabaseLifecycle::RecoveryRequired;
             return;
         };
+        if !startup.fixed_database_exists {
+            self.database_lifecycle = DatabaseLifecycle::FirstRunRequired;
+            self.view.open_dialog(
+                crate::app::state::Dialog::CreateBudget,
+                egui::Id::new("startup"),
+                egui::Id::new("toolbar"),
+            );
+            return;
+        }
+        self.database_lifecycle = DatabaseLifecycle::OpeningDatabase;
         let result = crate::app::budget_catalog::BudgetCatalog::default().prepare_open_checked(
             &paths,
-            &selected,
+            &paths.database,
             startup.marker_was_absent,
             || {},
         );
         match result {
             Ok(prepared) => {
                 self.commit_session(prepared.session, prepared.worker);
+                self.database_lifecycle = DatabaseLifecycle::Ready;
                 if startup.marker_was_absent {
                     self.startup_notice(NotificationKind::Information, "Startup diagnostics passed", "Integrity, foreign-key, and financial diagnostics passed after the unclean shutdown.");
                 }
@@ -198,6 +204,7 @@ impl ApplicationRuntime {
                     title,
                     &format!("Normal opening was refused: {error}"),
                 );
+                self.database_lifecycle = DatabaseLifecycle::RecoveryRequired;
                 self.view.open_dialog(
                     crate::app::state::Dialog::RecoveryChoice,
                     egui::Id::new("startup"),
@@ -217,9 +224,6 @@ impl ApplicationRuntime {
     pub fn save_settings(&mut self) -> std::io::Result<()> {
         if let Some(settings) = &mut self.settings {
             settings.value_mut().inspector_visible = self.view.inspector_visible;
-            if let Some(session) = &self.session {
-                settings.value_mut().last_opened_budget = Some(session.database_path.clone());
-            }
             settings.save()?;
         }
         Ok(())
@@ -239,6 +243,9 @@ impl ApplicationRuntime {
     }
     pub fn session(&self) -> Option<&BudgetSession> {
         self.session.as_ref()
+    }
+    pub const fn database_lifecycle(&self) -> DatabaseLifecycle {
+        self.database_lifecycle
     }
     pub fn view_mut(&mut self) -> &mut AppState {
         &mut self.view
@@ -773,7 +780,7 @@ mod tests {
             false,
             StartupContext {
                 marker_was_absent: false,
-                last_successfully_opened_budget: None,
+                fixed_database_exists: false,
             },
         );
         runtime.commit_session(
@@ -887,7 +894,7 @@ mod tests {
             false,
             StartupContext {
                 marker_was_absent: false,
-                last_successfully_opened_budget: None,
+                fixed_database_exists: false,
             },
         );
         assert_eq!(
@@ -917,7 +924,7 @@ mod tests {
             false,
             StartupContext {
                 marker_was_absent: false,
-                last_successfully_opened_budget: None,
+                fixed_database_exists: false,
             },
         );
         runtime.commit_session(
@@ -968,7 +975,7 @@ mod tests {
             false,
             StartupContext {
                 marker_was_absent: false,
-                last_successfully_opened_budget: None,
+                fixed_database_exists: false,
             },
         );
         runtime.generation = Generation { budget: 2, view: 0 };
@@ -997,7 +1004,7 @@ mod tests {
         let settings = SettingsSession::load(&paths.settings);
         let context = StartupContext {
             marker_was_absent: false,
-            last_successfully_opened_budget: None,
+            fixed_database_exists: false,
         };
         let mut command =
             ApplicationRuntime::new(Some(paths.clone()), Some(settings), false, context.clone());
@@ -1021,6 +1028,47 @@ mod tests {
     }
 
     #[test]
+    fn missing_fixed_database_enters_first_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = PortablePaths::from_executable(&dir.path().join("mnab.exe")).unwrap();
+        let runtime = ApplicationRuntime::new(
+            Some(paths),
+            None,
+            false,
+            StartupContext {
+                marker_was_absent: false,
+                fixed_database_exists: false,
+            },
+        );
+        assert_eq!(
+            runtime.database_lifecycle(),
+            DatabaseLifecycle::FirstRunRequired
+        );
+        assert!(runtime.session().is_none());
+    }
+
+    #[test]
+    fn corrupt_fixed_database_enters_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = PortablePaths::from_executable(&dir.path().join("mnab.exe")).unwrap();
+        std::fs::write(&paths.database, b"not sqlite").unwrap();
+        let runtime = ApplicationRuntime::new(
+            Some(paths),
+            None,
+            false,
+            StartupContext {
+                marker_was_absent: false,
+                fixed_database_exists: true,
+            },
+        );
+        assert_eq!(
+            runtime.database_lifecycle(),
+            DatabaseLifecycle::RecoveryRequired
+        );
+        assert!(runtime.session().is_none());
+    }
+
+    #[test]
     fn settings_failure_omits_clean_marker() {
         let dir = tempfile::tempdir().unwrap();
         let paths = PortablePaths::from_executable(&dir.path().join("mnab.exe")).unwrap();
@@ -1032,7 +1080,7 @@ mod tests {
             false,
             StartupContext {
                 marker_was_absent: false,
-                last_successfully_opened_budget: None,
+                fixed_database_exists: false,
             },
         );
         assert!(runtime.shutdown().is_err());
