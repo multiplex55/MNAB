@@ -49,6 +49,26 @@ impl AccountRepository for SqliteRepositories<'_> {
     fn put_account(&mut self, v: &Account) -> Result<(), RepositoryError> {
         self.transaction.execute("INSERT INTO accounts(id,budget_id,name,account_type,sort_order,closed,note,favorite,created_at,modified_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,datetime('now'),datetime('now')) ON CONFLICT(id) DO UPDATE SET name=excluded.name,sort_order=excluded.sort_order,closed=excluded.closed,note=excluded.note,favorite=excluded.favorite,modified_at=datetime('now')",(v.id.to_string(),v.budget_id.to_string(),&v.name,account_type(v.account_type),v.sort_order,v.closed,&v.note,v.favorite)).map(|_|()).map_err(repo)
     }
+    fn account(&mut self, id: AccountId) -> Result<Option<Account>, RepositoryError> {
+        use rusqlite::OptionalExtension;
+        self.transaction.query_row("SELECT budget_id,name,account_type,closed,note,sort_order,favorite FROM accounts WHERE id=?1",[id.to_string()],|r|Ok(Account{id,budget_id:parse(r.get::<_,String>(0)?)?,name:r.get(1)?,account_type:parse_account_type(&r.get::<_,String>(2)?)?,closed:r.get(3)?,note:r.get(4)?,sort_order:r.get(5)?,favorite:r.get(6)?})).optional().map_err(repo)
+    }
+}
+fn parse<T: std::str::FromStr>(s: String) -> rusqlite::Result<T> {
+    s.parse().map_err(|_| rusqlite::Error::InvalidQuery)
+}
+fn parse_account_type(s: &str) -> rusqlite::Result<AccountType> {
+    match s {
+        "checking" => Ok(AccountType::Checking),
+        "savings" => Ok(AccountType::Savings),
+        "cash" => Ok(AccountType::Cash),
+        "credit_card" => Ok(AccountType::CreditCard),
+        "loan" => Ok(AccountType::Loan),
+        "asset" => Ok(AccountType::Asset),
+        "liability" => Ok(AccountType::Liability),
+        "investment" => Ok(AccountType::Investment),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
 }
 fn account_type(v: AccountType) -> &'static str {
     match v {
@@ -65,12 +85,135 @@ fn account_type(v: AccountType) -> &'static str {
 impl TransactionRepository for SqliteRepositories<'_> {
     fn put_transaction(&mut self, v: &crate::domain::Transaction) -> Result<(), RepositoryError> {
         validate_transaction(v).map_err(repo)?;
-        self.transaction.execute("INSERT INTO transactions(id,budget_id,account_id,transaction_date,payee_id,amount,memo,cleared_state,approval_state,created_at,modified_at,archived,voided) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,datetime('now'),datetime('now'),?10,?11)",(v.id.to_string(),v.budget_id.to_string(),v.account_id.to_string(),v.date.0.to_string(),v.payee_id.map(|x|x.to_string()),v.amount.minor_units(),&v.memo,match v.clearance{Clearance::Uncleared=>"uncleared",Clearance::Cleared=>"cleared",Clearance::Reconciled=>"reconciled"},match v.approval{Approval::Unapproved=>"unapproved",Approval::Approved=>"approved"},v.archived,v.voided)).map(|_|()).map_err(repo)
+        let (category, transfer) = match &v.body {
+            TransactionBody::OpeningBalance { category_id } => (*category_id, None),
+            TransactionBody::Categorized { category_id } => (Some(*category_id), None),
+            TransactionBody::Transfer { transfer_id, .. } => (None, Some(*transfer_id)),
+            TransactionBody::Split { .. } => (None, None),
+        };
+        self.transaction.execute("INSERT INTO transactions(id,budget_id,account_id,transaction_date,payee_id,category_id,transfer_id,amount,memo,cleared_state,approval_state,created_at,modified_at,archived,voided) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,datetime('now'),datetime('now'),?12,?13) ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,transaction_date=excluded.transaction_date,payee_id=excluded.payee_id,category_id=excluded.category_id,transfer_id=excluded.transfer_id,amount=excluded.amount,memo=excluded.memo,cleared_state=excluded.cleared_state,approval_state=excluded.approval_state,modified_at=datetime('now'),archived=excluded.archived,voided=excluded.voided",(v.id.to_string(),v.budget_id.to_string(),v.account_id.to_string(),v.date.0.to_string(),v.payee_id.map(|x|x.to_string()),category.map(|x|x.to_string()),transfer.map(|x|x.to_string()),v.amount.minor_units(),&v.memo,match v.clearance{Clearance::Uncleared=>"uncleared",Clearance::Cleared=>"cleared",Clearance::Reconciled=>"reconciled"},match v.approval{Approval::Unapproved=>"unapproved",Approval::Approved=>"approved"},v.archived,v.voided)).map_err(repo)?;
+        self.transaction
+            .execute(
+                "DELETE FROM subtransactions WHERE transaction_id=?1",
+                [v.id.to_string()],
+            )
+            .map_err(repo)?;
+        if let TransactionBody::Split { lines } = &v.body {
+            for (i, line) in lines.iter().enumerate() {
+                self.transaction.execute("INSERT INTO subtransactions(id,budget_id,transaction_id,category_id,memo,amount,sort_order) VALUES(?1,?2,?3,?4,?5,?6,?7)",(uuid::Uuid::new_v4().to_string(),v.budget_id.to_string(),v.id.to_string(),line.category_id.to_string(),&line.memo,line.amount.minor_units(),i as i64)).map_err(repo)?;
+            }
+        }
+        Ok(())
+    }
+    fn transaction(
+        &mut self,
+        id: TransactionId,
+    ) -> Result<Option<crate::domain::Transaction>, RepositoryError> {
+        use rusqlite::OptionalExtension;
+        let raw=self.transaction.query_row("SELECT budget_id,account_id,transaction_date,payee_id,category_id,transfer_id,amount,memo,cleared_state,approval_state,archived,voided FROM transactions WHERE id=?1",[id.to_string()],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,i64>(6)?,r.get::<_,Option<String>>(7)?,r.get::<_,String>(8)?,r.get::<_,String>(9)?,r.get::<_,bool>(10)?,r.get::<_,bool>(11)?))).optional().map_err(repo)?;
+        let Some((b, a, d, p, c, t, amount, memo, clear, approval, archived, voided)) = raw else {
+            return Ok(None);
+        };
+        let account_id: AccountId = a.parse().map_err(repo)?;
+        let category = c.map(|x| x.parse()).transpose().map_err(repo)?;
+        let body = if let Some(transfer) = t {
+            TransactionBody::Transfer {
+                transfer_id: transfer.parse().map_err(repo)?,
+                other_account_id: account_id,
+                other_amount: Money::from_minor_units(-amount),
+            }
+        } else {
+            TransactionBody::OpeningBalance {
+                category_id: category,
+            }
+        };
+        Ok(Some(crate::domain::Transaction {
+            id,
+            budget_id: b.parse().map_err(repo)?,
+            account_id,
+            date: TransactionDate(
+                time::Date::parse(&d, &time::format_description::well_known::Iso8601::DATE)
+                    .map_err(repo)?,
+            ),
+            payee_id: p.map(|x| x.parse()).transpose().map_err(repo)?,
+            amount: Money::from_minor_units(amount),
+            memo,
+            clearance: match clear.as_str() {
+                "cleared" => Clearance::Cleared,
+                "reconciled" => Clearance::Reconciled,
+                _ => Clearance::Uncleared,
+            },
+            approval: if approval == "approved" {
+                Approval::Approved
+            } else {
+                Approval::Unapproved
+            },
+            body,
+            archived,
+            voided,
+        }))
+    }
+    fn delete_transaction(&mut self, id: TransactionId) -> Result<(), RepositoryError> {
+        self.transaction
+            .execute("DELETE FROM transactions WHERE id=?1", [id.to_string()])
+            .map(|_| ())
+            .map_err(repo)
     }
 }
 macro_rules! unsupported {($trait:ident,$($method:ident:$ty:ty),+) => {impl $trait for SqliteRepositories<'_>{$ (fn $method(&mut self,_:&$ty)->Result<(),RepositoryError>{Err(repo(std::io::Error::new(std::io::ErrorKind::Unsupported,"repository operation is not implemented")))})+}}}
-unsupported!(PayeeRepository,put_payee:Payee);
-unsupported!(AssignmentRepository,put_assignment:BudgetAssignment);
+impl PayeeRepository for SqliteRepositories<'_> {
+    fn put_payee(&mut self, v: &Payee) -> Result<(), RepositoryError> {
+        self.transaction.execute("INSERT INTO payees(id,budget_id,name,archived,hidden,default_category_id,last_used_category_id) VALUES(?1,?2,?3,0,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET name=excluded.name,hidden=excluded.hidden,default_category_id=excluded.default_category_id,last_used_category_id=excluded.last_used_category_id",(v.id.to_string(),v.budget_id.to_string(),&v.name,v.hidden,v.default_category_id.map(|x|x.to_string()),v.last_used_category_id.map(|x|x.to_string()))).map(|_|()).map_err(repo)
+    }
+    fn payee(&mut self, id: PayeeId) -> Result<Option<Payee>, RepositoryError> {
+        use rusqlite::OptionalExtension;
+        self.transaction.query_row("SELECT budget_id,name,hidden,default_category_id,last_used_category_id FROM payees WHERE id=?1",[id.to_string()],|r|Ok(Payee{id,budget_id:parse(r.get(0)?)?,name:r.get(1)?,hidden:r.get(2)?,default_category_id:r.get::<_,Option<String>>(3)?.map(|x|x.parse()).transpose().map_err(|_|rusqlite::Error::InvalidQuery)?,last_used_category_id:r.get::<_,Option<String>>(4)?.map(|x|x.parse()).transpose().map_err(|_|rusqlite::Error::InvalidQuery)?})).optional().map_err(repo)
+    }
+    fn payee_is_used(&mut self, id: PayeeId) -> Result<bool, RepositoryError> {
+        self.transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM transactions WHERE payee_id=?1)",
+                [id.to_string()],
+                |r| r.get(0),
+            )
+            .map_err(repo)
+    }
+    fn delete_payee(&mut self, id: PayeeId) -> Result<(), RepositoryError> {
+        self.transaction
+            .execute("DELETE FROM payees WHERE id=?1", [id.to_string()])
+            .map(|_| ())
+            .map_err(repo)
+    }
+}
+impl AssignmentRepository for SqliteRepositories<'_> {
+    fn put_assignment(&mut self, v: &BudgetAssignment) -> Result<(), RepositoryError> {
+        self.transaction.execute("INSERT INTO budget_assignments(id,budget_id,category_id,budget_month,amount,created_at,modified_at) SELECT ?1,c.budget_id,?2,?3,?4,datetime('now'),datetime('now') FROM categories c WHERE c.id=?2 ON CONFLICT(category_id,budget_month) DO UPDATE SET amount=excluded.amount,modified_at=datetime('now')",(uuid::Uuid::new_v4().to_string(),v.category_id.to_string(),month_text(v.month),v.amount.minor_units())).map(|_|()).map_err(repo)
+    }
+    fn assignment(
+        &mut self,
+        c: CategoryId,
+        m: BudgetMonth,
+    ) -> Result<Option<BudgetAssignment>, RepositoryError> {
+        use rusqlite::OptionalExtension;
+        self.transaction
+            .query_row(
+                "SELECT amount FROM budget_assignments WHERE category_id=?1 AND budget_month=?2",
+                (c.to_string(), month_text(m)),
+                |r| {
+                    Ok(BudgetAssignment {
+                        category_id: c,
+                        month: m,
+                        amount: Money::from_minor_units(r.get(0)?),
+                    })
+                },
+            )
+            .optional()
+            .map_err(repo)
+    }
+}
+fn month_text(m: BudgetMonth) -> String {
+    format!("{:04}-{:02}", m.year(), m.month())
+}
 unsupported!(ImportRepository,put_import_batch:ImportBatch);
 impl TargetRepository for SqliteRepositories<'_> {
     fn put_target(&mut self, v: &Target) -> Result<(), RepositoryError> {
@@ -112,6 +255,12 @@ impl TargetRepository for SqliteRepositories<'_> {
         };
         self.transaction.execute("INSERT INTO targets(id,budget_id,category_id,account_id,target_type,amount,due_date,recurrence,created_at,modified_at) SELECT ?1,c.budget_id,?2,?3,?4,?5,?6,?7,datetime('now'),datetime('now') FROM categories c WHERE c.id=?2 ON CONFLICT(id) DO UPDATE SET category_id=excluded.category_id,account_id=excluded.account_id,target_type=excluded.target_type,amount=excluded.amount,due_date=excluded.due_date,recurrence=excluded.recurrence,modified_at=datetime('now')", (v.id.to_string(), category.to_string(), account.map(|x| x.to_string()), kind, amount.map(Money::minor_units), due.map(|x| x.to_string()), recurrence)).map(|_| ()).map_err(repo)
     }
+    fn delete_target(&mut self, id: TargetId) -> Result<(), RepositoryError> {
+        self.transaction
+            .execute("DELETE FROM targets WHERE id=?1", [id.to_string()])
+            .map(|_| ())
+            .map_err(repo)
+    }
 }
 impl ScheduledRepository for SqliteRepositories<'_> {
     fn put_scheduled(&mut self, v: &ScheduledTransaction) -> Result<(), RepositoryError> {
@@ -124,6 +273,15 @@ impl ScheduledRepository for SqliteRepositories<'_> {
             Recurrence::CustomDays(n) => ("custom_days", Some(n)),
         };
         self.transaction.execute("INSERT INTO scheduled_transactions(id,budget_id,account_id,payee_id,category_id,start_date,recurrence,custom_interval_days,end_date,amount,sort_order,active) SELECT ?1,a.budget_id,?2,?3,?4,?5,?6,?7,?8,?9,0,?10 FROM accounts a WHERE a.id=?2 ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,payee_id=excluded.payee_id,category_id=excluded.category_id,start_date=excluded.start_date,recurrence=excluded.recurrence,custom_interval_days=excluded.custom_interval_days,end_date=excluded.end_date,amount=excluded.amount,active=excluded.active", (v.id.to_string(), v.account_id.to_string(), v.payee_id.map(|x| x.to_string()), v.category_id.map(|x| x.to_string()), v.start_date.to_string(), recurrence, interval, v.end_date.map(|x| x.to_string()), v.amount.minor_units(), v.active)).map(|_| ()).map_err(repo)
+    }
+    fn delete_scheduled(&mut self, id: ScheduledTransactionId) -> Result<(), RepositoryError> {
+        self.transaction
+            .execute(
+                "DELETE FROM scheduled_transactions WHERE id=?1",
+                [id.to_string()],
+            )
+            .map(|_| ())
+            .map_err(repo)
     }
 }
 impl ReconciliationRepository for SqliteRepositories<'_> {
@@ -142,11 +300,39 @@ impl ReconciliationRepository for SqliteRepositories<'_> {
     }
 }
 impl CategoryRepository for SqliteRepositories<'_> {
-    fn put_group(&mut self, _: &CategoryGroup) -> Result<(), RepositoryError> {
-        Err(repo(std::io::Error::other("not implemented")))
+    fn put_group(&mut self, v: &CategoryGroup) -> Result<(), RepositoryError> {
+        self.transaction.execute("INSERT INTO category_groups(id,budget_id,name,sort_order,hidden) VALUES(?1,?2,?3,COALESCE((SELECT MAX(sort_order)+1 FROM category_groups WHERE budget_id=?2),0),?4) ON CONFLICT(id) DO UPDATE SET name=excluded.name,hidden=excluded.hidden",(v.id.to_string(),v.budget_id.to_string(),&v.name,v.hidden)).map(|_|()).map_err(repo)
     }
-    fn put_category(&mut self, _: &Category) -> Result<(), RepositoryError> {
-        Err(repo(std::io::Error::other("not implemented")))
+    fn put_category(&mut self, v: &Category) -> Result<(), RepositoryError> {
+        self.transaction.execute("INSERT INTO categories(id,budget_id,group_id,name,sort_order,hidden,archived) SELECT ?1,g.budget_id,?2,?3,COALESCE((SELECT MAX(sort_order)+1 FROM categories WHERE group_id=?2),0),?4,?5 FROM category_groups g WHERE g.id=?2 ON CONFLICT(id) DO UPDATE SET group_id=excluded.group_id,name=excluded.name,hidden=excluded.hidden,archived=excluded.archived",(v.id.to_string(),v.group_id.to_string(),&v.name,v.hidden,v.archived)).map(|_|()).map_err(repo)
+    }
+    fn category(&mut self, id: CategoryId) -> Result<Option<Category>, RepositoryError> {
+        use rusqlite::OptionalExtension;
+        self.transaction
+            .query_row(
+                "SELECT group_id,name,hidden,archived FROM categories WHERE id=?1",
+                [id.to_string()],
+                |r| {
+                    Ok(Category {
+                        id,
+                        group_id: parse(r.get(0)?)?,
+                        name: r.get(1)?,
+                        hidden: r.get(2)?,
+                        archived: r.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(repo)
+    }
+    fn category_is_used(&mut self, id: CategoryId) -> Result<bool, RepositoryError> {
+        self.transaction.query_row("SELECT EXISTS(SELECT 1 FROM transactions WHERE category_id=?1 UNION ALL SELECT 1 FROM subtransactions WHERE category_id=?1 UNION ALL SELECT 1 FROM budget_assignments WHERE category_id=?1)",[id.to_string()],|r|r.get(0)).map_err(repo)
+    }
+    fn delete_category(&mut self, id: CategoryId) -> Result<(), RepositoryError> {
+        self.transaction
+            .execute("DELETE FROM categories WHERE id=?1", [id.to_string()])
+            .map(|_| ())
+            .map_err(repo)
     }
 }
 impl AuditRepository for SqliteRepositories<'_> {

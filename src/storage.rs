@@ -2,9 +2,11 @@
 
 pub mod connection;
 pub mod diagnostics;
+pub mod financial_executor;
 pub mod mapping;
 pub mod migration;
 pub mod model;
+pub mod protocol;
 pub mod query_store;
 pub mod repair;
 pub mod repository;

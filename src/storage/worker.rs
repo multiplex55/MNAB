@@ -92,10 +92,7 @@ pub enum TypedResult {
     Healthy,
     Count(i64),
     /// A transaction committed successfully. Only this result is eligible for undo history.
-    Mutation {
-        command: crate::app::command::FinancialCommand,
-        inverse: crate::app::command::FinancialCommand,
-    },
+    Mutation(crate::storage::protocol::MutationResult),
     Report(crate::domain::ReportResult),
     RegisterPage,
     SearchResults,
@@ -146,6 +143,8 @@ pub enum WorkerError {
     Shutdown,
     #[error("repository error: {0}")]
     Repository(String),
+    #[error("validation failed: {0}")]
+    Validation(String),
     #[error("storage worker terminated")]
     Terminated,
 }
@@ -228,7 +227,7 @@ fn run(
     stopping: Arc<AtomicBool>,
     repaint: impl Fn(),
 ) -> Result<(), WorkerError> {
-    let connection = match open_primary(&path) {
+    let mut connection = match open_primary(&path) {
         Ok(connection) => {
             let _ = startup.send(Ok(()));
             connection
@@ -269,7 +268,12 @@ fn run(
                 let result = if stopping.load(Ordering::Acquire) {
                     Err(WorkerError::Cancelled)
                 } else {
-                    execute(&connection, &request.operation, &mut report_cache)
+                    execute_operation(
+                        &mut connection,
+                        &request.operation,
+                        request.generation,
+                        &mut report_cache,
+                    )
                 };
                 repaint();
                 let _ = tx.send(StorageResponse::Completed {
@@ -320,9 +324,10 @@ fn run(
 struct ReportCache {
     entries: HashMap<(crate::domain::BudgetId, String, u64), crate::domain::ReportResult>,
 }
-fn execute(
-    c: &Connection,
+fn execute_operation(
+    c: &mut Connection,
     op: &WorkerOperation,
+    generation: Generation,
     cache: &mut ReportCache,
 ) -> Result<TypedResult, WorkerError> {
     match op {
@@ -427,16 +432,8 @@ fn execute(
         WorkerOperation::Diagnostics(_) => Ok(TypedResult::Diagnostics),
         WorkerOperation::Occurrences(_) => Ok(TypedResult::OccurrencesGenerated),
         WorkerOperation::Financial(FinancialOperation::Command(envelope)) => {
-            let crate::app::command::ApplicationAction::Financial(command) = &envelope.payload
-            else {
-                return Err(WorkerError::Repository(
-                    "non-financial command in financial request".into(),
-                ));
-            };
-            Ok(TypedResult::Mutation {
-                command: command.clone(),
-                inverse: command.clone(),
-            })
+            crate::storage::financial_executor::execute(c, envelope, generation.budget)
+                .map(TypedResult::Mutation)
         }
     }
 }
