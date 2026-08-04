@@ -11,8 +11,36 @@ use time::Date;
 
 use crate::domain::{
     AccountId, BudgetId, BudgetMonth, CategoryGroupId, CategoryId, ImportBatchId, PayeeId,
-    ReconciliationId, ScheduledTransactionId, TargetId, TransactionId,
+    ReconciliationId, ScheduledOccurrenceId, ScheduledTransactionId, TargetId, TransactionId,
 };
+
+/// A financial value calculated on the storage thread and ready to render.  `text` is deliberately
+/// carried with the minor-unit value so widgets never duplicate sign, currency, or rounding rules.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisplayMoney {
+    pub minor_units: i64,
+    pub text: String,
+}
+
+impl DisplayMoney {
+    #[must_use]
+    pub fn usd(minor_units: i64) -> Self {
+        let sign = if minor_units < 0 { "-" } else { "" };
+        let absolute = i128::from(minor_units).abs();
+        Self {
+            minor_units,
+            text: format!("{sign}${}.{:02}", absolute / 100, absolute % 100),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SortFilterMetadata {
+    pub sort_key: String,
+    pub descending: bool,
+    pub filter_summary: String,
+    pub total_before_filter: u64,
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ViewVersion {
@@ -285,6 +313,56 @@ pub struct InboxSummaryView {
     pub import_count: u64,
     pub scheduled_count: u64,
     pub target_attention_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchResultItemView {
+    pub transaction_id: TransactionId,
+    pub account_id: AccountId,
+    pub date: Date,
+    pub title: String,
+    pub subtitle: String,
+    pub amount: DisplayMoney,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchResultsView {
+    pub version: ViewVersion,
+    pub query: String,
+    pub metadata: SortFilterMetadata,
+    pub results: Vec<SearchResultItemView>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduledOccurrenceView {
+    pub occurrence_id: ScheduledOccurrenceId,
+    pub schedule_id: ScheduledTransactionId,
+    pub date: Date,
+    pub payee: String,
+    pub amount: DisplayMoney,
+    pub safe_status: String,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OccurrencesView {
+    pub version: ViewVersion,
+    pub through: Date,
+    pub occurrences: Vec<ScheduledOccurrenceView>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticFindingView {
+    pub severity: String,
+    pub check: String,
+    pub entity_reference: Option<String>,
+    pub safe_explanation: String,
+    pub safe_remediation: String,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticsView {
+    pub version: ViewVersion,
+    pub findings: Vec<DiagnosticFindingView>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandOutcomeView {
+    pub version: ViewVersion,
+    pub summary: String,
 }
 
 #[cfg(test)]

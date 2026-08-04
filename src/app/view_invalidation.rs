@@ -61,13 +61,11 @@ pub fn dependent_budget_months(
     earliest: BudgetMonth,
     materialized: impl IntoIterator<Item = BudgetMonth>,
 ) -> ViewInvalidations {
-    materialized
+    std::iter::once(earliest)
+        .chain(materialized)
         .into_iter()
         .filter(|month| *month >= earliest)
         .map(ViewInvalidation::BudgetMonth)
-        .chain(std::iter::once(ViewInvalidation::BudgetRolloverFrom(
-            earliest,
-        )))
         .collect()
 }
 
@@ -144,5 +142,20 @@ mod tests {
         );
         assert_eq!(scheduler.drain().iter().count(), 2);
         assert!(scheduler.pending().is_empty());
+    }
+
+    #[test]
+    fn rollover_expands_only_changed_and_materialized_later_months() {
+        let changed = BudgetMonth::new(2026, 3).unwrap();
+        let before = BudgetMonth::new(2026, 2).unwrap();
+        let later = BudgetMonth::new(2026, 5).unwrap();
+        let expanded = dependent_budget_months(changed, [before, later, later]);
+        assert_eq!(
+            expanded.iter().cloned().collect::<Vec<_>>(),
+            vec![
+                ViewInvalidation::BudgetMonth(changed),
+                ViewInvalidation::BudgetMonth(later),
+            ]
+        );
     }
 }

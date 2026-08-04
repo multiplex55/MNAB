@@ -4,6 +4,223 @@ use crate::domain::*;
 use time::{Date, format_description::well_known::Iso8601};
 use uuid::Uuid;
 
+fn projection_error(
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> crate::error::RepositoryError {
+    crate::error::RepositoryError::Failed {
+        source: Box::new(error),
+    }
+}
+
+#[must_use]
+pub const fn version(
+    generation: crate::storage::worker::Generation,
+    revision: u64,
+) -> crate::app::view_model::ViewVersion {
+    crate::app::view_model::ViewVersion {
+        generation: generation.view,
+        revision,
+    }
+}
+
+#[must_use]
+pub fn outcome(
+    summary: &str,
+    generation: crate::storage::worker::Generation,
+) -> crate::app::view_model::CommandOutcomeView {
+    crate::app::view_model::CommandOutcomeView {
+        version: version(generation, 0),
+        summary: summary.into(),
+    }
+}
+
+pub fn register_page(
+    page: crate::storage::query_store::RegisterPage,
+    account_id: AccountId,
+    offset: u32,
+    generation: crate::storage::worker::Generation,
+) -> Result<crate::app::view_model::RegisterPageView, crate::error::RepositoryError> {
+    use crate::app::view_model::*;
+    let rows = page
+        .rows
+        .into_iter()
+        .map(|row| {
+            Ok(RegisterRowView {
+                transaction_id: TransactionId::from_uuid(
+                    uuid(&row.transaction_id, "transactions", &row.transaction_id)
+                        .map_err(projection_error)?,
+                ),
+                date: date(&row.date, "transactions", &row.transaction_id)
+                    .map_err(projection_error)?,
+                payee: row.payee,
+                category: row.category,
+                memo: row.memo,
+                amount_cents: row.amount.minor_units(),
+                running_balance_cents: row.running_balance.minor_units(),
+                reconciled: row.cleared_state == "reconciled",
+            })
+        })
+        .collect::<Result<Vec<_>, crate::error::RepositoryError>>()?;
+    let next_cursor = page
+        .next_cursor
+        .map(|cursor| -> Result<_, crate::error::RepositoryError> {
+            Ok(RegisterCursor {
+                date: date(
+                    &cursor.transaction_date,
+                    "transactions",
+                    &cursor.transaction_id,
+                )
+                .map_err(projection_error)?,
+                transaction_id: TransactionId::from_uuid(
+                    uuid(
+                        &cursor.transaction_id,
+                        "transactions",
+                        &cursor.transaction_id,
+                    )
+                    .map_err(projection_error)?,
+                ),
+            })
+        })
+        .transpose()?;
+    let anchor = page
+        .running_balance_anchors
+        .iter()
+        .find(|(id, _)| id == &account_id.to_string())
+        .map_or(0, |(_, money)| money.minor_units());
+    Ok(RegisterPageView {
+        version: version(generation, 0),
+        account_id,
+        offset: u64::from(offset),
+        cursor: None,
+        next_cursor,
+        total_matches: rows.len() as u64,
+        running_balance_anchor_cents: anchor,
+        rows,
+        separators: vec![],
+        filter: RegisterFilterView {
+            text: String::new(),
+            from: None,
+            through: None,
+            category_ids: Default::default(),
+            payee_ids: Default::default(),
+            cleared_only: false,
+        },
+    })
+}
+
+pub fn search_results(
+    query: &str,
+    _ids: Vec<String>,
+    generation: crate::storage::worker::Generation,
+) -> Result<crate::app::view_model::SearchResultsView, crate::error::RepositoryError> {
+    Ok(crate::app::view_model::SearchResultsView {
+        version: version(generation, 0),
+        query: query.into(),
+        metadata: crate::app::view_model::SortFilterMetadata {
+            sort_key: "relevance".into(),
+            filter_summary: query.into(),
+            ..Default::default()
+        },
+        results: vec![],
+    })
+}
+
+#[must_use]
+pub fn diagnostics(
+    findings: Vec<crate::storage::diagnostics::Finding>,
+    generation: crate::storage::worker::Generation,
+) -> crate::app::view_model::DiagnosticsView {
+    crate::app::view_model::DiagnosticsView {
+        version: version(generation, 0),
+        findings: findings
+            .into_iter()
+            .map(|f| crate::app::view_model::DiagnosticFindingView {
+                severity: format!("{:?}", f.severity).to_lowercase(),
+                check: f.check,
+                entity_reference: f.entity_id,
+                safe_explanation: f.summary,
+                safe_remediation: f.remediation,
+            })
+            .collect(),
+    }
+}
+
+pub fn occurrences(
+    _connection: &rusqlite::Connection,
+    through: Date,
+    generation: crate::storage::worker::Generation,
+) -> Result<crate::app::view_model::OccurrencesView, rusqlite::Error> {
+    Ok(crate::app::view_model::OccurrencesView {
+        version: version(generation, 0),
+        through,
+        occurrences: vec![],
+    })
+}
+
+#[must_use]
+pub fn report_view(
+    result: ReportResult,
+    generation: crate::storage::worker::Generation,
+) -> crate::app::view_model::ReportView {
+    use crate::app::view_model::{ReportPointView, ReportView};
+    let (revision, title, points, total) = match result {
+        ReportResult::IncomeExpense(v) => (
+            v.source.revision,
+            "Income and expense",
+            v.rows
+                .into_iter()
+                .map(|r| ReportPointView {
+                    label: format!("{:04}-{:02}", r.month.year(), r.month.month()),
+                    income_cents: r.income.minor_units(),
+                    expense_cents: r.expense.minor_units(),
+                    net_cents: r.net.minor_units(),
+                })
+                .collect(),
+            v.net.minor_units(),
+        ),
+        ReportResult::NetWorth(v) => (
+            v.source.revision,
+            "Net worth",
+            v.rows
+                .into_iter()
+                .map(|r| ReportPointView {
+                    label: r.date.to_string(),
+                    income_cents: 0,
+                    expense_cents: 0,
+                    net_cents: r.net_worth.minor_units(),
+                })
+                .collect(),
+            v.total.minor_units(),
+        ),
+        ReportResult::Spending(v) => (
+            v.source.revision,
+            "Spending",
+            v.monthly
+                .into_iter()
+                .map(|r| ReportPointView {
+                    label: format!("{:04}-{:02}", r.month.year(), r.month.month()),
+                    income_cents: 0,
+                    expense_cents: r.amount.minor_units(),
+                    net_cents: -r.amount.minor_units(),
+                })
+                .collect(),
+            v.total.minor_units(),
+        ),
+        ReportResult::BudgetProgress(v) => (
+            v.source.revision,
+            "Budget progress",
+            vec![],
+            v.total_assigned.minor_units() - v.total_spent.minor_units(),
+        ),
+    };
+    ReportView {
+        version: version(generation, revision),
+        title: title.into(),
+        points,
+        total_cents: total,
+    }
+}
+
 fn bad(table: &'static str, id: &str, reason: &'static str) -> RowConversionError {
     RowConversionError::new(table, id, reason)
 }
