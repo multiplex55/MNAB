@@ -78,6 +78,13 @@ pub struct AccountSummary {
 #[derive(Clone, Debug)]
 pub enum Dialog {
     ConfirmDelete,
+    CreateBudget,
+    OpenBudget,
+    RecentBudgets,
+    RenameBudget,
+    ArchiveBudget,
+    RepairBudget,
+    RecoveryChoice,
     Reconcile(AccountId),
     Import(AccountId),
     Settings,

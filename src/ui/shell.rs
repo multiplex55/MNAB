@@ -53,6 +53,21 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.heading("MNAB — Multi Needs A Budget");
+            ui.menu_button("Budget", |ui| {
+                use crate::app::command::{ApplicationAction, BudgetAction};
+                if ui.button("New budget…").clicked() {
+                    actions.push(ApplicationAction::Budget(BudgetAction::ShowCreate));
+                    ui.close();
+                }
+                if ui.button("Open budget…").clicked() {
+                    actions.push(ApplicationAction::Budget(BudgetAction::ShowOpen));
+                    ui.close();
+                }
+                if ui.button("Recent budgets…").clicked() {
+                    actions.push(ApplicationAction::Budget(BudgetAction::ShowRecents));
+                    ui.close();
+                }
+            });
             let response = ui.add(
                 egui::TextEdit::singleline(&mut state.search)
                     .hint_text("Search (Cmd/Ctrl+F)")
@@ -85,6 +100,57 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
         Workspace::Account(id) => super::workspaces::register::show(ui, state, id, actions),
     });
     show_palette(ctx, state, actions);
+    show_budget_dialog(ctx, state);
+}
+
+fn show_budget_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let Some(dialog) = state.dialog.as_ref().map(|dialog| dialog.dialog.clone()) else {
+        return;
+    };
+    let (title, guidance) = match dialog {
+        crate::app::state::Dialog::CreateBudget => (
+            "Create a budget",
+            "Choose a name, managed filename, currency, and initial month.",
+        ),
+        crate::app::state::Dialog::OpenBudget => (
+            "Open a budget",
+            "Select a managed MNAB budget. It will be validated completely before replacing the current session.",
+        ),
+        crate::app::state::Dialog::RecentBudgets => (
+            "Recent budgets",
+            "Open, rename, archive, remove, validate, repair, reveal, or delete a catalog entry.",
+        ),
+        crate::app::state::Dialog::RenameBudget => (
+            "Rename budget",
+            "Renaming changes only the visible catalog/session name.",
+        ),
+        crate::app::state::Dialog::ArchiveBudget => (
+            "Archive budget",
+            "Archiving hides this entry from recents without deleting financial data.",
+        ),
+        crate::app::state::Dialog::RepairBudget => (
+            "Repair budget",
+            "Review diagnostics and the validated backup before applying an explicit repair.",
+        ),
+        crate::app::state::Dialog::RecoveryChoice => (
+            "Budget recovery required",
+            "Opening was refused. Choose a backup or an explicit diagnostic/repair action; MNAB will not reset the database.",
+        ),
+        crate::app::state::Dialog::ConfirmDelete => (
+            "Delete budget",
+            "Type the exact current budget name to enable permanent managed-file deletion.",
+        ),
+        crate::app::state::Dialog::Reconcile(_)
+        | crate::app::state::Dialog::Import(_)
+        | crate::app::state::Dialog::Settings => return,
+    };
+    egui::Modal::new(egui::Id::new("budget-lifecycle-dialog")).show(ctx, |ui| {
+        ui.heading(title);
+        ui.label(guidance);
+        if ui.button("Cancel").clicked() {
+            state.dialog = None;
+        }
+    });
 }
 
 fn show_palette(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionCollector) {
