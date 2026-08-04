@@ -104,6 +104,8 @@ pub struct AppState {
     pub accounts: Vec<AccountSummary>,
     pub search: String,
     pub search_id: Id,
+    pub palette: crate::app::palette::PaletteState,
+    pub palette_shortcut: String,
 }
 impl Default for AppState {
     fn default() -> Self {
@@ -131,6 +133,8 @@ impl Default for AppState {
             accounts: vec![],
             search: String::new(),
             search_id: Id::new("global-search"),
+            palette: crate::app::palette::PaletteState::default(),
+            palette_shortcut: crate::app::settings::DEFAULT_PALETTE_SHORTCUT.into(),
         }
     }
 }

@@ -1,5 +1,40 @@
 use crate::app::{dispatcher::ActionCollector, navigation::Workspace, state::AppState};
 pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionCollector) {
+    let palette_pressed = ctx.input(|input| {
+        input.events.iter().any(|event| match event {
+            egui::Event::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                modifiers,
+                ..
+            } => {
+                let configured_key = state
+                    .palette_shortcut
+                    .trim()
+                    .rsplit('+')
+                    .next()
+                    .unwrap_or("");
+                modifiers.command
+                    && !modifiers.alt
+                    && modifiers.shift
+                        == state
+                            .palette_shortcut
+                            .to_ascii_lowercase()
+                            .contains("shift+")
+                    && match key {
+                        egui::Key::P => configured_key.eq_ignore_ascii_case("P"),
+                        egui::Key::K => configured_key.eq_ignore_ascii_case("K"),
+                        _ => false,
+                    }
+            }
+            _ => false,
+        })
+    });
+    if palette_pressed && !state.palette.open {
+        let initiating = ctx.memory(|memory| memory.focused());
+        state.palette.open(initiating);
+    }
     let modal = state.dialog.is_some();
     let editor = ctx.memory(|m| m.focused().is_some_and(|id| id == state.search_id));
     let mut keyboard_commands = Vec::new();
@@ -49,6 +84,69 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
         Workspace::Inbox => super::workspaces::inbox::show(ui, state, actions),
         Workspace::Account(id) => super::workspaces::register::show(ui, state, id, actions),
     });
+    show_palette(ctx, state, actions);
+}
+
+fn show_palette(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionCollector) {
+    if !state.palette.open {
+        return;
+    }
+    let context = crate::app::palette::CommandContext {
+        budget_open: state.active_budget.is_some(),
+        account_register: matches!(state.navigation.workspace, Workspace::Account(_)),
+        budget_workspace: state.navigation.workspace == Workspace::Budget,
+    };
+    let descriptors = crate::app::palette::commands_for(context);
+    let matches = crate::app::palette::fuzzy(&state.palette.query, &descriptors);
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        state.palette.close(ctx);
+        return;
+    }
+    if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
+        state.palette.move_up(matches.len());
+    }
+    if ctx.input(|input| input.key_pressed(egui::Key::ArrowDown)) {
+        state.palette.move_down(matches.len());
+    }
+    if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+        if let Some(item) = state.palette.selected(&matches)
+            && item.enabled
+        {
+            actions.push(item.command);
+            state.palette.close(ctx);
+            return;
+        }
+    }
+    egui::Window::new("Command palette")
+        .id(egui::Id::new("command-palette"))
+        .collapsible(false)
+        .resizable(false)
+        .default_width(480.0)
+        .show(ctx, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut state.palette.query)
+                    .hint_text("Type a command…")
+                    .id(egui::Id::new("palette-query")),
+            )
+            .request_focus();
+            for (index, item) in matches.iter().take(12).enumerate() {
+                let label = item.shortcut.as_ref().map_or_else(
+                    || item.title.clone(),
+                    |key| format!("{}    {}", item.title, key),
+                );
+                let response = ui.add_enabled(
+                    item.enabled,
+                    egui::Button::new(label).selected(index == state.palette.selection),
+                );
+                if let Some(reason) = &item.disabled_explanation {
+                    response.clone().on_disabled_hover_text(reason);
+                }
+                if response.clicked() {
+                    actions.push(item.command);
+                    state.palette.close(ctx);
+                }
+            }
+        });
 }
 
 #[cfg(test)]

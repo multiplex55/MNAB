@@ -1,6 +1,7 @@
 //! Pure transaction-search parsing and safe query planning.
 use crate::domain::{AccountId, CategoryId, Money, PayeeId};
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 use time::Date;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -207,7 +208,7 @@ pub fn compile(ast: &SearchAst) -> QueryPlan {
     for t in &ast.terms {
         match t {
             SearchTerm::Text(v) => {
-                clauses.push("(payees.name LIKE ? OR transactions.memo LIKE ? OR categories.name LIKE ? OR accounts.name LIKE ? OR transactions.check_number LIKE ? OR CAST(transactions.amount AS TEXT) LIKE ? OR transactions.date LIKE ?)".into());
+                clauses.push("(payees.name LIKE ? OR transactions.payee_snapshot LIKE ? OR transactions.memo LIKE ? OR categories.name LIKE ? OR accounts.name LIKE ? OR CAST(transactions.amount AS TEXT) LIKE ? OR transactions.transaction_date LIKE ?)".into());
                 for _ in 0..7 {
                     binds.push(BindValue::Text(format!("%{v}%")))
                 }
@@ -238,7 +239,7 @@ pub fn compile(ast: &SearchAst) -> QueryPlan {
             }
             SearchTerm::Before(v) | SearchTerm::After(v) => {
                 clauses.push(format!(
-                    "transactions.date {} ?",
+                    "transactions.transaction_date {} ?",
                     if matches!(t, SearchTerm::Before(_)) {
                         "<"
                     } else {
@@ -248,12 +249,18 @@ pub fn compile(ast: &SearchAst) -> QueryPlan {
                 binds.push(BindValue::Text(v.to_string()))
             }
             SearchTerm::Cleared(v) => {
-                clauses.push("transactions.clearance <> ?".into());
-                binds.push(BindValue::Integer(if *v { 0 } else { 1 }))
+                clauses.push(if *v {
+                    "transactions.cleared_state <> ?".into()
+                } else {
+                    "transactions.cleared_state = ?".into()
+                });
+                binds.push(BindValue::Text("uncleared".into()))
             }
             SearchTerm::Approved(v) => {
-                clauses.push("transactions.approval = ?".into());
-                binds.push(BindValue::Integer(i64::from(*v)))
+                clauses.push("transactions.approval_state = ?".into());
+                binds.push(BindValue::Text(
+                    if *v { "approved" } else { "unapproved" }.into(),
+                ))
             }
         }
     }
@@ -323,4 +330,146 @@ pub fn useful_presets() -> Vec<SavedFilter> {
         })
     })
     .collect()
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ResultSection {
+    Transactions,
+    Accounts,
+    Categories,
+    Payees,
+    Commands,
+    Settings,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NavigationTarget {
+    RegisterTransaction {
+        account_id: AccountId,
+        transaction_id: crate::domain::TransactionId,
+    },
+    BudgetCategory {
+        category_id: CategoryId,
+        month: crate::domain::BudgetMonth,
+    },
+    Account(AccountId),
+    Command(crate::app::command::AppCommand),
+    SettingsControl(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchResult {
+    pub title: String,
+    pub target: NavigationTarget,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResultGroup {
+    pub section: ResultSection,
+    pub items: Vec<SearchResult>,
+    pub continuation: Option<usize>,
+}
+
+/// Groups independently bounded sections. `continuation` is the next per-section
+/// offset, so expanding one kind never turns the complete result set unbounded.
+#[must_use]
+pub fn bounded_groups(
+    sections: impl IntoIterator<Item = (ResultSection, Vec<SearchResult>)>,
+    limit: usize,
+) -> Vec<ResultGroup> {
+    let limit = limit.max(1);
+    sections
+        .into_iter()
+        .map(|(section, mut items)| {
+            let continuation = (items.len() > limit).then_some(limit);
+            items.truncate(limit);
+            ResultGroup {
+                section,
+                items,
+                continuation,
+            }
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchDebounce {
+    delay: Duration,
+    changed_at: Option<Instant>,
+    pending: Option<String>,
+}
+impl SearchDebounce {
+    #[must_use]
+    pub fn new(delay: Duration) -> Self {
+        Self {
+            delay,
+            changed_at: None,
+            pending: None,
+        }
+    }
+    pub fn update(&mut self, text: impl Into<String>, now: Instant) {
+        self.pending = Some(text.into());
+        self.changed_at = Some(now);
+    }
+    pub fn take_ready(&mut self, now: Instant) -> Option<String> {
+        if now.duration_since(self.changed_at?) < self.delay {
+            return None;
+        }
+        self.changed_at = None;
+        self.pending.take()
+    }
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+
+    #[test]
+    fn groups_are_independently_bounded() {
+        let account = AccountId::new();
+        let item = || SearchResult {
+            title: "Account".into(),
+            target: NavigationTarget::Account(account),
+        };
+        let groups = bounded_groups(
+            [
+                (ResultSection::Accounts, vec![item(), item(), item()]),
+                (ResultSection::Settings, vec![item()]),
+            ],
+            2,
+        );
+        assert_eq!(groups[0].items.len(), 2);
+        assert_eq!(groups[0].continuation, Some(2));
+        assert_eq!(groups[1].continuation, None);
+    }
+
+    #[test]
+    fn text_search_is_debounced() {
+        let start = Instant::now();
+        let mut debounce = SearchDebounce::new(Duration::from_millis(200));
+        debounce.update("rent", start);
+        assert_eq!(
+            debounce.take_ready(start + Duration::from_millis(199)),
+            None
+        );
+        assert_eq!(
+            debounce.take_ready(start + Duration::from_millis(200)),
+            Some("rent".into())
+        );
+    }
+
+    #[test]
+    fn parser_fields_become_parameterized_query_bindings() {
+        let ast = parse("account:Checking category:Food payee:Market memo:weekly amount:>=12.34 after:2026-01-01 before:2026-12-31 cleared:true approved:false").unwrap();
+        let plan = compile(&ast);
+        assert!(plan.where_sql.contains("accounts.name LIKE ?"));
+        assert!(plan.where_sql.contains("transactions.amount >= ?"));
+        assert!(plan.where_sql.contains("transactions.cleared_state <> ?"));
+        assert_eq!(plan.binds[4], BindValue::Integer(1234));
+        assert_eq!(
+            plan.binds.last(),
+            Some(&BindValue::Text("unapproved".into()))
+        );
+        assert!(!plan.where_sql.contains("Checking"));
+    }
 }

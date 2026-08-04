@@ -9,6 +9,8 @@ pub struct Modifiers {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Key {
+    P,
+    K,
     N,
     A,
     I,
@@ -32,6 +34,37 @@ pub enum Key {
     B,
     Backslash,
 }
+
+#[must_use]
+pub fn matches_shortcut(stroke: KeyStroke, shortcut: &str) -> bool {
+    let normalized = shortcut.trim().replace(' ', "").to_ascii_lowercase();
+    let key = match stroke.key {
+        Key::P => "p",
+        Key::K => "k",
+        Key::N => "n",
+        Key::A => "a",
+        Key::I => "i",
+        Key::F => "f",
+        Key::Z => "z",
+        Key::E => "e",
+        Key::Comma => ",",
+        Key::Backslash => "\\",
+        _ => return false,
+    };
+    let mut expected = String::from(if stroke.modifiers.command {
+        "ctrl+"
+    } else {
+        ""
+    });
+    if stroke.modifiers.shift {
+        expected.push_str("shift+");
+    }
+    if stroke.modifiers.alt {
+        expected.push_str("alt+");
+    }
+    expected.push_str(key);
+    normalized == expected
+}
 #[derive(Clone, Copy, Debug)]
 pub struct KeyStroke {
     pub key: Key,
@@ -43,6 +76,33 @@ pub struct Scope {
     pub modal: bool,
     pub text_editor: bool,
     pub command_enabled: bool,
+}
+
+/// Canonical, non-configurable global bindings. Preferences are validated against
+/// this table so the keyboard router and settings cannot silently drift apart.
+pub const FIXED_BINDINGS: &[&str] = &[
+    "Ctrl+N",
+    "Ctrl+Shift+A",
+    "Ctrl+I",
+    "Ctrl+F",
+    "Ctrl+Z",
+    "Ctrl+Shift+Z",
+    "Ctrl+E",
+    "Ctrl+1",
+    "Ctrl+2",
+    "Ctrl+3",
+    "Ctrl+Left",
+    "Ctrl+Right",
+    "Ctrl+,",
+    "Ctrl+\\",
+];
+
+#[must_use]
+pub fn conflicts_with_fixed(shortcut: &str) -> bool {
+    let candidate = shortcut.trim().replace(' ', "");
+    FIXED_BINDINGS
+        .iter()
+        .any(|fixed| fixed.eq_ignore_ascii_case(&candidate))
 }
 
 /// Maps platform-normalized Command (Ctrl on Windows/Linux, Cmd on macOS) input.
@@ -116,6 +176,8 @@ pub fn route(ctx: &egui::Context, scope: Scope, out: &mut Vec<AppCommand>) {
             } = event
             {
                 let key = match key {
+                    egui::Key::P => Key::P,
+                    egui::Key::K => Key::K,
                     egui::Key::N => Key::N,
                     egui::Key::A => Key::A,
                     egui::Key::I => Key::I,

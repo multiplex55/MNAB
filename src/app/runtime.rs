@@ -65,6 +65,7 @@ impl ApplicationRuntime {
         let mut view = AppState::default();
         if let Some(settings) = &settings {
             view.inspector_visible = settings.value().inspector_visible;
+            view.palette_shortcut = settings.value().command_palette_shortcut.clone();
         }
         if malformed_settings {
             view.notifications.push(Notification {
@@ -167,6 +168,18 @@ impl ApplicationRuntime {
     }
     pub fn view_mut(&mut self) -> &mut AppState {
         &mut self.view
+    }
+    pub fn presentation(
+        &self,
+    ) -> (
+        crate::app::settings::Theme,
+        crate::app::settings::DisplayDensity,
+    ) {
+        self.settings
+            .as_ref()
+            .map_or((Default::default(), Default::default()), |settings| {
+                (settings.value().theme, settings.value().display_density)
+            })
     }
     pub fn generation(&self) -> Generation {
         self.generation

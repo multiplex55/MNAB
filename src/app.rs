@@ -74,6 +74,19 @@ impl eframe::App for MnabApp {
             });
             return;
         }
+        let (theme, density) = self.runtime.presentation();
+        match theme {
+            settings::Theme::Light => ctx.set_visuals(egui::Visuals::light()),
+            settings::Theme::Dark => ctx.set_visuals(egui::Visuals::dark()),
+            settings::Theme::System => {}
+        }
+        let mut style = (*ctx.style()).clone();
+        style.spacing.item_spacing = match density {
+            settings::DisplayDensity::Compact => egui::vec2(6.0, 3.0),
+            settings::DisplayDensity::Normal => egui::vec2(8.0, 6.0),
+            settings::DisplayDensity::Comfortable => egui::vec2(10.0, 9.0),
+        };
+        ctx.set_style(style);
         if let Some(rect) = ctx.input(|input| input.viewport().outer_rect) {
             self.runtime.record_window(rect);
         }

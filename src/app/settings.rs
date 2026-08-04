@@ -47,9 +47,10 @@ pub enum Theme {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayDensity {
-    #[default]
-    Comfortable,
     Compact,
+    #[default]
+    Normal,
+    Comfortable,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -69,6 +70,67 @@ impl Default for RegisterColumns {
             .collect(),
             widths: vec![90.0, 180.0, 180.0, 200.0, 100.0, 100.0, 110.0],
         }
+    }
+}
+
+impl RegisterColumns {
+    pub const KNOWN: [&'static str; 7] = [
+        "date", "payee", "category", "memo", "outflow", "inflow", "balance",
+    ];
+
+    /// Repairs untrusted persisted layouts: invalid/duplicate entries are discarded,
+    /// missing columns are appended in default order, and unsafe widths are reset.
+    pub fn repair(&mut self) {
+        let defaults = Self::default();
+        let mut repaired = Vec::with_capacity(Self::KNOWN.len());
+        let mut widths = Vec::with_capacity(Self::KNOWN.len());
+        for (column, width) in self.order.iter().zip(&self.widths) {
+            if Self::KNOWN.contains(&column.as_str()) && !repaired.contains(column) {
+                repaired.push(column.clone());
+                widths.push(if width.is_finite() && *width >= 40.0 && *width <= 1000.0 {
+                    *width
+                } else {
+                    defaults.widths[Self::KNOWN.iter().position(|x| x == column).unwrap()]
+                });
+            }
+        }
+        for (index, column) in Self::KNOWN.iter().enumerate() {
+            if !repaired.iter().any(|value| value == column) {
+                repaired.push((*column).to_owned());
+                widths.push(defaults.widths[index]);
+            }
+        }
+        self.order = repaired;
+        self.widths = widths;
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn set_width(&mut self, column: &str, width: f32) -> bool {
+        let Some(index) = self.order.iter().position(|value| value == column) else {
+            return false;
+        };
+        if !width.is_finite() || !(40.0..=1000.0).contains(&width) {
+            return false;
+        }
+        self.widths[index] = width;
+        true
+    }
+
+    pub fn move_column(&mut self, column: &str, destination: usize) -> bool {
+        let Some(source) = self.order.iter().position(|value| value == column) else {
+            return false;
+        };
+        if destination >= self.order.len() {
+            return false;
+        }
+        let name = self.order.remove(source);
+        let width = self.widths.remove(source);
+        self.order.insert(destination, name);
+        self.widths.insert(destination, width);
+        true
     }
 }
 
@@ -176,6 +238,7 @@ impl SettingsSession {
                 if !shortcut_is_available(&value.command_palette_shortcut) {
                     value.command_palette_shortcut = DEFAULT_PALETTE_SHORTCUT.into();
                 }
+                value.register_columns.repair();
                 Self {
                     path,
                     value,
@@ -231,27 +294,9 @@ pub fn shortcut_is_available(shortcut: &str) -> bool {
     let modifier = parts.next();
     let key = parts.next();
     let has_valid_shape = matches!(modifier, Some("ctrl" | "cmd"))
-        && key.is_some_and(|key| !key.is_empty())
+        && key.is_some_and(|key| matches!(key, "p" | "k"))
         && parts.next().is_none();
-    has_valid_shape
-        && !matches!(
-            normalized.as_str(),
-            "ctrl+n"
-                | "ctrl+shift+a"
-                | "ctrl+i"
-                | "ctrl+f"
-                | "ctrl+z"
-                | "ctrl+shift+z"
-                | "ctrl+e"
-                | "ctrl+1"
-                | "ctrl+2"
-                | "ctrl+3"
-                | "ctrl+left"
-                | "ctrl+right"
-                | "ctrl+,"
-                | "ctrl+shift+b"
-                | "ctrl+\\"
-        )
+    has_valid_shape && !crate::ui::keyboard::conflicts_with_fixed(&normalized)
 }
 
 fn atomic_save(path: &Path, value: &Settings) -> io::Result<()> {
@@ -470,6 +515,30 @@ mod tests {
                 .command_palette_shortcut,
             "Ctrl+P"
         );
+    }
+    #[test]
+    fn theme_density_round_trip_and_column_repair() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("settings.json");
+        let mut session = SettingsSession::load(&p);
+        session.value_mut().theme = Theme::Dark;
+        session.value_mut().display_density = DisplayDensity::Compact;
+        session.value_mut().register_columns = RegisterColumns {
+            order: vec!["memo".into(), "unknown".into(), "memo".into()],
+            widths: vec![222.0, 1.0, 333.0],
+        };
+        session.save().unwrap();
+        let loaded = SettingsSession::load(p);
+        assert_eq!(
+            (loaded.value().theme, loaded.value().display_density),
+            (Theme::Dark, DisplayDensity::Compact)
+        );
+        assert_eq!(
+            loaded.value().register_columns.order.len(),
+            RegisterColumns::KNOWN.len()
+        );
+        assert_eq!(loaded.value().register_columns.order[0], "memo");
+        assert_eq!(loaded.value().register_columns.widths[0], 222.0);
     }
     #[test]
     fn clamps_offscreen_and_selects_nearest_monitor() {
