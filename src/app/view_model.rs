@@ -338,13 +338,26 @@ pub struct InboxSummaryView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HighlightSpanView {
+    pub field: String,
+    pub start: usize,
+    pub end: usize,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SearchResultItemView {
     pub transaction_id: TransactionId,
     pub account_id: AccountId,
+    pub account: String,
     pub date: Date,
+    pub payee: String,
+    pub category: String,
+    pub memo: String,
+    pub amount: DisplayMoney,
+    pub approved: bool,
+    pub clearance: String,
     pub title: String,
     pub subtitle: String,
-    pub amount: DisplayMoney,
+    pub highlights: Vec<HighlightSpanView>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SearchResultsView {

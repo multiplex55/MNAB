@@ -472,4 +472,39 @@ mod result_tests {
         );
         assert!(!plan.where_sql.contains("Checking"));
     }
+
+    #[test]
+    fn parser_handles_quotes_escapes_unicode_and_repeated_fields() {
+        let ast = parse(r#"coffee payee:"Blue \"Bottle\"" memo:"emoji ☕ \\ note" category:Food category:Dining"#).unwrap();
+        assert_eq!(ast.terms.len(), 5);
+        assert!(matches!(&ast.terms[1], SearchTerm::Payee(v) if v == "Blue \"Bottle\""));
+        assert!(matches!(&ast.terms[2], SearchTerm::Memo(v) if v == "emoji ☕ \\ note"));
+        assert!(matches!(&ast.terms[3], SearchTerm::Category(v) if v == "Food"));
+        assert!(matches!(&ast.terms[4], SearchTerm::Category(v) if v == "Dining"));
+    }
+
+    #[test]
+    fn parser_reports_safe_errors_for_bad_literals_and_malicious_text() {
+        for (input, kind) in [
+            ("before:2026-99-99", DiagnosticKind::InvalidDate),
+            ("amount:abc", DiagnosticKind::InvalidAmount),
+            ("cleared:maybe", DiagnosticKind::InvalidBoolean),
+            ("unknown:x", DiagnosticKind::UnknownField),
+            ("memo:", DiagnosticKind::MissingValue),
+            (r#"payee:"unterminated"#, DiagnosticKind::UnterminatedQuote),
+            (r#"payee:"bad\q""#, DiagnosticKind::InvalidEscape),
+        ] {
+            let errors = parse(input).unwrap_err();
+            assert_eq!(errors[0].kind, kind);
+            assert!(!errors[0].message.contains(input));
+        }
+        let ast = parse(r#"memo:"x' OR 1=1 --""#).unwrap();
+        let plan = compile(&ast);
+        assert!(!plan.where_sql.contains("OR 1=1"));
+        assert!(
+            plan.binds
+                .iter()
+                .any(|v| matches!(v, BindValue::Text(t) if t.contains("OR 1=1")))
+        );
+    }
 }
