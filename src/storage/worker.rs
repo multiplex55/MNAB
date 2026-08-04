@@ -57,7 +57,13 @@ pub struct GlobalSearchOperation {
 }
 #[derive(Debug)]
 pub enum ImportOperation {
-    Parse { path: PathBuf },
+    Parse {
+        path: PathBuf,
+    },
+    ParseCsv {
+        path: PathBuf,
+        preset: Box<crate::importing::csv_mapping::CsvMappingPreset>,
+    },
     Stage,
     Apply,
 }
@@ -89,6 +95,7 @@ pub enum TypedResult {
     RegisterPage,
     SearchResults,
     ImportParsed,
+    ImportStatement(Box<crate::importing::ImportedStatement>),
     ImportStaged,
     ImportApplied,
     Diagnostics,
@@ -293,7 +300,29 @@ fn execute(c: &Connection, op: &WorkerOperation) -> Result<TypedResult, WorkerEr
         )),
         WorkerOperation::Register(_) => Ok(TypedResult::RegisterPage),
         WorkerOperation::Search(_) => Ok(TypedResult::SearchResults),
-        WorkerOperation::Import(ImportOperation::Parse { .. }) => Ok(TypedResult::ImportParsed),
+        WorkerOperation::Import(ImportOperation::Parse { path }) => {
+            let bytes = std::fs::read(path).map_err(|error| {
+                WorkerError::Repository(format!("statement read failed: {error}"))
+            })?;
+            match crate::importing::source::detect(&bytes, Some(path)) {
+                crate::importing::source::Detection::Certain(
+                    crate::importing::source::ImportFormat::Ofx,
+                ) => crate::importing::ofx::parse(&bytes)
+                    .map(Box::new)
+                    .map(TypedResult::ImportStatement)
+                    .map_err(|error| WorkerError::Repository(error.to_string())),
+                _ => Ok(TypedResult::ImportParsed),
+            }
+        }
+        WorkerOperation::Import(ImportOperation::ParseCsv { path, preset }) => {
+            let bytes = std::fs::read(path).map_err(|error| {
+                WorkerError::Repository(format!("statement read failed: {error}"))
+            })?;
+            crate::importing::csv::parse_preset(&bytes, preset)
+                .map(Box::new)
+                .map(TypedResult::ImportStatement)
+                .map_err(|error| WorkerError::Repository(error.to_string()))
+        }
         WorkerOperation::Import(ImportOperation::Stage) => Ok(TypedResult::ImportStaged),
         WorkerOperation::Import(ImportOperation::Apply) => Ok(TypedResult::ImportApplied),
         WorkerOperation::Diagnostics(_) => Ok(TypedResult::Diagnostics),

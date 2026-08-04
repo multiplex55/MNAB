@@ -1,8 +1,11 @@
 use super::{
-    csv_mapping::{AmountColumns, CsvMapping, validate},
+    csv_mapping::{
+        AmountColumns, CsvEncoding, CsvMapping, CsvMappingPreset, DecimalStyle, validate,
+    },
     source::{ImportError, ImportedStatement, ImportedTransaction, SourceLocation},
 };
 use crate::domain::{ImportRounding, Money};
+use encoding_rs::{UTF_16BE, UTF_16LE, WINDOWS_1252};
 use std::collections::BTreeMap;
 use time::{Date, format_description};
 
@@ -14,6 +17,39 @@ pub struct CsvOptions {
     pub delimiter: u8,
     pub date_format: String,
     pub mapping: CsvMapping,
+}
+
+pub fn decode(bytes: &[u8], encoding: CsvEncoding) -> Result<String, ImportError> {
+    let encoding = match encoding {
+        CsvEncoding::Utf8 => encoding_rs::UTF_8,
+        CsvEncoding::Windows1252 => WINDOWS_1252,
+        CsvEncoding::Utf16Le => UTF_16LE,
+        CsvEncoding::Utf16Be => UTF_16BE,
+    };
+    let (text, _, errors) = encoding.decode(bytes);
+    if errors {
+        return Err(ImportError::Decode {
+            offset: 0,
+            message: format!("invalid {} sequence", encoding.name()),
+        });
+    }
+    Ok(text.trim_start_matches('\u{feff}').to_owned())
+}
+
+pub fn parse_preset(
+    bytes: &[u8],
+    preset: &CsvMappingPreset,
+) -> Result<ImportedStatement, ImportError> {
+    let decoded = decode(bytes, preset.encoding.clone())?;
+    parse_inner(
+        decoded.as_bytes(),
+        &CsvOptions {
+            delimiter: preset.delimiter,
+            date_format: preset.date_format.clone(),
+            mapping: preset.mapping.clone(),
+        },
+        preset.decimal_style,
+    )
 }
 
 pub fn detect_delimiter(bytes: &[u8]) -> Result<u8, ImportError> {
@@ -43,6 +79,14 @@ pub fn headers(bytes: &[u8], delimiter: u8) -> Result<Vec<String>, ImportError> 
 }
 
 pub fn parse(bytes: &[u8], options: &CsvOptions) -> Result<ImportedStatement, ImportError> {
+    parse_inner(bytes, options, DecimalStyle::Dot)
+}
+#[allow(clippy::too_many_lines)] // One loop retains exact row and field error context.
+fn parse_inner(
+    bytes: &[u8],
+    options: &CsvOptions,
+    decimal_style: DecimalStyle,
+) -> Result<ImportedStatement, ImportError> {
     if bytes.len() > MAX_FILE_SIZE {
         return Err(ImportError::SizeLimit {
             limit: MAX_FILE_SIZE,
@@ -90,7 +134,7 @@ pub fn parse(bytes: &[u8], options: &CsvOptions) -> Result<ImportedStatement, Im
         let posted_date = Date::parse(date_text, &date_format)
             .map_err(|e| field(row, &options.mapping.date, e.to_string()))?;
         let amount = match &options.mapping.amount {
-            AmountColumns::Signed { amount } => money(get(amount), row, amount)?,
+            AmountColumns::Signed { amount } => money(get(amount), row, amount, decimal_style)?,
             AmountColumns::DebitCredit { debit, credit } => {
                 let (d, c) = (get(debit), get(credit));
                 if !d.is_empty() && !c.is_empty() {
@@ -108,9 +152,9 @@ pub fn parse(bytes: &[u8], options: &CsvOptions) -> Result<ImportedStatement, Im
                     ));
                 }
                 if d.is_empty() {
-                    money(c, row, credit)?
+                    money(c, row, credit, decimal_style)?
                 } else {
-                    money(d, row, debit)?
+                    money(d, row, debit, decimal_style)?
                         .checked_neg()
                         .map_err(|e| field(row, debit, e.to_string()))?
                 }
@@ -152,8 +196,17 @@ pub fn parse(bytes: &[u8], options: &CsvOptions) -> Result<ImportedStatement, Im
         transactions,
     })
 }
-fn money(value: &str, row: u64, name: &str) -> Result<Money, ImportError> {
-    Money::parse_import(value, ImportRounding::HalfAwayFromZero)
+fn money(
+    value: &str,
+    row: u64,
+    name: &str,
+    decimal_style: DecimalStyle,
+) -> Result<Money, ImportError> {
+    let normalized = match decimal_style {
+        DecimalStyle::Dot => value.to_owned(),
+        DecimalStyle::Comma => value.replace('.', "").replace(',', "."),
+    };
+    Money::parse_import(&normalized, ImportRounding::HalfAwayFromZero)
         .map_err(|e| field(row, name, e.to_string()))
 }
 fn field(row: u64, name: &str, message: String) -> ImportError {

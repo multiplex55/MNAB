@@ -21,8 +21,10 @@ pub struct StagedImport {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BatchState {
-    Applied,
-    ArchiveRetryRequired {
+    Archived,
+    /// Financial changes are committed. This is terminal until the user
+    /// explicitly chooses an archive action; it is never retried automatically.
+    ArchivePending {
         intended_path: PathBuf,
         checksum: String,
     },
@@ -110,7 +112,7 @@ impl<R: ImportUnitOfWork> ImportService<R> {
                 .map_err(ImportServiceError::Database)?;
             return Ok(CommittedBatch {
                 id,
-                state: BatchState::ArchiveRetryRequired {
+                state: BatchState::ArchivePending {
                     intended_path: path,
                     checksum,
                 },
@@ -118,7 +120,7 @@ impl<R: ImportUnitOfWork> ImportService<R> {
         }
         Ok(CommittedBatch {
             id,
-            state: BatchState::Applied,
+            state: BatchState::Archived,
         })
     }
 }
