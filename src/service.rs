@@ -8,6 +8,7 @@ pub mod category_service;
 pub mod import_service;
 pub mod payee_service;
 pub mod reconciliation_service;
+pub mod schedule_service;
 pub mod transaction_service;
 
 use crate::{domain::Budget, error::ServiceError};
