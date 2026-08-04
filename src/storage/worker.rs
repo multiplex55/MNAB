@@ -26,6 +26,7 @@ pub enum WorkerOperation {
     Financial(FinancialOperation),
     View(ViewOperation),
     Register(RegisterPageOperation),
+    RegisterView(RegisterViewOperation),
     Search(GlobalSearchOperation),
     Import(ImportOperation),
     Diagnostics(DiagnosticsOperation),
@@ -51,6 +52,13 @@ pub struct RegisterPageOperation {
     pub account_id: crate::domain::AccountId,
     pub offset: u32,
     pub limit: u32,
+}
+
+#[derive(Debug)]
+pub struct RegisterViewOperation {
+    pub request: crate::storage::query_store::RegisterViewRequest,
+    pub offset: u32,
+    pub display_account_id: crate::domain::AccountId,
 }
 #[derive(Debug)]
 pub struct GlobalSearchOperation {
@@ -375,6 +383,20 @@ fn execute_operation(
                 )
                 .map(TypedResult::RegisterPage)
                 .map_err(|e| WorkerError::Repository(e.to_string()))
+        }
+        WorkerOperation::RegisterView(operation) => {
+            let store = crate::storage::query_store::QueryStore::new(c);
+            let page = store
+                .register_view(&operation.request)
+                .map_err(|e| WorkerError::Repository(e.to_string()))?;
+            crate::storage::mapping::register_page(
+                page,
+                operation.display_account_id,
+                operation.offset,
+                generation,
+            )
+            .map(TypedResult::RegisterPage)
+            .map_err(|e| WorkerError::Repository(e.to_string()))
         }
         WorkerOperation::Search(search) => {
             // Parsing and planning live beside the worker-side database execution;
