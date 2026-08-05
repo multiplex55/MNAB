@@ -32,8 +32,13 @@ pub enum TransactionBody {
     },
     Transfer {
         transfer_id: TransferId,
+        source_account_id: AccountId,
+        destination_account_id: AccountId,
+        amount: Money,
         other_account_id: AccountId,
         other_amount: Money,
+        category_id: Option<CategoryId>,
+        category_effect_account_id: Option<AccountId>,
     },
 }
 
@@ -76,6 +81,10 @@ pub enum TransactionError {
     DifferentBudgets,
     #[error("transfer amounts must be exact opposites")]
     TransferAmounts,
+    #[error("category effect account must be source or destination")]
+    InvalidCategoryEffectAccount,
+    #[error("only one transfer leg may affect category activity")]
+    MultipleCategoryEffectLegs,
 }
 impl TransactionBody {
     #[must_use]
@@ -118,6 +127,41 @@ impl TransactionBody {
             .map_err(|_| TransactionError::SplitOverflow)?;
         Ok(())
     }
+    pub fn categorized_transfer(
+        transfer_id: TransferId,
+        source: &Account,
+        source_amount: Money,
+        destination: &Account,
+        destination_amount: Money,
+        category_id: Option<CategoryId>,
+        category_effect_account_id: Option<AccountId>,
+    ) -> Result<(Self, Self), TransactionError> {
+        if let Some(effect_account) = category_effect_account_id {
+            if effect_account != source.id && effect_account != destination.id {
+                return Err(TransactionError::InvalidCategoryEffectAccount);
+            }
+        }
+        let (mut left, mut right) = Self::transfer(
+            transfer_id,
+            source,
+            source_amount,
+            destination,
+            destination_amount,
+        )?;
+        for body in [&mut left, &mut right] {
+            if let Self::Transfer {
+                category_id: c,
+                category_effect_account_id: e,
+                ..
+            } = body
+            {
+                *c = category_id;
+                *e = category_effect_account_id;
+            }
+        }
+        Ok((left, right))
+    }
+
     pub fn transfer(
         transfer_id: TransferId,
         source: &Account,
@@ -141,13 +185,23 @@ impl TransactionBody {
         Ok((
             Self::Transfer {
                 transfer_id,
+                source_account_id: source.id,
+                destination_account_id: destination.id,
+                amount: source_amount,
                 other_account_id: destination.id,
                 other_amount: destination_amount,
+                category_id: None,
+                category_effect_account_id: None,
             },
             Self::Transfer {
                 transfer_id,
+                source_account_id: source.id,
+                destination_account_id: destination.id,
+                amount: destination_amount,
                 other_account_id: source.id,
                 other_amount: source_amount,
+                category_id: None,
+                category_effect_account_id: None,
             },
         ))
     }
@@ -197,11 +251,13 @@ mod tests {
                     transfer_id: a_id,
                     other_account_id: a_other,
                     other_amount: a_amount,
+                    ..
                 },
                 TransactionBody::Transfer {
                     transfer_id: b_id,
                     other_account_id: b_other,
                     other_amount: b_amount,
+                    ..
                 },
             ) => {
                 assert_eq!(a_id, b_id);
@@ -250,5 +306,62 @@ mod tests {
                 prop_assert_eq!(sum, parent);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod categorized_transfer_tests {
+    use super::*;
+    fn account(budget_id: BudgetId, name: &str) -> Account {
+        Account::new(budget_id, name, AccountType::Checking)
+    }
+
+    #[test]
+    fn only_selected_transfer_leg_affects_category_activity() {
+        let b = BudgetId::new();
+        let source = account(b, "source");
+        let destination = account(b, "destination");
+        let category = CategoryId::new();
+        let (left, right) = TransactionBody::categorized_transfer(
+            TransferId::new(),
+            &source,
+            Money::from_minor_units(-50),
+            &destination,
+            Money::from_minor_units(50),
+            Some(category),
+            Some(source.id),
+        )
+        .unwrap();
+        let effect_accounts: Vec<_> = [left, right]
+            .into_iter()
+            .filter_map(|body| match body {
+                TransactionBody::Transfer {
+                    category_id: Some(_),
+                    category_effect_account_id: Some(id),
+                    ..
+                } => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(effect_accounts, vec![source.id, source.id]);
+    }
+
+    #[test]
+    fn category_effect_account_must_be_source_or_destination() {
+        let b = BudgetId::new();
+        let source = account(b, "source");
+        let destination = account(b, "destination");
+        assert_eq!(
+            TransactionBody::categorized_transfer(
+                TransferId::new(),
+                &source,
+                Money::from_minor_units(-1),
+                &destination,
+                Money::from_minor_units(1),
+                Some(CategoryId::new()),
+                Some(AccountId::new())
+            ),
+            Err(TransactionError::InvalidCategoryEffectAccount)
+        );
     }
 }

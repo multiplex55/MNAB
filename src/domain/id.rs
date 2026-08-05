@@ -28,6 +28,7 @@ macro_rules! ids {
 ids!(
     BudgetId,
     AccountId,
+    AccountGroupId,
     CategoryGroupId,
     CategoryId,
     PayeeId,

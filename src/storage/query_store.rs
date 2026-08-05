@@ -945,7 +945,7 @@ fn account_where(budget: BudgetId, filter: &ReportFilter) -> (String, Vec<Value>
             clauses.push("a.account_type IN ('checking','savings','cash','credit_card')".into())
         }
         AccountScope::Tracking => {
-            clauses.push("a.account_type IN ('loan','asset','liability','investment')".into())
+            clauses.push("a.account_type IN ('loan','asset','liability')".into())
         }
         AccountScope::Both => {}
     }
@@ -1019,7 +1019,7 @@ fn report_where(
     let classification = if budget_only || matches!(filter.accounts, AccountScope::OnBudget) {
         " AND a.account_type IN ('checking','savings','cash','credit_card')"
     } else if matches!(filter.accounts, AccountScope::Tracking) {
-        " AND a.account_type IN ('loan','asset','liability','investment')"
+        " AND a.account_type IN ('loan','asset','liability')"
     } else {
         ""
     };
