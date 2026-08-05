@@ -95,7 +95,7 @@ pub fn migrate(connection: &mut Connection, path: &Path) -> Result<(), Migration
 fn validate_schema_family(connection: &Connection, version: i64) -> Result<(), MigrationError> {
     let metadata_exists: i64 = connection.query_row(
         "SELECT count(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
-        ("table", "app_metadata"),
+        ("table", "application_metadata"),
         |r| r.get(0),
     )?;
     if metadata_exists == 0 {
@@ -106,7 +106,7 @@ fn validate_schema_family(connection: &Connection, version: i64) -> Result<(), M
     }
     let family: Option<String> = connection
         .query_row(
-            "SELECT value FROM app_metadata WHERE key = ?1",
+            "SELECT value FROM application_metadata WHERE key = ?1",
             [SCHEMA_FAMILY_KEY],
             |r| r.get(0),
         )
@@ -128,11 +128,11 @@ fn apply_migrations(connection: &mut Connection, version: i64) -> Result<(), Mig
             (migration.version, migration.identifier, migration.checksum),
         )?;
         transaction.execute(
-            "INSERT INTO app_metadata(key,value,updated_at) VALUES(?1,?2,datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+            "INSERT INTO application_metadata(key,value,updated_at) VALUES(?1,?2,datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
             (SCHEMA_FAMILY_KEY, SCHEMA_FAMILY),
         )?;
         transaction.execute(
-            "INSERT INTO app_metadata(key,value,updated_at) VALUES('schema_version',?1,datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+            "INSERT INTO application_metadata(key,value,updated_at) VALUES('schema_version',?1,datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
             [migration.version.to_string()],
         )?;
     }
@@ -173,13 +173,13 @@ mod tests {
         if version > 0 {
             transaction
                 .execute(
-                    "INSERT INTO app_metadata(key,value,updated_at) VALUES(?1,?2,'now')",
+                    "INSERT INTO application_metadata(key,value,updated_at) VALUES(?1,?2,'now')",
                     (SCHEMA_FAMILY_KEY, SCHEMA_FAMILY),
                 )
                 .unwrap();
             transaction
                 .execute(
-                    "INSERT INTO app_metadata(key,value,updated_at) VALUES('schema_version',?1,'now')",
+                    "INSERT INTO application_metadata(key,value,updated_at) VALUES('schema_version',?1,'now')",
                     [version.to_string()],
                 )
                 .unwrap();
@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT value FROM app_metadata WHERE key=?1",
+                    "SELECT value FROM application_metadata WHERE key=?1",
                     [SCHEMA_FAMILY_KEY],
                     |r| r.get::<_, String>(0)
                 )
@@ -210,7 +210,7 @@ mod tests {
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT value FROM app_metadata WHERE key='schema_version'",
+                    "SELECT value FROM application_metadata WHERE key='schema_version'",
                     [],
                     |r| r.get::<_, String>(0)
                 )
@@ -313,7 +313,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mnab.sqlite3");
         let mut db = Connection::open(&path).unwrap();
-        db.execute_batch("CREATE TABLE app_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL); INSERT INTO app_metadata VALUES('schema_family','budget_first_v1','now');").unwrap();
+        db.execute_batch("CREATE TABLE application_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL); INSERT INTO application_metadata VALUES('schema_family','budget_first_v1','now');").unwrap();
 
         assert!(matches!(
             migrate(&mut db, &path),

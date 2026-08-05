@@ -11,6 +11,21 @@ use crate::{
     },
 };
 
+/// Stable purpose tag for read requests. Together with the request id and generation this lets
+/// consumers reject a late response without inspecting its payload.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RequestPurpose {
+    AccountTree,
+    AccountHeader,
+    AccountRegisterPage,
+    AllTransactionsPage,
+    CategoryCatalog,
+    CategoryGoalDetails,
+    MerchantRules,
+    Report,
+    ImportPreview,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AffectedEntityId {
     Account(AccountId),

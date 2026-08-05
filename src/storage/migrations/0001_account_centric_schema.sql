@@ -1,11 +1,12 @@
 -- Account-centric schema family for the fixed mnab.sqlite3 database.
-CREATE TABLE app_metadata (
+CREATE TABLE application_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 CREATE TABLE budgets (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL, modified_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)));
-CREATE TABLE accounts (id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, name TEXT NOT NULL, account_type TEXT NOT NULL CHECK(account_type IN ('checking','savings','cash','credit_card','loan','asset','liability')), sort_order INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0 CHECK(closed IN (0,1)), note TEXT, favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1)), created_at TEXT NOT NULL, modified_at TEXT NOT NULL, UNIQUE(id,budget_id), UNIQUE(budget_id,name), FOREIGN KEY(budget_id) REFERENCES budgets(id));
+CREATE TABLE account_groups (id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, name TEXT NOT NULL CHECK(trim(name)<>''), classification TEXT NOT NULL CHECK(classification IN ('cash','credit','loan','asset','liability')), sort_order INTEGER NOT NULL, collapsed INTEGER NOT NULL DEFAULT 0 CHECK(collapsed IN (0,1)), UNIQUE(id,budget_id), UNIQUE(budget_id,name), FOREIGN KEY(budget_id) REFERENCES budgets(id));
+CREATE TABLE accounts (id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, group_id TEXT, name TEXT NOT NULL CHECK(trim(name)<>''), account_type TEXT NOT NULL CHECK(account_type IN ('checking','savings','cash','credit_card','loan','asset','liability')), sort_order INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0 CHECK(closed IN (0,1)), note TEXT, favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1)), created_at TEXT NOT NULL, modified_at TEXT NOT NULL, UNIQUE(id,budget_id), UNIQUE(budget_id,name), FOREIGN KEY(budget_id) REFERENCES budgets(id), FOREIGN KEY(group_id,budget_id) REFERENCES account_groups(id,budget_id));
 CREATE TABLE category_groups (id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, name TEXT NOT NULL, sort_order INTEGER NOT NULL, hidden INTEGER NOT NULL DEFAULT 0 CHECK(hidden IN (0,1)), UNIQUE(id,budget_id), UNIQUE(budget_id,name), FOREIGN KEY(budget_id) REFERENCES budgets(id));
 CREATE TABLE categories (id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, group_id TEXT NOT NULL, name TEXT NOT NULL, sort_order INTEGER NOT NULL, hidden INTEGER NOT NULL DEFAULT 0 CHECK(hidden IN (0,1)), archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)), UNIQUE(id,budget_id), UNIQUE(group_id,name), FOREIGN KEY(group_id,budget_id) REFERENCES category_groups(id,budget_id), FOREIGN KEY(budget_id) REFERENCES budgets(id));
 CREATE TABLE payees (id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, name TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)), hidden INTEGER NOT NULL DEFAULT 0 CHECK(hidden IN (0,1)), default_category_id TEXT REFERENCES categories(id), last_used_category_id TEXT REFERENCES categories(id), UNIQUE(id,budget_id), UNIQUE(budget_id,name), FOREIGN KEY(budget_id) REFERENCES budgets(id));
@@ -58,3 +59,29 @@ CREATE INDEX idx_scheduled_occurrences_inbox ON scheduled_occurrences(budget_id,
 CREATE INDEX idx_staged_candidates_batch_review ON staged_import_candidates(batch_id, review_decision, sort_order);
 CREATE INDEX idx_change_log_report_revision ON change_log(budget_id, entity_table, id DESC);
 CREATE UNIQUE INDEX idx_scheduled_occurrences_identity ON scheduled_occurrences(schedule_id, identity);
+
+-- Canonical persistence names used by the storage boundary.  A few older aggregate tables above
+-- remain intentionally available while callers migrate to these narrower records.
+CREATE TABLE category_goals (id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, category_id TEXT NOT NULL UNIQUE, account_id TEXT, goal_type TEXT NOT NULL CHECK(goal_type IN ('balance','balance_by_date','monthly','refill','expense','credit_card_payoff')), amount INTEGER, due_date TEXT, created_at TEXT NOT NULL, modified_at TEXT NOT NULL, UNIQUE(id,budget_id), FOREIGN KEY(category_id,budget_id) REFERENCES categories(id,budget_id), FOREIGN KEY(account_id,budget_id) REFERENCES accounts(id,budget_id));
+CREATE TABLE merchant_rules (id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, pattern TEXT NOT NULL CHECK(trim(pattern)<>''), match_type TEXT NOT NULL CHECK(match_type IN ('exact','contains','prefix','regex')), payee_id TEXT, category_id TEXT, priority INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)), created_at TEXT NOT NULL, modified_at TEXT NOT NULL, UNIQUE(id,budget_id), FOREIGN KEY(budget_id) REFERENCES budgets(id), FOREIGN KEY(payee_id,budget_id) REFERENCES payees(id,budget_id), FOREIGN KEY(category_id,budget_id) REFERENCES categories(id,budget_id));
+CREATE TABLE transaction_splits (id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, transaction_id TEXT NOT NULL, category_id TEXT NOT NULL, memo TEXT, amount INTEGER NOT NULL, sort_order INTEGER NOT NULL, UNIQUE(transaction_id,sort_order), FOREIGN KEY(transaction_id,budget_id) REFERENCES transactions(id,budget_id) ON DELETE CASCADE, FOREIGN KEY(category_id,budget_id) REFERENCES categories(id,budget_id));
+CREATE TABLE transfers (id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, source_transaction_id TEXT NOT NULL UNIQUE, destination_transaction_id TEXT NOT NULL UNIQUE, CHECK(source_transaction_id<>destination_transaction_id), UNIQUE(id,budget_id), FOREIGN KEY(source_transaction_id,budget_id) REFERENCES transactions(id,budget_id), FOREIGN KEY(destination_transaction_id,budget_id) REFERENCES transactions(id,budget_id));
+CREATE TABLE reconciliation_changes (id INTEGER PRIMARY KEY AUTOINCREMENT, reconciliation_id TEXT NOT NULL, budget_id TEXT NOT NULL, transaction_id TEXT NOT NULL, operation TEXT NOT NULL CHECK(operation IN ('insert','update','delete')), before_snapshot TEXT, after_snapshot TEXT, changed_at TEXT NOT NULL, FOREIGN KEY(reconciliation_id,budget_id) REFERENCES reconciliations(id,budget_id), FOREIGN KEY(transaction_id,budget_id) REFERENCES transactions(id,budget_id));
+CREATE TABLE application_failures (id TEXT PRIMARY KEY, budget_id TEXT, operation TEXT NOT NULL CHECK(trim(operation)<>''), summary TEXT NOT NULL CHECK(trim(summary)<>''), detail TEXT, occurred_at TEXT NOT NULL, dismissed_at TEXT, FOREIGN KEY(budget_id) REFERENCES budgets(id));
+CREATE INDEX idx_account_groups_order ON account_groups(budget_id,sort_order,id);
+CREATE INDEX idx_accounts_group_order ON accounts(budget_id,group_id,sort_order,id);
+CREATE INDEX idx_transactions_stable_register ON transactions(account_id,archived,transaction_date DESC,created_at DESC,id DESC);
+CREATE INDEX idx_transactions_all_register ON transactions(budget_id,archived,transaction_date DESC,created_at DESC,id DESC);
+CREATE INDEX idx_merchant_rules_lookup ON merchant_rules(budget_id,enabled,match_type,pattern,priority DESC,id);
+CREATE INDEX idx_import_identity_dedup ON import_identities(account_id,normalized_fingerprint,created_at);
+
+CREATE TRIGGER category_goals_budget_guard_insert BEFORE INSERT ON category_goals BEGIN
+  SELECT CASE WHEN (SELECT budget_id FROM categories WHERE id=NEW.category_id)<>NEW.budget_id OR
+    (NEW.account_id IS NOT NULL AND (SELECT budget_id FROM accounts WHERE id=NEW.account_id)<>NEW.budget_id)
+    THEN RAISE(ABORT,'category goal budget mismatch') END;
+END;
+CREATE TRIGGER category_goals_budget_guard_update BEFORE UPDATE ON category_goals BEGIN
+  SELECT CASE WHEN (SELECT budget_id FROM categories WHERE id=NEW.category_id)<>NEW.budget_id OR
+    (NEW.account_id IS NOT NULL AND (SELECT budget_id FROM accounts WHERE id=NEW.account_id)<>NEW.budget_id)
+    THEN RAISE(ABORT,'category goal budget mismatch') END;
+END;

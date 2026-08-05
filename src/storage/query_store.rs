@@ -151,6 +151,42 @@ pub struct RegisterTotals {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountTreeAccount {
+    pub id: String,
+    pub name: String,
+    pub account_type: String,
+    pub balance: Money,
+    pub closed: bool,
+    pub favorite: bool,
+    pub last_reconciliation_date: Option<String>,
+    pub sort_order: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountTreeGroup {
+    pub id: Option<String>,
+    pub name: String,
+    pub classification: Option<String>,
+    pub sort_order: i64,
+    pub accounts: Vec<AccountTreeAccount>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountHeader {
+    pub account_id: String,
+    pub name: String,
+    pub account_type: String,
+    pub group_path: String,
+    pub working: Money,
+    pub cleared: Money,
+    pub uncleared: Money,
+    pub transaction_count: u64,
+    pub last_reconciliation_date: Option<String>,
+    pub reconciliation_difference: Money,
+    pub goal_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BudgetRow {
     pub category_id: String,
     pub assigned: Money,
@@ -163,6 +199,67 @@ impl<'a> QueryStore<'a> {
     #[must_use]
     pub const fn new(connection: &'a Connection) -> Self {
         Self { connection }
+    }
+
+    /// Loads the complete tree with balances and reconciliation metadata in one bounded query.
+    pub fn account_tree(&self, budget: BudgetId) -> Result<Vec<AccountTreeGroup>, RepositoryError> {
+        let mut statement = self.connection.prepare(r#"SELECT g.id,COALESCE(g.name,'Ungrouped'),g.classification,COALESCE(g.sort_order,9223372036854775807),a.id,a.name,a.account_type,a.closed,a.favorite,a.sort_order,COALESCE(SUM(t.amount),0),(SELECT MAX(r.statement_date) FROM reconciliations r WHERE r.account_id=a.id AND r.state='completed')
+            FROM accounts a LEFT JOIN account_groups g ON g.id=a.group_id AND g.budget_id=a.budget_id
+            LEFT JOIN transactions t ON t.account_id=a.id AND t.archived=0 AND t.voided=0
+            WHERE a.budget_id=?1 GROUP BY a.id
+            ORDER BY COALESCE(g.sort_order,9223372036854775807),g.id,a.sort_order,a.id"#).map_err(repo)?;
+        let rows = statement
+            .query_map([budget.to_string()], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
+                    AccountTreeAccount {
+                        id: r.get(4)?,
+                        name: r.get(5)?,
+                        account_type: r.get(6)?,
+                        closed: r.get::<_, i64>(7)? != 0,
+                        favorite: r.get::<_, i64>(8)? != 0,
+                        sort_order: r.get(9)?,
+                        balance: Money::from_minor_units(r.get(10)?),
+                        last_reconciliation_date: r.get(11)?,
+                    },
+                ))
+            })
+            .map_err(repo)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(repo)?;
+        let mut groups: Vec<AccountTreeGroup> = Vec::new();
+        for (id, name, classification, sort_order, account) in rows {
+            if let Some(group) = groups.iter_mut().find(|g| g.id == id) {
+                group.accounts.push(account);
+            } else {
+                groups.push(AccountTreeGroup {
+                    id,
+                    name,
+                    classification,
+                    sort_order,
+                    accounts: vec![account],
+                });
+            }
+        }
+        Ok(groups)
+    }
+
+    pub fn account_header(&self, account: AccountId) -> Result<AccountHeader, RepositoryError> {
+        let mut header = self.connection.query_row(r#"SELECT a.id,a.name,a.account_type,COALESCE(g.name,'Ungrouped'),COALESCE(SUM(CASE WHEN t.archived=0 AND t.voided=0 THEN t.amount ELSE 0 END),0),COALESCE(SUM(CASE WHEN t.archived=0 AND t.voided=0 AND t.cleared_state IN ('cleared','reconciled') THEN t.amount ELSE 0 END),0),COALESCE(SUM(CASE WHEN t.archived=0 AND t.voided=0 AND t.cleared_state='uncleared' THEN t.amount ELSE 0 END),0),COUNT(CASE WHEN t.archived=0 THEN 1 END),(SELECT MAX(rr.statement_date) FROM reconciliations rr WHERE rr.account_id=a.id AND rr.state='completed'),COALESCE((SELECT difference FROM reconciliations lr WHERE lr.account_id=a.id ORDER BY statement_date DESC,id DESC LIMIT 1),0)
+            FROM accounts a LEFT JOIN account_groups g ON g.id=a.group_id LEFT JOIN transactions t ON t.account_id=a.id WHERE a.id=?1 GROUP BY a.id"#,[account.to_string()],|r| Ok(AccountHeader{account_id:r.get(0)?,name:r.get(1)?,account_type:r.get(2)?,group_path:r.get(3)?,working:Money::from_minor_units(r.get(4)?),cleared:Money::from_minor_units(r.get(5)?),uncleared:Money::from_minor_units(r.get(6)?),transaction_count:r.get::<_,i64>(7)? as u64,last_reconciliation_date:r.get(8)?,reconciliation_difference:Money::from_minor_units(r.get(9)?),goal_ids:vec![]})).map_err(repo)?;
+        let mut goals = self
+            .connection
+            .prepare("SELECT id FROM category_goals WHERE account_id=?1 ORDER BY id")
+            .map_err(repo)?;
+        header.goal_ids = goals
+            .query_map([account.to_string()], |r| r.get(0))
+            .map_err(repo)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(repo)?;
+        Ok(header)
     }
 
     pub fn register_projection(
