@@ -5,15 +5,10 @@ use std::{
 };
 use thiserror::Error;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 7;
-const INITIAL_SQL: &str = include_str!("migrations/0001_initial.sql");
-const RECONCILIATION_SQL: &str = include_str!("migrations/0002_reconciliation_history.sql");
-const CREDIT_CARD_SQL: &str = include_str!("migrations/0003_credit_card_payment_categories.sql");
-const PERSISTENCE_AND_IMPORTS_SQL: &str =
-    include_str!("migrations/0004_persistence_and_imports.sql");
-const IMPORT_WORKFLOW_SQL: &str = include_str!("migrations/0005_import_workflow.sql");
-const INBOX_FAILURES_SQL: &str = include_str!("migrations/0006_inbox_failures.sql");
-const QUERY_PLAN_INDEXES_SQL: &str = include_str!("migrations/0007_query_plan_indexes.sql");
+pub const LATEST_SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_FAMILY_KEY: &str = "schema_family";
+pub const SCHEMA_FAMILY: &str = "account_centric_v1";
+const ACCOUNT_CENTRIC_SCHEMA_SQL: &str = include_str!("migrations/0001_account_centric_schema.sql");
 
 struct ReleasedMigration {
     version: i64,
@@ -22,50 +17,12 @@ struct ReleasedMigration {
     sql: &'static str,
 }
 
-const RELEASED_MIGRATIONS: &[ReleasedMigration] = &[
-    ReleasedMigration {
-        version: 1,
-        identifier: "0001_initial",
-        checksum: "0001-initial-v1",
-        sql: INITIAL_SQL,
-    },
-    ReleasedMigration {
-        version: 2,
-        identifier: "0002_reconciliation_history",
-        checksum: "0002-reconciliation-v1",
-        sql: RECONCILIATION_SQL,
-    },
-    ReleasedMigration {
-        version: 3,
-        identifier: "0003_credit_card_payment_categories",
-        checksum: "0003-credit-card-v1",
-        sql: CREDIT_CARD_SQL,
-    },
-    ReleasedMigration {
-        version: 4,
-        identifier: "0004_persistence_and_imports",
-        checksum: "0004-persistence-imports-v1",
-        sql: PERSISTENCE_AND_IMPORTS_SQL,
-    },
-    ReleasedMigration {
-        version: 5,
-        identifier: "0005_import_workflow",
-        checksum: "0005-import-workflow-v1",
-        sql: IMPORT_WORKFLOW_SQL,
-    },
-    ReleasedMigration {
-        version: 6,
-        identifier: "0006_inbox_failures",
-        checksum: "0006-inbox-failures-v1",
-        sql: INBOX_FAILURES_SQL,
-    },
-    ReleasedMigration {
-        version: 7,
-        identifier: "0007_query_plan_indexes",
-        checksum: "0007-query-plan-indexes-v1",
-        sql: QUERY_PLAN_INDEXES_SQL,
-    },
-];
+const RELEASED_MIGRATIONS: &[ReleasedMigration] = &[ReleasedMigration {
+    version: 1,
+    identifier: "0001_account_centric_schema",
+    checksum: "0001-account-centric-schema-v1",
+    sql: ACCOUNT_CENTRIC_SCHEMA_SQL,
+}];
 
 #[derive(Debug, Error)]
 pub enum MigrationError {
@@ -81,6 +38,8 @@ pub enum MigrationError {
     Backup(#[from] std::io::Error),
     #[error("released migration {version} has a different checksum")]
     Checksum { version: i64 },
+    #[error("database schema family {found:?} is not supported; expected account_centric_v1")]
+    SchemaFamily { found: Option<String> },
 }
 
 pub fn current_version(connection: &Connection) -> Result<i64, MigrationError> {
@@ -101,6 +60,7 @@ pub fn current_version(connection: &Connection) -> Result<i64, MigrationError> {
 
 pub fn migrate(connection: &mut Connection, path: &Path) -> Result<(), MigrationError> {
     let version = current_version(connection)?;
+    validate_schema_family(connection, version)?;
     if version > LATEST_SCHEMA_VERSION {
         return Err(MigrationError::FutureSchema {
             found: version,
@@ -129,17 +89,33 @@ pub fn migrate(connection: &mut Connection, path: &Path) -> Result<(), Migration
     if version > 0 || database_has_objects(connection)? {
         verified_backup(connection, path)?;
     }
-    // Table reconstruction cannot run while immediate FK checks still refer to the renamed
-    // parent. The migration itself recreates all parents and we validate before re-enabling.
-    let reconstructs_tables = version < 4;
-    if reconstructs_tables {
-        connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    apply_migrations(connection, version)
+}
+
+fn validate_schema_family(connection: &Connection, version: i64) -> Result<(), MigrationError> {
+    let metadata_exists: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
+        ("table", "app_metadata"),
+        |r| r.get(0),
+    )?;
+    if metadata_exists == 0 {
+        if version == 0 && !database_has_objects(connection)? {
+            return Ok(());
+        }
+        return Err(MigrationError::SchemaFamily { found: None });
     }
-    let result = apply_migrations(connection, version);
-    if reconstructs_tables {
-        connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    let family: Option<String> = connection
+        .query_row(
+            "SELECT value FROM app_metadata WHERE key = ?1",
+            [SCHEMA_FAMILY_KEY],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if family.as_deref() == Some(SCHEMA_FAMILY) {
+        Ok(())
+    } else {
+        Err(MigrationError::SchemaFamily { found: family })
     }
-    result
 }
 
 fn apply_migrations(connection: &mut Connection, version: i64) -> Result<(), MigrationError> {
@@ -150,6 +126,14 @@ fn apply_migrations(connection: &mut Connection, version: i64) -> Result<(), Mig
         transaction.execute(
             "INSERT INTO schema_migrations(version,identifier,checksum,applied_at) VALUES(?1,?2,?3,datetime('now'))",
             (migration.version, migration.identifier, migration.checksum),
+        )?;
+        transaction.execute(
+            "INSERT INTO app_metadata(key,value,updated_at) VALUES(?1,?2,datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+            (SCHEMA_FAMILY_KEY, SCHEMA_FAMILY),
+        )?;
+        transaction.execute(
+            "INSERT INTO app_metadata(key,value,updated_at) VALUES('schema_version',?1,datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+            [migration.version.to_string()],
         )?;
     }
     let violations: i64 =
@@ -186,43 +170,75 @@ mod tests {
                 )
                 .unwrap();
         }
+        if version > 0 {
+            transaction
+                .execute(
+                    "INSERT INTO app_metadata(key,value,updated_at) VALUES(?1,?2,'now')",
+                    (SCHEMA_FAMILY_KEY, SCHEMA_FAMILY),
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO app_metadata(key,value,updated_at) VALUES('schema_version',?1,'now')",
+                    [version.to_string()],
+                )
+                .unwrap();
+        }
         transaction.commit().unwrap();
         connection.execute_batch("PRAGMA foreign_keys=ON").unwrap();
         connection
     }
 
     #[test]
-    fn upgrades_every_released_version_reopens_idempotently_and_backs_up() {
-        for version in 1..LATEST_SCHEMA_VERSION {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join(format!("v{version}.sqlite3"));
-            let mut connection = released_database(&path, version);
-            migrate(&mut connection, &path).unwrap();
-            assert_eq!(current_version(&connection).unwrap(), LATEST_SCHEMA_VERSION);
-            assert!(path.with_extension("pre-migration.sqlite3").exists());
-            migrate(&mut connection, &path).unwrap();
-            assert_eq!(current_version(&connection).unwrap(), LATEST_SCHEMA_VERSION);
-        }
+    fn creates_fresh_account_centric_schema_and_reopens_idempotently() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mnab.sqlite3");
+        let mut connection = Connection::open(&path).unwrap();
+
+        migrate(&mut connection, &path).unwrap();
+        assert_eq!(current_version(&connection).unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM app_metadata WHERE key=?1",
+                    [SCHEMA_FAMILY_KEY],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            SCHEMA_FAMILY
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM app_metadata WHERE key='schema_version'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            LATEST_SCHEMA_VERSION.to_string()
+        );
+        migrate(&mut connection, &path).unwrap();
+        assert_eq!(current_version(&connection).unwrap(), LATEST_SCHEMA_VERSION);
     }
 
     #[test]
     fn rejects_changed_checksums_and_future_schemas() {
         let directory = tempfile::tempdir().unwrap();
         let checksum_path = directory.path().join("checksum.sqlite3");
-        let mut checksum = released_database(&checksum_path, 3);
+        let mut checksum = released_database(&checksum_path, LATEST_SCHEMA_VERSION);
         checksum
             .execute(
-                "UPDATE schema_migrations SET checksum='changed' WHERE version=2",
+                "UPDATE schema_migrations SET checksum='changed' WHERE version=1",
                 [],
             )
             .unwrap();
         assert!(matches!(
             migrate(&mut checksum, &checksum_path),
-            Err(MigrationError::Checksum { version: 2 })
+            Err(MigrationError::Checksum { version: 1 })
         ));
 
         let future_path = directory.path().join("future.sqlite3");
-        let mut future = released_database(&future_path, 4);
+        let mut future = released_database(&future_path, LATEST_SCHEMA_VERSION);
         future
             .execute(
                 "INSERT INTO schema_migrations VALUES(99,'future','future','now')",
@@ -233,6 +249,97 @@ mod tests {
             migrate(&mut future, &future_path),
             Err(MigrationError::FutureSchema { found: 99, .. })
         ));
+    }
+
+    #[test]
+    fn migration_registry_matches_active_sql_files() {
+        let mut versions = std::collections::BTreeSet::new();
+        let active_files =
+            fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/migrations"))
+                .unwrap()
+                .filter_map(|entry| {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    (path.extension().and_then(|value| value.to_str()) == Some("sql"))
+                        .then_some(path)
+                })
+                .collect::<Vec<_>>();
+
+        assert_eq!(active_files.len(), RELEASED_MIGRATIONS.len());
+        for migration in RELEASED_MIGRATIONS {
+            assert!(
+                versions.insert(migration.version),
+                "duplicate migration version {}",
+                migration.version
+            );
+            let expected = format!(
+                "{:04}_{}.sql",
+                migration.version,
+                migration
+                    .identifier
+                    .trim_start_matches(&format!("{:04}_", migration.version))
+            );
+            assert!(
+                active_files
+                    .iter()
+                    .any(|path| path.file_name().unwrap() == expected.as_str()),
+                "missing active SQL file for registered migration {}",
+                migration.identifier
+            );
+        }
+        for (expected, actual) in (1..=LATEST_SCHEMA_VERSION).zip(versions.iter().copied()) {
+            assert_eq!(actual, expected, "skipped migration version {expected}");
+        }
+        assert_eq!(versions.last().copied(), Some(LATEST_SCHEMA_VERSION));
+
+        for path in active_files {
+            let file_name = path.file_stem().unwrap().to_str().unwrap();
+            let (version, _) = file_name.split_once('_').unwrap();
+            let version = version.parse::<i64>().unwrap();
+            let migration = RELEASED_MIGRATIONS
+                .iter()
+                .find(|migration| migration.version == version);
+            assert_eq!(
+                migration.map(|migration| migration.identifier),
+                Some(file_name),
+                "unregistered or mismatched migration file {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_account_centric_schema_family() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mnab.sqlite3");
+        let mut db = Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE app_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL); INSERT INTO app_metadata VALUES('schema_family','budget_first_v1','now');").unwrap();
+
+        assert!(matches!(
+            migrate(&mut db, &path),
+            Err(MigrationError::SchemaFamily { found: Some(family) }) if family == "budget_first_v1"
+        ));
+    }
+
+    #[test]
+    fn fresh_account_centric_schema_passes_sqlite_checks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mnab.sqlite3");
+        let mut db = Connection::open(&path).unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        migrate(&mut db, &path).unwrap();
+
+        let fk_violations: i64 = db
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(fk_violations, 0);
+        assert_eq!(
+            db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
     }
 
     #[test]
@@ -281,30 +388,13 @@ mod tests {
     }
 
     #[test]
-    fn failed_reconstruction_rolls_back_and_leaves_verified_backup_usable() {
+    fn verified_backup_copies_current_database() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("rollback.sqlite3");
-        let mut db = released_database(&path, 3);
-        db.execute_batch("INSERT INTO budgets VALUES('b','Budget','now','now',0); INSERT INTO accounts VALUES('a','b','Checking','checking',0,0,'now','now');").unwrap();
+        let path = directory.path().join("backup.sqlite3");
+        let db = released_database(&path, LATEST_SCHEMA_VERSION);
+        db.execute_batch("INSERT INTO budgets VALUES('b','Budget','now','now',0); INSERT INTO accounts(id,budget_id,name,account_type,sort_order,created_at,modified_at) VALUES('a','b','Checking','checking',0,'now','now');").unwrap();
+
         let backup = verified_backup(&db, &path).unwrap();
-        db.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
-        let transaction = db.transaction().unwrap();
-        transaction
-            .execute_batch(PERSISTENCE_AND_IMPORTS_SQL)
-            .unwrap();
-        assert!(
-            transaction
-                .execute_batch("INSERT INTO no_such_table VALUES(1)")
-                .is_err()
-        );
-        drop(transaction);
-        assert_eq!(current_version(&db).unwrap(), 3);
-        assert_eq!(
-            db.query_row("SELECT name FROM accounts WHERE id='a'", [], |r| r
-                .get::<_, String>(0))
-                .unwrap(),
-            "Checking"
-        );
         let backup_db = Connection::open(backup).unwrap();
         assert_eq!(
             backup_db
