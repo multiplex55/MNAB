@@ -11,65 +11,10 @@ pub struct Ledger {
     pub reconciliation_changes: Vec<ReconciliationChange>,
     pub audit: Vec<String>,
     pub hide_closed: bool,
-    /// Managed payment categories are keyed by immutable account identity, never account name.
-    pub payment_categories: HashMap<AccountId, ManagedPaymentCategory>,
+    pub account_groups: HashMap<AccountGroupId, AccountGroup>,
+    pub category_goals: HashMap<CategoryId, CategoryGoal>,
     /// Earliest ledger date invalidated by a transaction mutation; recalculation continues forward.
     pub recalculation_from: Option<TransactionDate>,
-}
-
-#[cfg(test)]
-mod credit_card_tests {
-    use super::*;
-    fn date() -> TransactionDate {
-        TransactionDate(time::Date::from_calendar_date(2026, time::Month::January, 1).unwrap())
-    }
-    #[test]
-    fn managed_category_lifecycle_uses_account_identity() {
-        let mut ledger = Ledger::default();
-        let mut service = AccountService::new(&mut ledger);
-        let account = service
-            .create(
-                BudgetId::new(),
-                "Card",
-                AccountType::CreditCard,
-                Money::ZERO,
-                date(),
-            )
-            .unwrap();
-        let category_id = service.payment_category(account.id).unwrap().category_id;
-        service.rename(account.id, "Renamed").unwrap();
-        assert_eq!(
-            service.payment_category(account.id).unwrap().category_id,
-            category_id
-        );
-        service.close(account.id, None, date()).unwrap();
-        assert!(service.payment_category(account.id).unwrap().archived);
-        service.reopen(account.id).unwrap();
-        assert!(!service.payment_category(account.id).unwrap().archived);
-    }
-    #[test]
-    fn failed_creation_is_atomic() {
-        let mut ledger = Ledger::default();
-        let before = ledger.clone();
-        let result = AccountService::new(&mut ledger).create(
-            BudgetId::new(),
-            "Card",
-            AccountType::CreditCard,
-            Money::from_minor_units(i64::MIN),
-            date(),
-        );
-        assert_eq!(result, Err(AccountServiceError::Overflow));
-        assert_eq!(ledger.accounts, before.accounts);
-        assert_eq!(ledger.payment_categories, before.payment_categories);
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManagedPaymentCategory {
-    pub category_id: CategoryId,
-    pub account_id: AccountId,
-    pub name: String,
-    pub archived: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,6 +49,16 @@ pub enum AccountServiceError {
     Overflow,
     #[error("opening balance must be a non-negative magnitude")]
     InvalidOpeningMagnitude,
+    #[error("account group not found")]
+    GroupNotFound,
+    #[error("account group cannot parent itself")]
+    GroupSelfParent,
+    #[error("account group hierarchy would cycle")]
+    GroupCycle,
+    #[error("account group is not empty")]
+    GroupNotEmpty,
+    #[error("account and group budgets differ")]
+    DifferentBudgets,
 }
 
 pub struct AccountService<'a> {
@@ -134,17 +89,6 @@ impl<'a> AccountService<'a> {
             .opening_amount(opening_magnitude)
             .map_err(|_| AccountServiceError::Overflow)?;
         staged.accounts.insert(account.id, account.clone());
-        if account_type == AccountType::CreditCard {
-            staged.payment_categories.insert(
-                account.id,
-                ManagedPaymentCategory {
-                    category_id: CategoryId::new(),
-                    account_id: account.id,
-                    name: format!("{} Payment", account.name),
-                    archived: false,
-                },
-            );
-        }
         if amount != Money::ZERO {
             let transaction = Transaction {
                 id: TransactionId::new(),
@@ -178,9 +122,6 @@ impl<'a> AccountService<'a> {
     ) -> Result<(), AccountServiceError> {
         let name = name.into();
         self.account_mut(id)?.name.clone_from(&name);
-        if let Some(category) = self.ledger.payment_categories.get_mut(&id) {
-            category.name = format!("{name} Payment");
-        }
         Ok(())
     }
     pub fn annotate(
@@ -204,9 +145,6 @@ impl<'a> AccountService<'a> {
     }
     pub fn reopen(&mut self, id: AccountId) -> Result<(), AccountServiceError> {
         self.account_mut(id)?.closed = false;
-        if let Some(category) = self.ledger.payment_categories.get_mut(&id) {
-            category.archived = false;
-        }
         Ok(())
     }
     pub fn change_type(
@@ -293,9 +231,6 @@ impl<'a> AccountService<'a> {
             .get_mut(&id)
             .ok_or(AccountServiceError::NotFound)?
             .closed = true;
-        if let Some(category) = staged.payment_categories.get_mut(&id) {
-            category.archived = true;
-        }
         *self.ledger = staged;
         Ok(())
     }
@@ -312,13 +247,188 @@ impl<'a> AccountService<'a> {
             .accounts
             .remove(&id)
             .ok_or(AccountServiceError::NotFound)?;
-        self.ledger.payment_categories.remove(&id);
+        Ok(())
+    }
+    pub fn create_group(
+        &mut self,
+        budget_id: BudgetId,
+        name: impl Into<String>,
+        parent_group_id: Option<AccountGroupId>,
+    ) -> Result<AccountGroup, AccountServiceError> {
+        let mut group = AccountGroup::new(budget_id, name);
+        self.validate_group_parent(group.id, budget_id, parent_group_id)?;
+        group.parent_group_id = parent_group_id;
+        group.sort_order = self.next_group_sort_order(budget_id, parent_group_id);
+        self.ledger.account_groups.insert(group.id, group.clone());
+        Ok(group)
+    }
+
+    pub fn move_group(
+        &mut self,
+        id: AccountGroupId,
+        parent_group_id: Option<AccountGroupId>,
+        sort_order: i64,
+    ) -> Result<(), AccountServiceError> {
+        let budget_id = self
+            .ledger
+            .account_groups
+            .get(&id)
+            .ok_or(AccountServiceError::GroupNotFound)?
+            .budget_id;
+        self.validate_group_parent(id, budget_id, parent_group_id)?;
+        let group = self
+            .ledger
+            .account_groups
+            .get_mut(&id)
+            .ok_or(AccountServiceError::GroupNotFound)?;
+        group.parent_group_id = parent_group_id;
+        group.sort_order = sort_order;
+        Ok(())
+    }
+
+    pub fn set_account_group(
+        &mut self,
+        account_id: AccountId,
+        group_id: Option<AccountGroupId>,
+        sort_order: i64,
+    ) -> Result<(), AccountServiceError> {
+        let account_budget = self
+            .ledger
+            .accounts
+            .get(&account_id)
+            .ok_or(AccountServiceError::NotFound)?
+            .budget_id;
+        if let Some(group_id) = group_id {
+            let group = self
+                .ledger
+                .account_groups
+                .get(&group_id)
+                .ok_or(AccountServiceError::GroupNotFound)?;
+            if group.budget_id != account_budget {
+                return Err(AccountServiceError::DifferentBudgets);
+            }
+        }
+        let account = self.account_mut(account_id)?;
+        account.group_id = group_id;
+        account.sort_order = sort_order;
+        Ok(())
+    }
+
+    pub fn delete_group(
+        &mut self,
+        id: AccountGroupId,
+        move_children_to: Option<Option<AccountGroupId>>,
+    ) -> Result<(), AccountServiceError> {
+        let group = self
+            .ledger
+            .account_groups
+            .get(&id)
+            .cloned()
+            .ok_or(AccountServiceError::GroupNotFound)?;
+        let has_children = self
+            .ledger
+            .account_groups
+            .values()
+            .any(|g| g.parent_group_id == Some(id));
+        let has_accounts = self
+            .ledger
+            .accounts
+            .values()
+            .any(|a| a.group_id == Some(id));
+        if (has_children || has_accounts) && move_children_to.is_none() {
+            return Err(AccountServiceError::GroupNotEmpty);
+        }
+        if let Some(new_parent) = move_children_to {
+            self.validate_group_parent(id, group.budget_id, new_parent)?;
+            for child in self
+                .ledger
+                .account_groups
+                .values_mut()
+                .filter(|g| g.parent_group_id == Some(id))
+            {
+                child.parent_group_id = new_parent;
+            }
+            for account in self
+                .ledger
+                .accounts
+                .values_mut()
+                .filter(|a| a.group_id == Some(id))
+            {
+                account.group_id = new_parent;
+            }
+        }
+        self.ledger.account_groups.remove(&id);
         Ok(())
     }
 
     #[must_use]
-    pub fn payment_category(&self, account_id: AccountId) -> Option<&ManagedPaymentCategory> {
-        self.ledger.payment_categories.get(&account_id)
+    pub fn ordered_group_children(
+        &self,
+        budget_id: BudgetId,
+        parent: Option<AccountGroupId>,
+    ) -> Vec<AccountGroupId> {
+        let mut groups: Vec<_> = self
+            .ledger
+            .account_groups
+            .values()
+            .filter(|g| g.budget_id == budget_id && g.parent_group_id == parent)
+            .collect();
+        groups.sort_by_key(|g| (g.sort_order, g.name.clone(), g.id));
+        groups.into_iter().map(|g| g.id).collect()
+    }
+
+    #[must_use]
+    pub fn ordered_account_siblings(
+        &self,
+        budget_id: BudgetId,
+        group_id: Option<AccountGroupId>,
+    ) -> Vec<AccountId> {
+        let mut accounts: Vec<_> = self
+            .ledger
+            .accounts
+            .values()
+            .filter(|a| a.budget_id == budget_id && a.group_id == group_id)
+            .collect();
+        accounts.sort_by_key(|a| (a.sort_order, a.name.clone(), a.id));
+        accounts.into_iter().map(|a| a.id).collect()
+    }
+
+    fn next_group_sort_order(&self, budget_id: BudgetId, parent: Option<AccountGroupId>) -> i64 {
+        self.ledger
+            .account_groups
+            .values()
+            .filter(|g| g.budget_id == budget_id && g.parent_group_id == parent)
+            .map(|g| g.sort_order)
+            .max()
+            .unwrap_or(-1)
+            + 1
+    }
+
+    fn validate_group_parent(
+        &self,
+        id: AccountGroupId,
+        budget_id: BudgetId,
+        parent: Option<AccountGroupId>,
+    ) -> Result<(), AccountServiceError> {
+        if parent == Some(id) {
+            return Err(AccountServiceError::GroupSelfParent);
+        }
+        let mut cursor = parent;
+        while let Some(parent_id) = cursor {
+            if parent_id == id {
+                return Err(AccountServiceError::GroupCycle);
+            }
+            let parent_group = self
+                .ledger
+                .account_groups
+                .get(&parent_id)
+                .ok_or(AccountServiceError::GroupNotFound)?;
+            if parent_group.budget_id != budget_id {
+                return Err(AccountServiceError::DifferentBudgets);
+            }
+            cursor = parent_group.parent_group_id;
+        }
+        Ok(())
     }
 }
 
@@ -341,7 +451,6 @@ mod lifecycle_tests {
             (AccountType::Loan, -100),
             (AccountType::Asset, 100),
             (AccountType::Liability, -100),
-            (AccountType::Investment, 100),
         ] {
             assert_eq!(
                 kind.opening_amount(Money::from_minor_units(100))
@@ -405,5 +514,88 @@ mod lifecycle_tests {
                 day(),
             )
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod account_group_tests {
+    use super::*;
+    use time::macros::date;
+
+    fn day() -> TransactionDate {
+        TransactionDate(date!(2026 - 08 - 05))
+    }
+
+    #[test]
+    fn group_cycle_rejection_self_direct_and_deep() {
+        let mut ledger = Ledger::default();
+        let budget = BudgetId::new();
+        let mut service = AccountService::new(&mut ledger);
+        let parent = service.create_group(budget, "Parent", None).unwrap();
+        assert_eq!(
+            service.move_group(parent.id, Some(parent.id), 0),
+            Err(AccountServiceError::GroupSelfParent)
+        );
+        let child = service
+            .create_group(budget, "Child", Some(parent.id))
+            .unwrap();
+        assert_eq!(
+            service.move_group(parent.id, Some(child.id), 0),
+            Err(AccountServiceError::GroupCycle)
+        );
+        let grandchild = service
+            .create_group(budget, "Grandchild", Some(child.id))
+            .unwrap();
+        assert_eq!(
+            service.move_group(parent.id, Some(grandchild.id), 0),
+            Err(AccountServiceError::GroupCycle)
+        );
+    }
+
+    #[test]
+    fn moving_reordering_groups_and_accounts_yields_deterministic_order() {
+        let mut ledger = Ledger::default();
+        let budget = BudgetId::new();
+        let mut service = AccountService::new(&mut ledger);
+        let z = service.create_group(budget, "Z", None).unwrap();
+        let a = service.create_group(budget, "A", None).unwrap();
+        service.move_group(z.id, None, 10).unwrap();
+        service.move_group(a.id, None, 10).unwrap();
+        assert_eq!(
+            service.ordered_group_children(budget, None),
+            vec![a.id, z.id]
+        );
+        let cash = service
+            .create(budget, "Cash", AccountType::Cash, Money::ZERO, day())
+            .unwrap();
+        let bank = service
+            .create(budget, "Bank", AccountType::Checking, Money::ZERO, day())
+            .unwrap();
+        service.set_account_group(cash.id, Some(a.id), 1).unwrap();
+        service.set_account_group(bank.id, Some(a.id), 1).unwrap();
+        assert_eq!(
+            service.ordered_account_siblings(budget, Some(a.id)),
+            vec![bank.id, cash.id]
+        );
+    }
+
+    #[test]
+    fn deleting_non_empty_group_requires_explicit_move_or_ungroup() {
+        let mut ledger = Ledger::default();
+        let budget = BudgetId::new();
+        let mut service = AccountService::new(&mut ledger);
+        let group = service.create_group(budget, "Group", None).unwrap();
+        let account = service
+            .create(budget, "Cash", AccountType::Cash, Money::ZERO, day())
+            .unwrap();
+        service
+            .set_account_group(account.id, Some(group.id), 0)
+            .unwrap();
+        assert_eq!(
+            service.delete_group(group.id, None),
+            Err(AccountServiceError::GroupNotEmpty)
+        );
+        service.delete_group(group.id, Some(None)).unwrap();
+        assert_eq!(ledger.accounts.get(&account.id).unwrap().group_id, None);
     }
 }

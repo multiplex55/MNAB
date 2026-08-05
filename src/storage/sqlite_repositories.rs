@@ -51,7 +51,7 @@ impl AccountRepository for SqliteRepositories<'_> {
     }
     fn account(&mut self, id: AccountId) -> Result<Option<Account>, RepositoryError> {
         use rusqlite::OptionalExtension;
-        self.transaction.query_row("SELECT budget_id,name,account_type,closed,note,sort_order,favorite FROM accounts WHERE id=?1",[id.to_string()],|r|Ok(Account{id,budget_id:parse(r.get::<_,String>(0)?)?,name:r.get(1)?,account_type:parse_account_type(&r.get::<_,String>(2)?)?,closed:r.get(3)?,note:r.get(4)?,sort_order:r.get(5)?,favorite:r.get(6)?})).optional().map_err(repo)
+        self.transaction.query_row("SELECT budget_id,name,account_type,closed,note,sort_order,favorite FROM accounts WHERE id=?1",[id.to_string()],|r|Ok(Account{id,budget_id:parse(r.get::<_,String>(0)?)?,group_id:None,name:r.get(1)?,account_type:parse_account_type(&r.get::<_,String>(2)?)?,closed:r.get(3)?,note:r.get(4)?,sort_order:r.get(5)?,favorite:r.get(6)?})).optional().map_err(repo)
     }
 }
 fn parse<T: std::str::FromStr>(s: String) -> rusqlite::Result<T> {
@@ -66,7 +66,7 @@ fn parse_account_type(s: &str) -> rusqlite::Result<AccountType> {
         "loan" => Ok(AccountType::Loan),
         "asset" => Ok(AccountType::Asset),
         "liability" => Ok(AccountType::Liability),
-        "investment" => Ok(AccountType::Investment),
+        "investment" => Err(rusqlite::Error::InvalidQuery),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
@@ -79,7 +79,6 @@ fn account_type(v: AccountType) -> &'static str {
         AccountType::Loan => "loan",
         AccountType::Asset => "asset",
         AccountType::Liability => "liability",
-        AccountType::Investment => "investment",
     }
 }
 impl TransactionRepository for SqliteRepositories<'_> {
@@ -119,8 +118,13 @@ impl TransactionRepository for SqliteRepositories<'_> {
         let body = if let Some(transfer) = t {
             TransactionBody::Transfer {
                 transfer_id: transfer.parse().map_err(repo)?,
+                source_account_id: account_id,
+                destination_account_id: account_id,
+                amount: Money::from_minor_units(amount),
                 other_account_id: account_id,
                 other_amount: Money::from_minor_units(-amount),
+                category_id: category,
+                category_effect_account_id: category.map(|_| account_id),
             }
         } else {
             TransactionBody::OpeningBalance {

@@ -62,6 +62,15 @@ impl Payee {
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CategoryGoal {
+    pub category_id: CategoryId,
+    pub account_id: AccountId,
+    pub target_amount: Money,
+    pub target_date: TransactionDate,
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BudgetAssignment {
     pub category_id: CategoryId,
     pub month: BudgetMonth,

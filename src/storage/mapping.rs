@@ -287,7 +287,11 @@ pub fn account_type(value: &str, id: &str) -> Result<AccountType, RowConversionE
         "loan" => Ok(AccountType::Loan),
         "asset" => Ok(AccountType::Asset),
         "liability" => Ok(AccountType::Liability),
-        "investment" => Ok(AccountType::Investment),
+        "investment" => Err(bad(
+            "accounts",
+            id,
+            "investment account type is no longer supported",
+        )),
         _ => Err(bad("accounts", id, "invalid account type")),
     }
 }
@@ -323,6 +327,7 @@ impl TryFrom<AccountRow> for Account {
         Ok(Self {
             id,
             budget_id: BudgetId::from_uuid(uuid(&r.budget_id, "accounts", &r.id)?),
+            group_id: None,
             name: r.name,
             account_type: account_type(&r.account_type, &r.id)?,
             closed: boolean(r.closed, "accounts", &r.id)?,
@@ -356,7 +361,6 @@ impl ToSqlModel for Account {
                 AccountType::Loan => "loan",
                 AccountType::Asset => "asset",
                 AccountType::Liability => "liability",
-                AccountType::Investment => "investment",
             }
             .into(),
             closed: i64::from(self.closed),
@@ -386,11 +390,13 @@ pub fn validate_transfer_pair(
                 transfer_id: a,
                 other_account_id: ao,
                 other_amount: am,
+                ..
             },
             TransactionBody::Transfer {
                 transfer_id: b,
                 other_account_id: bo,
                 other_amount: bm,
+                ..
             },
         ) if a == b
             && *ao == right.account_id
@@ -504,5 +510,15 @@ mod tests {
             TransactionBody::OpeningBalance { category_id: None },
         );
         assert!(validate_transfer_pair(&left, &right).is_err());
+    }
+}
+
+#[cfg(test)]
+mod investment_rejection_tests {
+    use super::*;
+
+    #[test]
+    fn investment_deserialization_is_rejected() {
+        assert!(account_type("investment", "account-id").is_err());
     }
 }
