@@ -143,22 +143,30 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollect
         }
     });
     match &state.inspector_context {
-        InspectorContext::Budget => {
-            ui.label("Assignment inspector");
-            ui.label("Enter assignment amounts in cents, then press Enter to commit.");
-            ui.label("Undo restores the assignment records from before the command.");
+        InspectorContext::AccountSummary(account) => {
+            ui.label("Account summary");
+            ui.label(account.map_or_else(
+                || "Select an account to see balances and activity.".into(),
+                |id| format!("Selected account: {id}"),
+            ));
         }
         InspectorContext::Transaction(_) => {
             ui.label("Transaction details");
         }
+        InspectorContext::Transfer(_) => {
+            ui.label("Transfer details");
+        }
         InspectorContext::Reconciliation(_) => {
             ui.label("Reconciliation controls");
         }
-        InspectorContext::Import(_) => {
+        InspectorContext::ImportCandidate(_) => {
             ui.label("Import match details");
         }
-        InspectorContext::Target(_) => {
-            ui.label("Target details");
+        InspectorContext::CategoryGoal(_) => {
+            ui.label("Category goal details");
+        }
+        InspectorContext::BackgroundOperation(_) => {
+            ui.label("Background operation details");
         }
     }
     for operation in state.operations.values() {

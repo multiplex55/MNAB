@@ -95,9 +95,9 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
         state.inspector_width = right.response.rect.width();
     }
     egui::CentralPanel::default().show(ctx, |ui| match state.navigation.workspace {
-        Workspace::Budget => super::workspaces::budget::show(ui, state, actions),
+        Workspace::Categories => super::workspaces::categories::show(ui, state, actions),
         Workspace::Reports => super::workspaces::reports::show(ui, state, actions),
-        Workspace::AllAccounts => super::workspaces::all_accounts::show(ui, state, actions),
+        Workspace::AllTransactions => super::workspaces::all_accounts::show(ui, state, actions),
         Workspace::Inbox => super::workspaces::inbox::show(ui, state, actions),
         Workspace::Account(id) => super::workspaces::register::show(ui, state, id, actions),
     });
@@ -160,18 +160,26 @@ fn show_palette(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionC
         return;
     }
     let context = crate::app::palette::CommandContext {
-        budget_open: state.active_budget.is_some(),
+        database_available: state.active_budget.is_some(),
         account_register: matches!(state.navigation.workspace, Workspace::Account(_)),
-        budget_workspace: state.navigation.workspace == Workspace::Budget,
+        categories_workspace: state.navigation.workspace == Workspace::Categories,
         mutations_disabled: state.mutations_disabled,
         has_selection: false,
         editing: false,
         dialog_open: state.dialog.is_some(),
         text_editor_owns_shortcuts: false,
         lifecycle_busy: false,
-        operation_locked: !state.operations.is_empty(),
+        mutation_locked: !state.operations.is_empty(),
         can_undo: false,
         can_redo: false,
+        selected_account: state.selected_account.is_some(),
+        selected_transaction: state.selected_transaction.is_some(),
+        register_focused: state.register_focus.is_some(),
+        import_active: matches!(state.editor, crate::app::state::EditorState::Importing(_)),
+        reconciliation_active: matches!(
+            state.editor,
+            crate::app::state::EditorState::Reconciling(_)
+        ),
     };
     let descriptors = crate::app::palette::commands_for(context);
     let matches = crate::app::palette::fuzzy(&state.palette.query, &descriptors);

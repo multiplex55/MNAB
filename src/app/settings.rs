@@ -303,6 +303,21 @@ impl SettingsSession {
                 }
                 value.register_columns.repair();
                 value.repair_filters();
+                value.last_selected_account_id = value
+                    .last_selected_account_id
+                    .take()
+                    .filter(|raw| raw.parse::<crate::domain::AccountId>().is_ok());
+                value
+                    .collapsed_account_groups
+                    .retain(|raw| raw.parse::<crate::domain::AccountGroupId>().is_ok());
+                if !matches!(
+                    value.last_workspace.as_deref(),
+                    None | Some(
+                        "all_transactions" | "categories" | "reports" | "inbox" | "account"
+                    )
+                ) {
+                    value.last_workspace = None;
+                }
                 Self {
                     path,
                     value,
@@ -352,6 +367,33 @@ impl SettingsSession {
 }
 
 impl Settings {
+    /// Drop malformed UUIDs and IDs that are not present in the opened database.
+    pub fn repair_persisted_ids(
+        &mut self,
+        valid_accounts: &[crate::domain::AccountId],
+        valid_groups: &[crate::domain::AccountGroupId],
+    ) {
+        self.last_selected_account_id = self
+            .last_selected_account_id
+            .take()
+            .and_then(|raw| raw.parse().ok())
+            .filter(|id| valid_accounts.contains(id))
+            .map(|id: crate::domain::AccountId| id.to_string());
+        self.collapsed_account_groups.retain(|raw| {
+            raw.parse::<crate::domain::AccountGroupId>()
+                .ok()
+                .is_some_and(|id| valid_groups.contains(&id))
+        });
+        self.collapsed_account_groups.sort();
+        self.collapsed_account_groups.dedup();
+        if !matches!(
+            self.last_workspace.as_deref(),
+            None | Some("all_transactions" | "categories" | "reports" | "inbox" | "account")
+        ) {
+            self.last_workspace = None;
+        }
+    }
+
     pub fn repair_filters(&mut self) {
         let mut warnings = Vec::new();
         self.saved_filters.retain(|f| {

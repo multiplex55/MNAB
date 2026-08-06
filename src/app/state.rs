@@ -3,7 +3,10 @@ use crate::{
         message::{WorkerMessage, WorkerPayload},
         navigation::Navigation,
     },
-    domain::{AccountId, BudgetId, BudgetMonth, ImportBatchId, Money, TargetId, TransactionId},
+    domain::{
+        AccountGroupId, AccountId, BudgetId, BudgetMonth, CategoryId, ImportBatchId, Money,
+        TransactionId, TransferId,
+    },
     storage::worker::{Generation, RequestId},
 };
 use egui::Id;
@@ -91,11 +94,105 @@ pub enum Dialog {
 }
 #[derive(Clone, Debug)]
 pub enum InspectorContext {
-    Budget,
+    AccountSummary(Option<AccountId>),
     Transaction(TransactionId),
+    Transfer(TransferId),
+    CategoryGoal(CategoryId),
     Reconciliation(AccountId),
-    Import(ImportBatchId),
-    Target(TargetId),
+    ImportCandidate(ImportBatchId),
+    BackgroundOperation(RequestId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommitState {
+    Editing,
+    Submitting,
+    Failed,
+    Committed,
+}
+
+#[derive(Clone, Debug)]
+pub struct EditorMetadata {
+    pub validation_errors: Vec<String>,
+    pub dirty: bool,
+    pub commit_state: CommitState,
+    pub restore_focus: Id,
+}
+impl EditorMetadata {
+    pub fn new(restore_focus: Id) -> Self {
+        Self {
+            validation_errors: vec![],
+            dirty: false,
+            commit_state: CommitState::Editing,
+            restore_focus,
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct AccountDraft {
+    pub name: String,
+    pub metadata: EditorMetadata,
+}
+#[derive(Clone, Debug)]
+pub struct TransactionDraft {
+    pub memo: String,
+    pub metadata: EditorMetadata,
+}
+#[derive(Clone, Debug)]
+pub struct TransferDraft {
+    pub memo: String,
+    pub metadata: EditorMetadata,
+}
+#[derive(Clone, Debug)]
+pub struct ImportState {
+    pub source: String,
+    pub metadata: EditorMetadata,
+}
+#[derive(Clone, Debug)]
+pub struct ReconciliationState {
+    pub metadata: EditorMetadata,
+}
+#[derive(Clone, Debug)]
+pub struct CategoryEditorState {
+    pub category_id: Option<CategoryId>,
+    pub metadata: EditorMetadata,
+}
+#[derive(Clone, Debug)]
+pub struct GroupEditorState {
+    pub group_id: Option<AccountGroupId>,
+    pub metadata: EditorMetadata,
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum EditorState {
+    #[default]
+    Idle,
+    CreatingAccount(AccountDraft),
+    EditingAccount(AccountId, AccountDraft),
+    CreatingTransaction(TransactionDraft),
+    EditingTransaction(TransactionId, TransactionDraft),
+    CreatingTransfer(TransferDraft),
+    Importing(ImportState),
+    Reconciling(ReconciliationState),
+    ManagingCategory(CategoryEditorState),
+    ManagingAccountGroup(GroupEditorState),
+}
+impl EditorState {
+    pub fn metadata(&self) -> Option<&EditorMetadata> {
+        match self {
+            Self::Idle => None,
+            Self::CreatingAccount(x) | Self::EditingAccount(_, x) => Some(&x.metadata),
+            Self::CreatingTransaction(x) | Self::EditingTransaction(_, x) => Some(&x.metadata),
+            Self::CreatingTransfer(x) => Some(&x.metadata),
+            Self::Importing(x) => Some(&x.metadata),
+            Self::Reconciling(x) => Some(&x.metadata),
+            Self::ManagingCategory(x) => Some(&x.metadata),
+            Self::ManagingAccountGroup(x) => Some(&x.metadata),
+        }
+    }
+    pub fn is_active(&self) -> bool {
+        !matches!(self, Self::Idle)
+    }
 }
 #[derive(Clone, Debug)]
 pub struct Notification {
@@ -153,6 +250,9 @@ pub struct AppState {
     pub database_path: Option<PathBuf>,
     pub navigation: Navigation,
     pub selected_account: Option<AccountId>,
+    pub selected_transaction: Option<TransactionId>,
+    pub register_focus: Option<Id>,
+    pub editor: EditorState,
     pub selected_month: BudgetMonth,
     pub selected_report: Option<String>,
     pub dialog: Option<DialogState>,
@@ -183,7 +283,10 @@ impl Default for AppState {
             database_path: None,
             navigation: nav,
             selected_account: None,
-            selected_month: nav.month,
+            selected_transaction: None,
+            register_focus: None,
+            editor: EditorState::Idle,
+            selected_month: BudgetMonth::new(1970, 1).expect("valid report filter month"),
             selected_report: None,
             dialog: None,
             notifications: vec![],
@@ -191,7 +294,7 @@ impl Default for AppState {
             latest_by_purpose: BTreeMap::new(),
             purpose_by_request: BTreeMap::new(),
             generation: Generation { budget: 0, view: 0 },
-            inspector_context: InspectorContext::Budget,
+            inspector_context: InspectorContext::AccountSummary(None),
             inspector_visible: true,
             sidebar_width: 230.0,
             inspector_width: 280.0,
@@ -211,6 +314,8 @@ impl AppState {
         self.budget_name = "No budget open".into();
         self.database_path = None;
         self.selected_account = None;
+        self.selected_transaction = None;
+        self.editor = EditorState::Idle;
         self.selected_report = None;
         self.accounts.clear();
         self.operations.clear();

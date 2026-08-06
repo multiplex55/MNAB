@@ -8,23 +8,28 @@ pub enum RequiredContext {
     Always,
     BudgetOpen,
     AccountRegister,
-    BudgetWorkspace,
+    CategoriesWorkspace,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CommandContext {
-    pub budget_open: bool,
+    pub database_available: bool,
     pub account_register: bool,
-    pub budget_workspace: bool,
+    pub categories_workspace: bool,
     pub mutations_disabled: bool,
     pub has_selection: bool,
     pub editing: bool,
     pub dialog_open: bool,
     pub text_editor_owns_shortcuts: bool,
     pub lifecycle_busy: bool,
-    pub operation_locked: bool,
+    pub mutation_locked: bool,
     pub can_undo: bool,
     pub can_redo: bool,
+    pub selected_account: bool,
+    pub selected_transaction: bool,
+    pub register_focused: bool,
+    pub import_active: bool,
+    pub reconciliation_active: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -46,25 +51,32 @@ pub enum ExecuteError {
 
 fn availability_context(context: CommandContext) -> CommandAvailabilityContext {
     CommandAvailabilityContext {
-        budget_open: context.budget_open,
+        database_available: context.database_available,
         workspace: if context.account_register {
             CommandWorkspace::AccountRegister
-        } else if context.budget_workspace {
-            CommandWorkspace::Budget
-        } else if context.budget_open {
-            CommandWorkspace::AllAccounts
+        } else if context.categories_workspace {
+            CommandWorkspace::Categories
+        } else if context.database_available {
+            CommandWorkspace::AllTransactions
         } else {
             CommandWorkspace::None
         },
-        has_selection: context.has_selection,
-        editing: context.editing,
+        has_selection: context.has_selection
+            || context.selected_account
+            || context.selected_transaction,
+        editing: context.editing || context.import_active || context.reconciliation_active,
         dialog_open: context.dialog_open,
         text_editor_owns_shortcuts: context.text_editor_owns_shortcuts,
         lifecycle_busy: context.lifecycle_busy,
         read_only: context.mutations_disabled,
-        operation_locked: context.operation_locked,
+        mutation_locked: context.mutation_locked,
         can_undo: context.can_undo,
         can_redo: context.can_redo,
+        selected_account: context.selected_account,
+        selected_transaction: context.selected_transaction,
+        register_focused: context.register_focused,
+        import_active: context.import_active,
+        reconciliation_active: context.reconciliation_active,
     }
 }
 
@@ -94,17 +106,73 @@ pub fn commands_for(context: CommandContext) -> Vec<CommandDescriptor> {
             AccountRegister,
         ),
         (AddAccount, "New account", "create add account", BudgetOpen),
+        (EditAccount, "Edit account", "rename account", BudgetOpen),
+        (CloseAccount, "Close account", "archive account", BudgetOpen),
+        (
+            AddAccountGroup,
+            "New account group",
+            "create group",
+            BudgetOpen,
+        ),
+        (
+            RenameAccountGroup,
+            "Rename account group",
+            "edit group",
+            BudgetOpen,
+        ),
+        (
+            DeleteAccountGroup,
+            "Delete account group",
+            "remove group",
+            BudgetOpen,
+        ),
+        (
+            MoveAccountGroup,
+            "Move account group",
+            "reorder group",
+            BudgetOpen,
+        ),
+        (
+            AddTransaction,
+            "New transaction",
+            "add transaction",
+            AccountRegister,
+        ),
+        (
+            EditTransaction,
+            "Edit transaction",
+            "change transaction",
+            AccountRegister,
+        ),
+        (
+            DeleteTransaction,
+            "Delete transaction",
+            "remove transaction",
+            AccountRegister,
+        ),
+        (
+            CreateTransfer,
+            "New transfer",
+            "transfer accounts",
+            AccountRegister,
+        ),
+        (
+            ReconcileAccount,
+            "Reconcile account",
+            "statement balance",
+            AccountRegister,
+        ),
         (
             PreviousMonth,
             "Previous month",
             "budget month back",
-            BudgetWorkspace,
+            CategoriesWorkspace,
         ),
         (
             NextMonth,
             "Next month",
             "budget month forward",
-            BudgetWorkspace,
+            CategoriesWorkspace,
         ),
         (
             Import,
@@ -134,13 +202,13 @@ pub fn commands_for(context: CommandContext) -> Vec<CommandDescriptor> {
         ),
         (Backup, "Create backup", "validate backup", BudgetOpen),
         (
-            NavigateAccounts,
+            NavigateAllTransactions,
             "Manage accounts",
             "accounts register",
             BudgetOpen,
         ),
         (
-            NavigateBudget,
+            NavigateCategories,
             "Manage categories",
             "categories budget",
             BudgetOpen,
@@ -173,18 +241,19 @@ pub fn commands_for(context: CommandContext) -> Vec<CommandDescriptor> {
 #[must_use]
 pub fn commands() -> Vec<CommandDescriptor> {
     commands_for(CommandContext {
-        budget_open: true,
+        database_available: true,
         account_register: false,
-        budget_workspace: true,
+        categories_workspace: true,
         mutations_disabled: false,
         has_selection: false,
         editing: false,
         dialog_open: false,
         text_editor_owns_shortcuts: false,
         lifecycle_busy: false,
-        operation_locked: false,
+        mutation_locked: false,
         can_undo: false,
         can_redo: false,
+        ..CommandContext::default()
     })
 }
 #[must_use]
@@ -344,9 +413,9 @@ mod command_tests {
     #[test]
     fn read_only_mode_disables_mutations_but_keeps_safe_reads_available() {
         let items = commands_for(CommandContext {
-            budget_open: true,
+            database_available: true,
             account_register: true,
-            budget_workspace: true,
+            categories_workspace: true,
             mutations_disabled: true,
             ..CommandContext::default()
         });
@@ -369,9 +438,9 @@ mod command_tests {
     #[test]
     fn fuzzy_prefers_title_prefix() {
         let items = commands_for(CommandContext {
-            budget_open: true,
+            database_available: true,
             account_register: true,
-            budget_workspace: true,
+            categories_workspace: true,
             ..CommandContext::default()
         });
         assert_eq!(

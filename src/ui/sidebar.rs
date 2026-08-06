@@ -49,9 +49,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollect
     );
     ui.separator();
     for (label, workspace) in [
-        ("Budget", Workspace::Budget),
+        ("Categories", Workspace::Categories),
         ("Reports", Workspace::Reports),
-        ("All Accounts", Workspace::AllAccounts),
+        ("All Transactions", Workspace::AllTransactions),
         ("Inbox", Workspace::Inbox),
     ] {
         if ui
