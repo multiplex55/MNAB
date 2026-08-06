@@ -17,6 +17,17 @@ pub enum AppCommand {
     ContextualNew,
     CreateBudget,
     AddAccount,
+    EditAccount,
+    CloseAccount,
+    AddAccountGroup,
+    RenameAccountGroup,
+    DeleteAccountGroup,
+    MoveAccountGroup,
+    AddTransaction,
+    EditTransaction,
+    DeleteTransaction,
+    CreateTransfer,
+    ReconcileAccount,
     Import,
     FocusSearch,
     Undo,
@@ -31,9 +42,9 @@ pub enum AppCommand {
     PreviousField,
     ToggleSelection,
     Rename,
-    NavigateBudget,
+    NavigateCategories,
     NavigateReports,
-    NavigateAccounts,
+    NavigateAllTransactions,
     PreviousMonth,
     NextMonth,
     Settings,
@@ -432,9 +443,9 @@ mod tests {
 pub enum CommandWorkspace {
     #[default]
     None,
-    Budget,
+    Categories,
     Reports,
-    AllAccounts,
+    AllTransactions,
     Inbox,
     AccountRegister,
 }
@@ -442,7 +453,7 @@ pub enum CommandWorkspace {
 /// Snapshot of UI and lifecycle state needed to evaluate semantic commands.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CommandAvailabilityContext {
-    pub budget_open: bool,
+    pub database_available: bool,
     pub workspace: CommandWorkspace,
     pub has_selection: bool,
     pub editing: bool,
@@ -450,9 +461,14 @@ pub struct CommandAvailabilityContext {
     pub text_editor_owns_shortcuts: bool,
     pub lifecycle_busy: bool,
     pub read_only: bool,
-    pub operation_locked: bool,
+    pub mutation_locked: bool,
     pub can_undo: bool,
     pub can_redo: bool,
+    pub selected_account: bool,
+    pub selected_transaction: bool,
+    pub register_focused: bool,
+    pub import_active: bool,
+    pub reconciliation_active: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -486,6 +502,17 @@ pub const MAJOR_WORKFLOW_COMMANDS: &[AppCommand] = &[
     AppCommand::ContextualNew,
     AppCommand::CreateBudget,
     AppCommand::AddAccount,
+    AppCommand::EditAccount,
+    AppCommand::CloseAccount,
+    AppCommand::AddAccountGroup,
+    AppCommand::RenameAccountGroup,
+    AppCommand::DeleteAccountGroup,
+    AppCommand::MoveAccountGroup,
+    AppCommand::AddTransaction,
+    AppCommand::EditTransaction,
+    AppCommand::DeleteTransaction,
+    AppCommand::CreateTransfer,
+    AppCommand::ReconcileAccount,
     AppCommand::Import,
     AppCommand::FocusSearch,
     AppCommand::Undo,
@@ -498,9 +525,9 @@ pub const MAJOR_WORKFLOW_COMMANDS: &[AppCommand] = &[
     AppCommand::MoveDown,
     AppCommand::ToggleSelection,
     AppCommand::Rename,
-    AppCommand::NavigateBudget,
+    AppCommand::NavigateCategories,
     AppCommand::NavigateReports,
-    AppCommand::NavigateAccounts,
+    AppCommand::NavigateAllTransactions,
     AppCommand::PreviousMonth,
     AppCommand::NextMonth,
     AppCommand::Settings,
@@ -524,6 +551,17 @@ pub fn command_availability(
                 | FocusSearch
                 | Import
                 | AddAccount
+                | EditAccount
+                | CloseAccount
+                | AddAccountGroup
+                | RenameAccountGroup
+                | DeleteAccountGroup
+                | MoveAccountGroup
+                | AddTransaction
+                | EditTransaction
+                | DeleteTransaction
+                | CreateTransfer
+                | ReconcileAccount
                 | Delete
                 | Rename
                 | MoveUp
@@ -548,6 +586,17 @@ pub fn command_availability(
         command,
         ContextualNew
             | AddAccount
+            | EditAccount
+            | CloseAccount
+            | AddAccountGroup
+            | RenameAccountGroup
+            | DeleteAccountGroup
+            | MoveAccountGroup
+            | AddTransaction
+            | EditTransaction
+            | DeleteTransaction
+            | CreateTransfer
+            | ReconcileAccount
             | Import
             | FocusSearch
             | Undo
@@ -557,24 +606,42 @@ pub fn command_availability(
             | Delete
             | ToggleSelection
             | Rename
-            | NavigateBudget
+            | NavigateCategories
             | NavigateReports
-            | NavigateAccounts
+            | NavigateAllTransactions
             | PreviousMonth
             | NextMonth
             | Backup
     );
-    if needs_budget && !ctx.budget_open {
+    if needs_budget && !ctx.database_available {
         return CommandAvailability::disabled(command, "Open a budget first");
     }
     let mutating = matches!(
         command,
-        ContextualNew | AddAccount | Import | Commit | Delete | Rename | Undo | Redo
+        ContextualNew
+            | AddAccount
+            | EditAccount
+            | CloseAccount
+            | AddAccountGroup
+            | RenameAccountGroup
+            | DeleteAccountGroup
+            | MoveAccountGroup
+            | AddTransaction
+            | EditTransaction
+            | DeleteTransaction
+            | CreateTransfer
+            | ReconcileAccount
+            | Import
+            | Commit
+            | Delete
+            | Rename
+            | Undo
+            | Redo
     );
     if mutating && ctx.read_only {
         return CommandAvailability::disabled(command, "Budget is open read-only");
     }
-    if mutating && ctx.operation_locked {
+    if mutating && ctx.mutation_locked {
         return CommandAvailability::disabled(command, "Another operation must finish first");
     }
     match command {
@@ -585,7 +652,7 @@ pub fn command_availability(
             if !matches!(
                 ctx.workspace,
                 CommandWorkspace::AccountRegister
-                    | CommandWorkspace::AllAccounts
+                    | CommandWorkspace::AllTransactions
                     | CommandWorkspace::Inbox
             ) =>
         {
@@ -593,6 +660,15 @@ pub fn command_availability(
         }
         Commit if !ctx.editing => {
             CommandAvailability::disabled(command, "Start editing before committing")
+        }
+        EditAccount | CloseAccount | ReconcileAccount if !ctx.selected_account => {
+            CommandAvailability::disabled(command, "Select an active account first")
+        }
+        EditTransaction | DeleteTransaction if !ctx.selected_transaction => {
+            CommandAvailability::disabled(command, "Select a transaction first")
+        }
+        RenameAccountGroup | DeleteAccountGroup | MoveAccountGroup => {
+            CommandAvailability::disabled(command, "Select an account group first")
         }
         Edit if ctx.editing => CommandAvailability::disabled(command, "Already editing"),
         Edit | Delete | Rename if !ctx.has_selection => {
@@ -606,13 +682,14 @@ pub fn command_availability(
         }
         Undo if !ctx.can_undo => CommandAvailability::disabled(command, "Nothing to undo"),
         Redo if !ctx.can_redo => CommandAvailability::disabled(command, "Nothing to redo"),
-        PreviousMonth | NextMonth if ctx.workspace != CommandWorkspace::Budget => {
-            CommandAvailability::disabled(command, "Open the budget workspace first")
-        }
-        CancelOperation if !ctx.operation_locked && !ctx.lifecycle_busy => {
+        PreviousMonth | NextMonth => CommandAvailability::disabled(
+            command,
+            "Month navigation is available inside report date filters",
+        ),
+        CancelOperation if !ctx.mutation_locked && !ctx.lifecycle_busy => {
             CommandAvailability::disabled(command, "No cancellable operation is running")
         }
-        RetryOperation if !ctx.operation_locked => {
+        RetryOperation if !ctx.mutation_locked => {
             CommandAvailability::disabled(command, "No failed operation is selected")
         }
         _ => CommandAvailability::enabled(command),

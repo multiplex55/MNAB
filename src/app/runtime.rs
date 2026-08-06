@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use crate::{
     app::{
         command::{
-            ApplicationAction, CancellationPolicy, CommandEnvelope, CommandHistory, CommandStatus,
-            ConfirmationState, DeduplicationKey, FailureSafety, FinancialCommand, HistoryEntry,
-            OperationClass, RetryMetadata, Reversibility, RuntimeCommand,
+            AppCommand, ApplicationAction, CancellationPolicy, CommandEnvelope, CommandHistory,
+            CommandStatus, ConfirmationState, DeduplicationKey, FailureSafety, FinancialCommand,
+            HistoryEntry, OperationClass, RetryMetadata, Reversibility, RuntimeCommand,
         },
         dispatcher::{ActionCollector, requires_confirmation},
         lifecycle::{DatabaseLifecycle, Lifecycle, LifecycleEffect, LifecycleState},
@@ -16,6 +16,7 @@ use crate::{
         state::{AppState, Notification, NotificationKind},
         view_invalidation::ViewInvalidations,
     },
+    domain::AccountId,
     storage::worker::{Generation, RequestId, StorageResponse, StorageWorker},
 };
 
@@ -189,6 +190,7 @@ impl ApplicationRuntime {
             Ok(prepared) => {
                 self.commit_session(prepared.session, prepared.worker);
                 self.database_lifecycle = DatabaseLifecycle::Ready;
+                self.resolve_startup_destination();
                 if startup.marker_was_absent {
                     self.startup_notice(NotificationKind::Information, "Startup diagnostics passed", "Integrity, foreign-key, and financial diagnostics passed after the unclean shutdown.");
                 }
@@ -213,6 +215,67 @@ impl ApplicationRuntime {
             }
         }
     }
+    fn resolve_startup_destination(&mut self) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let Ok(connection) = rusqlite::Connection::open_with_flags(
+            &session.database_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) else {
+            return;
+        };
+        let Ok(tree) = crate::storage::query_store::QueryStore::new(&connection)
+            .account_tree(session.budget_id)
+        else {
+            return;
+        };
+        let accounts: Vec<_> = tree
+            .iter()
+            .flat_map(|g| &g.accounts)
+            .filter_map(|a| {
+                a.id.parse()
+                    .ok()
+                    .map(|id| crate::app::startup::StartupAccount {
+                        id,
+                        favorite: a.favorite,
+                        closed: a.closed,
+                    })
+            })
+            .collect();
+        let groups: Vec<_> = tree
+            .iter()
+            .filter_map(|g| g.id.as_deref()?.parse().ok())
+            .collect();
+        let last = self
+            .settings
+            .as_ref()
+            .and_then(|s| s.value().last_selected_account_id.as_deref());
+        let destination = crate::app::startup::resolve_destination(last, &accounts);
+        if let Some(settings) = &mut self.settings {
+            settings
+                .value_mut()
+                .repair_persisted_ids(&accounts.iter().map(|a| a.id).collect::<Vec<_>>(), &groups);
+        }
+        match destination {
+            crate::app::startup::StartupDestination::Workspace(
+                crate::app::navigation::Workspace::Account(id),
+            ) => self.select_account(id),
+            crate::app::startup::StartupDestination::Workspace(workspace) => {
+                self.view.navigation.workspace = workspace
+            }
+            crate::app::startup::StartupDestination::AccountOnboarding => {
+                self.view.editor = crate::app::state::EditorState::CreatingAccount(
+                    crate::app::state::AccountDraft {
+                        name: String::new(),
+                        metadata: crate::app::state::EditorMetadata::new(egui::Id::new(
+                            "account-onboarding",
+                        )),
+                    },
+                );
+            }
+        }
+    }
     fn startup_notice(&mut self, kind: NotificationKind, title: &str, detail: &str) {
         self.view.notifications.push(Notification {
             kind,
@@ -224,6 +287,18 @@ impl ApplicationRuntime {
     pub fn save_settings(&mut self) -> std::io::Result<()> {
         if let Some(settings) = &mut self.settings {
             settings.value_mut().inspector_visible = self.view.inspector_visible;
+            settings.value_mut().last_selected_account_id =
+                self.view.selected_account.map(|id| id.to_string());
+            settings.value_mut().last_workspace = Some(
+                match self.view.navigation.workspace {
+                    crate::app::navigation::Workspace::Account(_) => "account",
+                    crate::app::navigation::Workspace::AllTransactions => "all_transactions",
+                    crate::app::navigation::Workspace::Categories => "categories",
+                    crate::app::navigation::Workspace::Reports => "reports",
+                    crate::app::navigation::Workspace::Inbox => "inbox",
+                }
+                .into(),
+            );
             settings.save()?;
         }
         Ok(())
@@ -280,6 +355,26 @@ impl ApplicationRuntime {
             .checked_add(1)
             .expect("view generation exhausted");
         self.view.generation = self.generation;
+    }
+    /// Account changes invalidate account-dependent projections and update the default inspector.
+    pub fn select_account(&mut self, account: AccountId) {
+        if self.view.selected_account == Some(account) {
+            return;
+        }
+        self.view.selected_account = Some(account);
+        self.view.navigation.workspace = crate::app::navigation::Workspace::Account(account);
+        self.view.inspector_context =
+            crate::app::state::InspectorContext::AccountSummary(Some(account));
+        self.bump_view_generation();
+        self.invalidations
+            .insert(crate::app::view_invalidation::ViewInvalidation::AccountRegister(account));
+    }
+
+    fn finish_editor(&mut self) {
+        if let Some(focus) = self.view.editor.metadata().map(|m| m.restore_focus) {
+            self.view.register_focus = Some(focus);
+        }
+        self.view.editor = crate::app::state::EditorState::Idle;
     }
     pub fn commit_session(&mut self, session: BudgetSession, worker: StorageWorker) {
         // Callers fully initialize the candidate before committing it. Thus the
@@ -372,11 +467,7 @@ impl ApplicationRuntime {
             return;
         }
         if let ApplicationAction::Ui(intent) = action {
-            // Global intentions are handled by the application router and are not
-            // mistaken for persistence work.
-            if intent == crate::app::command::AppCommand::ToggleInspector {
-                self.view.inspector_visible = !self.view.inspector_visible;
-            }
+            self.dispatch_ui(intent);
             return;
         }
         if let ApplicationAction::Budget(intent) = action {
@@ -456,6 +547,165 @@ impl ApplicationRuntime {
         }
         self.pending_commands.insert(id, command);
         self.submit_runtime_command(id);
+    }
+
+    /// Exhaustive UI router: adding an `AppCommand` makes this match fail to compile until routed.
+    fn dispatch_ui(&mut self, intent: AppCommand) {
+        use crate::app::{
+            navigation::Workspace,
+            state::{
+                AccountDraft, Dialog, EditorMetadata, EditorState, GroupEditorState, ImportState,
+                ReconciliationState, TransactionDraft, TransferDraft,
+            },
+        };
+        use AppCommand::*;
+        let disabled = match intent {
+            ToggleInspector => {
+                self.view.inspector_visible = !self.view.inspector_visible;
+                return;
+            }
+            FocusSearch => {
+                self.view.register_focus = Some(self.view.search_id);
+                return;
+            }
+            NavigateCategories => {
+                self.view.navigation.workspace = Workspace::Categories;
+                return;
+            }
+            NavigateReports => {
+                self.view.navigation.workspace = Workspace::Reports;
+                return;
+            }
+            NavigateAllTransactions => {
+                self.view.navigation.workspace = Workspace::AllTransactions;
+                return;
+            }
+            Settings => {
+                self.view.open_dialog(
+                    Dialog::Settings,
+                    egui::Id::new("settings-command"),
+                    egui::Id::new("toolbar"),
+                );
+                return;
+            }
+            AddAccount => {
+                self.view.editor = EditorState::CreatingAccount(AccountDraft {
+                    name: String::new(),
+                    metadata: EditorMetadata::new(egui::Id::new("accounts")),
+                });
+                return;
+            }
+            EditAccount if let Some(id) = self.view.selected_account => {
+                self.view.editor = EditorState::EditingAccount(
+                    id,
+                    AccountDraft {
+                        name: String::new(),
+                        metadata: EditorMetadata::new(egui::Id::new("account-summary")),
+                    },
+                );
+                return;
+            }
+            AddAccountGroup => {
+                self.view.editor = EditorState::ManagingAccountGroup(GroupEditorState {
+                    group_id: None,
+                    metadata: EditorMetadata::new(egui::Id::new("account-groups")),
+                });
+                return;
+            }
+            AddTransaction if self.view.selected_account.is_some() => {
+                self.view.editor = EditorState::CreatingTransaction(TransactionDraft {
+                    memo: String::new(),
+                    metadata: EditorMetadata::new(egui::Id::new("register")),
+                });
+                return;
+            }
+            EditTransaction if let Some(id) = self.view.selected_transaction => {
+                self.view.editor = EditorState::EditingTransaction(
+                    id,
+                    TransactionDraft {
+                        memo: String::new(),
+                        metadata: EditorMetadata::new(egui::Id::new("register")),
+                    },
+                );
+                return;
+            }
+            CreateTransfer if self.view.selected_account.is_some() => {
+                self.view.editor = EditorState::CreatingTransfer(TransferDraft {
+                    memo: String::new(),
+                    metadata: EditorMetadata::new(egui::Id::new("register")),
+                });
+                return;
+            }
+            ReconcileAccount if self.view.selected_account.is_some() => {
+                self.view.editor = EditorState::Reconciling(ReconciliationState {
+                    metadata: EditorMetadata::new(egui::Id::new("register")),
+                });
+                return;
+            }
+            Import if self.view.selected_account.is_some() => {
+                self.view.editor = EditorState::Importing(ImportState {
+                    source: String::new(),
+                    metadata: EditorMetadata::new(egui::Id::new("register")),
+                });
+                return;
+            }
+            ContextualNew if self.view.selected_account.is_some() => {
+                self.view.editor = EditorState::CreatingTransaction(TransactionDraft {
+                    memo: String::new(),
+                    metadata: EditorMetadata::new(egui::Id::new("register")),
+                });
+                return;
+            }
+            Commit if self.view.editor.is_active() => {
+                self.finish_editor();
+                return;
+            }
+            Cancel if self.view.editor.is_active() => {
+                self.finish_editor();
+                return;
+            }
+            Cancel if self.view.dialog.is_some() => {
+                self.view.dialog = None;
+                return;
+            }
+            Exit => {
+                self.request_exit();
+                return;
+            }
+            CreateBudget => "The fixed database is created during account onboarding",
+            ContextualNew => "Select an account before creating a transaction",
+            Import => "Select an account before importing transactions",
+            Undo if self.history.undo_len() == 0 => "Nothing to undo",
+            Redo if self.history.redo_len() == 0 => "Nothing to redo",
+            Undo | Redo => "Undo or redo is temporarily unavailable while projections refresh",
+            Commit => "No editor is active",
+            Cancel => "Nothing is open to cancel",
+            Edit | Delete | Rename | ToggleSelection | EditAccount | CloseAccount
+            | RenameAccountGroup | DeleteAccountGroup | MoveAccountGroup | EditTransaction
+            | DeleteTransaction => "Select the corresponding transaction, account, or group first",
+            AddTransaction | CreateTransfer | ReconcileAccount => "Select an active account first",
+            MoveUp | MoveDown | NextField | PreviousField => {
+                "Select an editable account group item first"
+            }
+            PreviousMonth | NextMonth => "Use the date filter in Reports to change months",
+            Backup if self.database_lifecycle == DatabaseLifecycle::Ready => {
+                self.view.open_dialog(
+                    Dialog::RecentBudgets,
+                    egui::Id::new("backup-command"),
+                    egui::Id::new("toolbar"),
+                );
+                return;
+            }
+            Backup => "Backup is available after the database finishes opening",
+            RetryOperation => "No failed operation is selected",
+            CancelOperation => "No cancellable operation is running",
+        };
+        self.view.notifications.push(Notification {
+            kind: NotificationKind::Information,
+            title: "Command unavailable".into(),
+            detail: disabled.into(),
+            persistent: false,
+        });
     }
     pub fn confirm_command(&mut self, id: u64, token: u64) -> bool {
         let Some(c) = self.pending_commands.get_mut(&id) else {
@@ -1085,5 +1335,46 @@ mod tests {
         );
         assert!(runtime.shutdown().is_err());
         assert!(!paths.data.join(".clean-shutdown").exists());
+    }
+
+    #[test]
+    fn save_and_cancel_restore_editor_focus() {
+        let mut runtime = ApplicationRuntime::new(
+            None,
+            None,
+            false,
+            StartupContext {
+                marker_was_absent: false,
+                fixed_database_exists: false,
+            },
+        );
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::AddAccount));
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::Cancel));
+        assert!(matches!(
+            runtime.view.editor,
+            crate::app::state::EditorState::Idle
+        ));
+        assert_eq!(runtime.view.register_focus, Some(egui::Id::new("accounts")));
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::AddAccount));
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::Commit));
+        assert_eq!(runtime.view.register_focus, Some(egui::Id::new("accounts")));
+    }
+
+    #[test]
+    fn changing_accounts_invalidates_account_projection() {
+        let mut runtime = ApplicationRuntime::new(
+            None,
+            None,
+            false,
+            StartupContext {
+                marker_was_absent: false,
+                fixed_database_exists: false,
+            },
+        );
+        let before = runtime.generation.view;
+        let id = AccountId::new();
+        runtime.select_account(id);
+        assert!(runtime.generation.view > before);
+        assert!(runtime.invalidations.iter().any(|v| *v == crate::app::view_invalidation::ViewInvalidation::AccountRegister(id)));
     }
 }

@@ -1,6 +1,33 @@
 use std::path::Path;
 
 use crate::app::settings::SettingsSession;
+use crate::{app::navigation::Workspace, domain::AccountId};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StartupAccount {
+    pub id: AccountId,
+    pub favorite: bool,
+    pub closed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartupDestination {
+    Workspace(Workspace),
+    AccountOnboarding,
+}
+
+/// Resolve after the fixed database is open. `accounts` must be in account-tree order.
+pub fn resolve_destination(last: Option<&str>, accounts: &[StartupAccount]) -> StartupDestination {
+    let restored = last
+        .and_then(|raw| raw.parse::<AccountId>().ok())
+        .and_then(|id| accounts.iter().find(|a| a.id == id && !a.closed));
+    let account = restored
+        .or_else(|| accounts.iter().find(|a| a.favorite && !a.closed))
+        .or_else(|| accounts.iter().find(|a| !a.closed));
+    account.map_or(StartupDestination::AccountOnboarding, |a| {
+        StartupDestination::Workspace(Workspace::Account(a.id))
+    })
+}
 
 /// Facts captured before the previous clean marker is removed.  Startup policy is
 /// explicit data, rather than a logging side effect.
@@ -39,5 +66,31 @@ mod tests {
         let context = StartupContext::capture(&marker, &settings);
         assert!(!context.marker_was_absent);
         assert!(context.fixed_database_exists);
+    }
+
+    #[test]
+    fn destination_restores_then_falls_back_in_tree_order() {
+        let first = StartupAccount {
+            id: AccountId::new(),
+            favorite: false,
+            closed: false,
+        };
+        let favorite = StartupAccount {
+            id: AccountId::new(),
+            favorite: true,
+            closed: false,
+        };
+        assert_eq!(
+            resolve_destination(Some(&first.id.to_string()), &[first, favorite]),
+            StartupDestination::Workspace(Workspace::Account(first.id))
+        );
+        assert_eq!(
+            resolve_destination(Some(&AccountId::new().to_string()), &[first, favorite]),
+            StartupDestination::Workspace(Workspace::Account(favorite.id))
+        );
+        assert_eq!(
+            resolve_destination(None, &[]),
+            StartupDestination::AccountOnboarding
+        );
     }
 }
