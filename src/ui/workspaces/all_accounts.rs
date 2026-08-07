@@ -50,12 +50,9 @@ impl AccountDialogForm {
             return Err("account name is required");
         }
         let account_type = self.account_type.ok_or("account type is required")?;
-        let cents: i64 = self
-            .opening_magnitude
-            .trim()
-            .parse()
-            .map_err(|_| "opening balance must be whole cents")?;
-        if cents < 0 {
+        let amount = crate::ui::budget_view::parse_usd_input(&self.opening_magnitude)
+            .map_err(|_| "enter an amount such as 1234.56 or $1,234.56")?;
+        if amount < Money::ZERO {
             return Err("opening balance must be a non-negative magnitude");
         }
         let date = time::Date::parse(
@@ -63,18 +60,19 @@ impl AccountDialogForm {
             &time::format_description::well_known::Iso8601::DATE,
         )
         .map_err(|_| "opening date must be YYYY-MM-DD")?;
-        Ok((
-            name.into(),
-            account_type,
-            Money::from_minor_units(cents),
-            TransactionDate(date),
-        ))
+        Ok((name.into(), account_type, amount, TransactionDate(date)))
     }
 }
 
-pub fn show(ui: &mut egui::Ui, _state: &AppState, _commands: &mut ActionCollector) {
+pub fn show(ui: &mut egui::Ui, state: &AppState, commands: &mut ActionCollector) {
     ui.heading("All Accounts");
-    ui.label("Combined register data is loading…");
+    crate::ui::workspaces::register::load_state(
+        ui,
+        state,
+        "No transactions yet",
+        "Add a transaction or import a statement to get started.",
+        commands,
+    );
 }
 
 #[cfg(test)]
@@ -89,7 +87,7 @@ mod tests {
             opening_date: "2026-08-04".into(),
         };
         assert!(form.validate().is_err());
-        form.opening_magnitude = "1234".into();
-        assert_eq!(form.validate().unwrap().2, Money::from_minor_units(1234));
+        form.opening_magnitude = "$1,234.00".into();
+        assert_eq!(form.validate().unwrap().2, Money::from_minor_units(123400));
     }
 }
