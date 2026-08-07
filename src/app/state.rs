@@ -77,6 +77,10 @@ pub struct AccountSummary {
     pub unreconciled: bool,
     pub tracking: bool,
     pub closed: bool,
+    pub group_id: Option<AccountGroupId>,
+    pub favorite: bool,
+    pub cleared_balance: Money,
+    pub account_type: crate::domain::AccountType,
 }
 #[derive(Clone, Debug)]
 pub enum Dialog {
@@ -266,6 +270,8 @@ pub struct AppState {
     pub sidebar_width: f32,
     pub inspector_width: f32,
     pub accounts: Vec<AccountSummary>,
+    pub account_groups: Vec<crate::domain::AccountGroup>,
+    pub register_query: ViewQueryState<usize>,
     pub search: String,
     pub search_id: Id,
     pub palette: crate::app::palette::PaletteState,
@@ -299,6 +305,8 @@ impl Default for AppState {
             sidebar_width: 230.0,
             inspector_width: 280.0,
             accounts: vec![],
+            account_groups: vec![],
+            register_query: ViewQueryState::default(),
             search: String::new(),
             search_id: Id::new("global-search"),
             palette: crate::app::palette::PaletteState::default(),
@@ -318,6 +326,7 @@ impl AppState {
         self.editor = EditorState::Idle;
         self.selected_report = None;
         self.accounts.clear();
+        self.account_groups.clear();
         self.operations.clear();
         self.latest_by_purpose.clear();
         self.purpose_by_request.clear();

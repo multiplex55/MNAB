@@ -52,7 +52,37 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
     }
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
-            ui.heading("MNAB — Multi Needs A Budget");
+            ui.heading(format!("MNAB — {}", state.budget_name));
+            let selected = state.selected_account.is_some();
+            for (label, command) in [
+                (
+                    "New Transaction",
+                    crate::app::command::AppCommand::AddTransaction,
+                ),
+                ("Transfer", crate::app::command::AppCommand::CreateTransfer),
+                ("Import", crate::app::command::AppCommand::Import),
+                (
+                    "Reconcile",
+                    crate::app::command::AppCommand::ReconcileAccount,
+                ),
+            ] {
+                let response = ui.add_enabled(selected, egui::Button::new(label));
+                response
+                    .clone()
+                    .on_disabled_hover_text("Select an account to use this action");
+                if response.clicked() {
+                    actions.push(command);
+                }
+            }
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut state.search)
+                    .hint_text("Search (Cmd/Ctrl+F)")
+                    .desired_width(180.0)
+                    .id(state.search_id),
+            );
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
+                response.request_focus();
+            }
             ui.menu_button("Data", |ui| {
                 use crate::app::command::{ApplicationAction, BudgetAction};
                 if ui.button("Budget settings…").clicked() {
@@ -70,13 +100,8 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
                     ui.close();
                 }
             });
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut state.search)
-                    .hint_text("Search (Cmd/Ctrl+F)")
-                    .id(state.search_id),
-            );
-            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
-                response.request_focus();
+            if ui.button("Settings").clicked() {
+                actions.push(crate::app::command::AppCommand::Settings);
             }
         });
     });
@@ -102,17 +127,17 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
         Workspace::Account(id) => super::workspaces::register::show(ui, state, id, actions),
     });
     show_palette(ctx, state, actions);
-    show_budget_dialog(ctx, state);
+    show_budget_dialog(ctx, state, actions);
 }
 
-fn show_budget_dialog(ctx: &egui::Context, state: &mut AppState) {
+fn show_budget_dialog(ctx: &egui::Context, state: &mut AppState, _actions: &mut ActionCollector) {
     let Some(dialog) = state.dialog.as_ref().map(|dialog| dialog.dialog.clone()) else {
         return;
     };
     let (title, guidance) = match dialog {
         crate::app::state::Dialog::CreateBudget => (
             "First-run setup",
-            "Create the fixed mnab-data/mnab.sqlite3 database for this portable install.",
+            "1. Name your budget  →  2. Add your first account (name, type, current balance, balance date, group, optional note)  →  3. Choose any starter categories, including none  →  4. Review and create. Amounts are dollars; debt balances are entered as a positive amount owed. Setup is committed atomically.",
         ),
         crate::app::state::Dialog::OpenBudget => (
             "Database maintenance",
