@@ -1,6 +1,8 @@
 # MNAB — Multi Needs A Budget
 
-MNAB is an early-stage, portable desktop budgeting application.
+MNAB is an account-first, portable desktop budgeting application. Each installation owns one
+Budget and opens its fixed local database automatically; there is no budget catalog or cloud
+account to choose at startup.
 
 ## Product boundaries
 
@@ -8,7 +10,7 @@ MNAB is an early-stage, portable desktop budgeting application.
 - No network access, telemetry, cloud synchronization, or bank API.
 - Windows-only and USD-first.
 - Money is represented as integer minor units (cents), never floating point.
-- Only one budget database is open at a time.
+- One Budget exists per installation in the fixed `mnab-data/mnab.sqlite3` database.
 - Imported transactions always require review before entering the budget.
 - Every application-owned file remains below `mnab-data` beside the executable.
 
@@ -19,7 +21,7 @@ first launch it creates this tree beside `MNAB.exe`:
 
 ```text
 mnab-data/
-  budgets/
+  mnab.sqlite3
   backups/
   imports/
   logs/
@@ -51,14 +53,46 @@ or recent locations according to the user's Windows configuration. That behavior
 operating system; MNAB itself reads or writes only paths explicitly selected by the user and its
 portable `mnab-data` tree.
 
+## Account-first workflow
+
+Accounts and their registers are the primary navigation. Categories continuously describe the
+purpose of money rather than receiving monthly assignments. Category goals optionally connect a
+category to an account, target amount, and target date. Goal progress, remaining amount, and the
+account goal summary are calculated from transactions; the calculated uncategorized balance is
+never stored as a separate allocation. When positive goal-category balances exceed their account
+balance, MNAB shows the account as overcommitted.
+
+Categories with transaction, split, schedule, rule, goal, import, or reconciliation history are
+archived or merged, never physically deleted. Archived names remain available to historical
+registers and reports.
+
+## Transfers, cards, and imports
+
+A normal paired transfer moves money between accounts and is excluded from income and spending.
+If a transfer has an intentional category effect, that effect appears only in goal/activity views
+that request it. Credit-card purchases are spending in the card account; payments are ordinary
+transfers to that account and are not spending a second time.
+
+Imports are staged for review. Merchant rules can normalize a merchant/payee and choose a
+category, but imported transactions remain unapproved until accepted. Broken rules and import
+failures appear in Inbox rather than silently changing financial data.
+
+## Backup, restore, and legacy databases
+
+Use MNAB's backup command before moving or repairing an installation. Restore validates the chosen
+backup before replacing the fixed database and retains a safety copy of the current database.
+MNAB's account-centric schema is a clean break: legacy multi-budget/monthly-assignment databases
+are not registered as active migrations. Keep the old application to export them, then import the
+transactions into a fresh MNAB installation.
+
 ## Manual release checklist
 
 - [ ] Review the complete dependency tree (`cargo tree`) for networking, telemetry, remote assets,
       and newly introduced native/runtime requirements.
 - [ ] Launch the ZIP on a clean Windows x64 machine without Rust, developer tools, or SQLite.
 - [ ] Confirm the archive contains only `mnab.exe` and `README.txt`.
-- [ ] Create a budget, exit cleanly, and reopen it.
-- [ ] Upgrade a copy of every supported older schema and confirm the pre-migration backup.
+- [ ] Complete first-run setup, exit cleanly, and reopen the fixed Budget.
+- [ ] Confirm legacy databases are rejected with clean-break guidance and are not modified.
 - [ ] Import representative QFX, QBO, and CSV files and review deduplication results.
 - [ ] Reconcile an account and verify its history.
 - [ ] Create, validate, and restore a manual backup.

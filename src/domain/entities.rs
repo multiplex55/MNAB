@@ -66,7 +66,7 @@ pub struct CategoryGoal {
     pub category_id: CategoryId,
     pub account_id: AccountId,
     pub target_amount: Money,
-    pub target_date: TransactionDate,
+    pub target_date: Option<TransactionDate>,
     pub note: Option<String>,
 }
 

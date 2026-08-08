@@ -3,6 +3,7 @@
 pub mod balances;
 pub mod budget_month;
 pub mod credit_card;
+pub mod goals;
 
 use crate::domain::Money;
 
