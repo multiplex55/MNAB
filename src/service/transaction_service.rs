@@ -251,6 +251,45 @@ impl<'a> TransactionService<'a> {
         *self.ledger = staged;
         Ok(result)
     }
+    pub fn create_categorized_transfer(
+        &mut self,
+        source: AccountId,
+        destination: AccountId,
+        date: TransactionDate,
+        source_amount: Money,
+        category: Option<CategoryId>,
+        effect: Option<AccountId>,
+        memo: Option<String>,
+    ) -> Result<(TransactionId, TransactionId), TransactionServiceError> {
+        let mut staged = self.ledger.clone();
+        let ids = create_transfer_in(&mut staged, source, destination, date, source_amount)?;
+        if effect.is_some_and(|id| id != source && id != destination) {
+            return Err(TransactionServiceError::InvalidTransfer);
+        }
+        for id in [ids.0, ids.1] {
+            let transaction = staged.transactions.get_mut(&id).unwrap();
+            transaction.memo = memo.clone();
+            if let TransactionBody::Transfer {
+                category_id,
+                category_effect_account_id,
+                ..
+            } = &mut transaction.body
+            {
+                *category_id = category;
+                *category_effect_account_id = effect;
+            }
+        }
+        staged.recalculation_from = Some(
+            staged
+                .recalculation_from
+                .map_or(date, |old| if old.0 <= date.0 { old } else { date }),
+        );
+        staged
+            .audit
+            .push("atomic categorized transfer create".into());
+        *self.ledger = staged;
+        Ok(ids)
+    }
     fn pair(&self, id: TransactionId) -> Result<TransactionId, TransactionServiceError> {
         let t = self
             .ledger

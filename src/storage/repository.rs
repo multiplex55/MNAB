@@ -6,8 +6,8 @@
 use crate::{
     domain::{
         Account, AccountId, Budget, BudgetAssignment, BudgetId, Category, CategoryGroup,
-        CategoryId, ImportBatch, Payee, PayeeId, Reconciliation, ScheduledTransaction,
-        ScheduledTransactionId, Target, TargetId, Transaction, TransactionId,
+        CategoryId, ImportBatch, MerchantRule, Payee, PayeeId, Reconciliation,
+        ScheduledTransaction, ScheduledTransactionId, Target, TargetId, Transaction, TransactionId,
     },
     error::RepositoryError,
 };
@@ -73,6 +73,10 @@ pub trait InboxRepository {
     /// Toggles the durable dismissal marker and returns whether the row was previously dismissed.
     fn toggle_failure_dismissal(&mut self, id: &str) -> Result<Option<bool>, RepositoryError>;
 }
+pub trait MerchantRuleRepository {
+    fn put_merchant_rule(&mut self, value: &MerchantRule) -> Result<(), RepositoryError>;
+    fn merchant_rules(&mut self) -> Result<Vec<MerchantRule>, RepositoryError>;
+}
 
 pub trait Repositories:
     BudgetRepository
@@ -134,6 +138,24 @@ pub struct InMemoryRepositories {
     pub reconciliations: HashMap<crate::domain::ReconciliationId, Reconciliation>,
     pub audit: Vec<(String, String, String)>,
     pub failure_dismissals: HashMap<String, bool>,
+    pub merchant_rules: Vec<MerchantRule>,
+}
+impl MerchantRuleRepository for InMemoryRepositories {
+    fn put_merchant_rule(&mut self, value: &MerchantRule) -> Result<(), RepositoryError> {
+        if let Some(existing) = self.merchant_rules.iter_mut().find(|r| {
+            r.normalized_merchant == value.normalized_merchant
+                && r.account_id == value.account_id
+                && r.origin == value.origin
+        }) {
+            *existing = value.clone();
+        } else {
+            self.merchant_rules.push(value.clone());
+        }
+        Ok(())
+    }
+    fn merchant_rules(&mut self) -> Result<Vec<MerchantRule>, RepositoryError> {
+        Ok(self.merchant_rules.clone())
+    }
 }
 impl BudgetRepository for InMemoryRepositories {
     fn create_budget(&mut self, v: &Budget) -> Result<(), RepositoryError> {

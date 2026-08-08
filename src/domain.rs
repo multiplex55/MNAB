@@ -3,6 +3,7 @@
 mod account;
 mod entities;
 mod id;
+mod merchant_rule;
 mod money;
 mod month;
 mod reconciliation;
@@ -14,6 +15,7 @@ mod transaction;
 pub use account::*;
 pub use entities::*;
 pub use id::*;
+pub use merchant_rule::*;
 pub use money::*;
 pub use month::*;
 pub use reconciliation::*;
