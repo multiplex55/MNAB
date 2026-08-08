@@ -13,7 +13,7 @@ use std::{
 };
 
 pub type RequestId = u64;
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Generation {
     pub budget: u64,
     pub view: u64,
@@ -56,9 +56,7 @@ pub struct RegisterPageOperation {
 
 #[derive(Debug)]
 pub struct RegisterViewOperation {
-    pub request: crate::storage::query_store::RegisterViewRequest,
-    pub offset: u32,
-    pub display_account_id: crate::domain::AccountId,
+    pub request: crate::storage::protocol::RegisterRequest,
 }
 #[derive(Debug)]
 pub struct GlobalSearchOperation {
@@ -481,14 +479,9 @@ fn execute_operation(
             let page = store
                 .register_view(&operation.request)
                 .map_err(|e| WorkerError::Repository(e.to_string()))?;
-            crate::storage::mapping::register_page(
-                page,
-                operation.display_account_id,
-                operation.offset,
-                generation,
-            )
-            .map(TypedResult::RegisterPage)
-            .map_err(|e| WorkerError::Repository(e.to_string()))
+            crate::storage::mapping::register_page(page, operation.request.clone(), generation)
+                .map(TypedResult::RegisterPage)
+                .map_err(|e| WorkerError::Repository(e.to_string()))
         }
         WorkerOperation::Search(search) => {
             let store = crate::storage::query_store::QueryStore::new(c);

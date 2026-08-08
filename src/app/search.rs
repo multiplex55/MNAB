@@ -16,6 +16,7 @@ pub enum Comparison {
 pub enum SearchTerm {
     Text(String),
     Account(String),
+    AccountGroup(String),
     Category(String),
     Payee(String),
     Memo(String),
@@ -25,6 +26,12 @@ pub enum SearchTerm {
     },
     Before(Date),
     After(Date),
+    From(Date),
+    Through(Date),
+    Uncategorized(bool),
+    Reconciled(bool),
+    Imported(bool),
+    Transfer(bool),
     Cleared(bool),
     Approved(bool),
 }
@@ -139,11 +146,18 @@ fn term(s: &str) -> Result<SearchTerm, (DiagnosticKind, String)> {
     }
     match field.to_ascii_lowercase().as_str() {
         "account" => Ok(SearchTerm::Account(value.into())),
+        "group" | "account-group" => Ok(SearchTerm::AccountGroup(value.into())),
         "category" => Ok(SearchTerm::Category(value.into())),
         "payee" => Ok(SearchTerm::Payee(value.into())),
         "memo" => Ok(SearchTerm::Memo(value.into())),
         "before" => date(value).map(SearchTerm::Before),
         "after" => date(value).map(SearchTerm::After),
+        "from" => date(value).map(SearchTerm::From),
+        "through" => date(value).map(SearchTerm::Through),
+        "uncategorized" | "category-none" => boolean(value).map(SearchTerm::Uncategorized),
+        "reconciled" => boolean(value).map(SearchTerm::Reconciled),
+        "imported" => boolean(value).map(SearchTerm::Imported),
+        "transfer" | "transfers" => boolean(value).map(SearchTerm::Transfer),
         "cleared" => boolean(value).map(SearchTerm::Cleared),
         "approved" => boolean(value).map(SearchTerm::Approved),
         "amount" => amount(value),
@@ -203,28 +217,38 @@ pub struct QueryPlan {
 /// Produces SQL containing placeholders only; user text is always returned as a bind value.
 #[must_use]
 pub fn compile(ast: &SearchAst) -> QueryPlan {
+    fn like(v: &str) -> String {
+        format!(
+            "%{}%",
+            v.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        )
+    }
     let mut clauses = vec![];
     let mut binds = vec![];
     for t in &ast.terms {
         match t {
             SearchTerm::Text(v) => {
-                clauses.push("(payees.name LIKE ? OR transactions.payee_snapshot LIKE ? OR transactions.memo LIKE ? OR categories.name LIKE ? OR accounts.name LIKE ? OR CAST(transactions.amount AS TEXT) LIKE ? OR transactions.transaction_date LIKE ?)".into());
+                clauses.push("(payees.name LIKE ? ESCAPE '\\' OR transactions.payee_snapshot LIKE ? ESCAPE '\\' OR transactions.memo LIKE ? ESCAPE '\\' OR categories.name LIKE ? ESCAPE '\\' OR accounts.name LIKE ? ESCAPE '\\' OR CAST(transactions.amount AS TEXT) LIKE ? ESCAPE '\\' OR transactions.transaction_date LIKE ? ESCAPE '\\')".into());
                 for _ in 0..7 {
-                    binds.push(BindValue::Text(format!("%{v}%")))
+                    binds.push(BindValue::Text(like(v)))
                 }
             }
             SearchTerm::Account(v)
+            | SearchTerm::AccountGroup(v)
             | SearchTerm::Category(v)
             | SearchTerm::Payee(v)
             | SearchTerm::Memo(v) => {
                 let col = match t {
                     SearchTerm::Account(_) => "accounts.name",
+                    SearchTerm::AccountGroup(_) => "account_groups.name",
                     SearchTerm::Category(_) => "categories.name",
                     SearchTerm::Payee(_) => "payees.name",
                     _ => "transactions.memo",
                 };
-                clauses.push(format!("{col} LIKE ?"));
-                binds.push(BindValue::Text(format!("%{v}%")))
+                clauses.push(format!("{col} LIKE ? ESCAPE '\\\\'"));
+                binds.push(BindValue::Text(like(v)))
             }
             SearchTerm::Amount { comparison, value } => {
                 let op = match comparison {
@@ -248,6 +272,36 @@ pub fn compile(ast: &SearchAst) -> QueryPlan {
                 ));
                 binds.push(BindValue::Text(v.to_string()))
             }
+            SearchTerm::From(v) | SearchTerm::Through(v) => {
+                clauses.push(format!(
+                    "transactions.transaction_date {} ?",
+                    if matches!(t, SearchTerm::From(_)) {
+                        ">="
+                    } else {
+                        "<="
+                    }
+                ));
+                binds.push(BindValue::Text(v.to_string()));
+            }
+            SearchTerm::Uncategorized(v) => clauses.push(format!(
+                "transactions.category_id IS {}NULL",
+                if *v { "" } else { "NOT " }
+            )),
+            SearchTerm::Reconciled(v) => {
+                clauses.push(format!(
+                    "transactions.cleared_state {} ?",
+                    if *v { "=" } else { "<>" }
+                ));
+                binds.push(BindValue::Text("reconciled".into()));
+            }
+            SearchTerm::Imported(v) => clauses.push(format!(
+                "transactions.import_batch_id IS {}NULL",
+                if *v { "NOT " } else { "" }
+            )),
+            SearchTerm::Transfer(v) => clauses.push(format!(
+                "transactions.transfer_id IS {}NULL",
+                if *v { "NOT " } else { "" }
+            )),
             SearchTerm::Cleared(v) => {
                 clauses.push(if *v {
                     "transactions.cleared_state <> ?".into()

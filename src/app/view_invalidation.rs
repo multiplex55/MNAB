@@ -7,6 +7,8 @@ pub enum ViewInvalidation {
     Accounts,
     BudgetMonth(BudgetMonth),
     AccountRegister(AccountId),
+    /// The cross-account All Transactions projection only.
+    AllTransactions,
     AllAccountRegisters,
     Inbox,
     Reports,
