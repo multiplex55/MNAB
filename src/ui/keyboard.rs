@@ -131,6 +131,7 @@ pub fn map(stroke: KeyStroke, scope: Scope) -> Option<AppCommand> {
     let m = stroke.modifiers;
     let command = match (stroke.key, m.command, m.shift, m.alt) {
         (K::N, true, false, false) => C::ContextualNew,
+        (K::A, true, false, false) => C::SelectAllTransactions,
         (K::A, true, true, false) => C::AddAccount,
         (K::I, true, false, false) => C::Import,
         (K::F, true, false, false) => C::FocusSearch,
@@ -278,6 +279,17 @@ mod tests {
             modal: false,
         };
         assert_eq!(map(key(Key::Delete, false, false), s), None);
+        assert_eq!(map(key(Key::A, true, false), s), None);
+        assert_eq!(
+            map(
+                key(Key::A, true, false),
+                Scope {
+                    text_editor: false,
+                    ..s
+                }
+            ),
+            Some(AppCommand::SelectAllTransactions)
+        );
         assert_eq!(map(key(Key::N, true, false), s), None);
         assert_eq!(map(key(Key::Z, true, false), s), Some(AppCommand::Undo));
     }

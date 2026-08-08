@@ -7,6 +7,7 @@ pub mod message;
 pub mod navigation;
 pub mod palette;
 pub mod portable_paths;
+pub mod register;
 pub mod runtime;
 pub mod search;
 pub mod session;

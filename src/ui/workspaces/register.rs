@@ -1,5 +1,9 @@
 use crate::{
-    app::{dispatcher::ActionCollector, state::AppState},
+    app::{
+        dispatcher::ActionCollector,
+        register::{AllMatchingClick, TransactionSelection},
+        state::AppState,
+    },
     domain::{
         AccountId, Approval, CategoryId, Clearance, Money, PayeeId, Subtransaction,
         TransactionBody, TransactionDate, TransactionId,
@@ -17,6 +21,7 @@ pub enum RegisterColumn {
     Outflow,
     Inflow,
     Cleared,
+    Approved,
     Balance,
 }
 pub const ACCOUNT_COLUMNS: &[RegisterColumn] = &[
@@ -27,7 +32,7 @@ pub const ACCOUNT_COLUMNS: &[RegisterColumn] = &[
     RegisterColumn::Outflow,
     RegisterColumn::Inflow,
     RegisterColumn::Cleared,
-    RegisterColumn::Balance,
+    RegisterColumn::Approved,
 ];
 pub const ALL_TRANSACTION_COLUMNS: &[RegisterColumn] = &[
     RegisterColumn::Account,
@@ -38,7 +43,7 @@ pub const ALL_TRANSACTION_COLUMNS: &[RegisterColumn] = &[
     RegisterColumn::Outflow,
     RegisterColumn::Inflow,
     RegisterColumn::Cleared,
-    RegisterColumn::Balance,
+    RegisterColumn::Approved,
 ];
 impl RegisterColumn {
     #[must_use]
@@ -52,20 +57,137 @@ impl RegisterColumn {
             Self::Outflow => "Outflow",
             Self::Inflow => "Inflow",
             Self::Cleared => "Cleared",
+            Self::Approved => "Approved",
             Self::Balance => "Balance",
         }
     }
 }
 
 pub fn show_register_header(ui: &mut egui::Ui, columns: &[RegisterColumn]) {
-    egui::Grid::new("shared_register_header")
+    ui.horizontal(|ui| {
+        for column in columns {
+            ui.strong(column.label());
+        }
+    });
+}
+
+fn format_minor_units(cents: i64) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    let magnitude = cents.unsigned_abs();
+    format!("{sign}${}.{:02}", magnitude / 100, magnitude % 100)
+}
+
+fn show_page_table(ui: &mut egui::Ui, page: &crate::app::view_model::RegisterPageView) {
+    use egui_extras::{Column, TableBuilder};
+    let all = matches!(
+        page.scope,
+        crate::app::view_model::RegisterScope::AllTransactions
+    );
+    let mut columns = if all {
+        ALL_TRANSACTION_COLUMNS.to_vec()
+    } else {
+        ACCOUNT_COLUMNS.to_vec()
+    };
+    let mut table = TableBuilder::new(ui)
         .striped(true)
-        .show(ui, |ui| {
-            for column in columns {
-                ui.strong(column.label());
+        .resizable(true)
+        .sense(egui::Sense::click());
+    for column in &columns {
+        let width = match column {
+            RegisterColumn::Memo => 160.0,
+            RegisterColumn::PayeeTransfer | RegisterColumn::Category | RegisterColumn::Account => {
+                120.0
             }
-            ui.end_row();
+            _ => 82.0,
+        };
+        table = table.column(Column::initial(width).at_least(60.0));
+    }
+    table
+        .header(24.0, |mut header| {
+            for column in &columns {
+                header.col(|ui| {
+                    ui.strong(column.label());
+                });
+            }
+        })
+        .body(|body| {
+            body.rows(24.0, page.rows.len(), |mut row| {
+                let model = &page.rows[row.index()];
+                let markers = [
+                    model.reconciled.then_some("Reconciled"),
+                    model.is_transfer.then_some("Transfer"),
+                    (model.split_count > 0).then_some("Split"),
+                    model.import_batch_id.is_some().then_some("Imported"),
+                    (!model.approved).then_some("Unapproved"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+                for column in &columns {
+                    row.col(|ui| match column {
+                        RegisterColumn::Account => {
+                            ui.label(&model.account_name);
+                        }
+                        RegisterColumn::Date => {
+                            ui.label(model.date.to_string());
+                        }
+                        RegisterColumn::PayeeTransfer => {
+                            ui.label(if markers.is_empty() {
+                                model.payee_name.clone()
+                            } else {
+                                format!("{}  [{markers}]", model.payee_name)
+                            });
+                        }
+                        RegisterColumn::Category => {
+                            ui.label(&model.category_name);
+                        }
+                        RegisterColumn::Memo => {
+                            ui.label(model.memo.as_deref().unwrap_or(""));
+                        }
+                        RegisterColumn::Outflow => {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.monospace(format_minor_units(model.outflow_cents));
+                                },
+                            );
+                        }
+                        RegisterColumn::Inflow => {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.monospace(format_minor_units(model.inflow_cents));
+                                },
+                            );
+                        }
+                        RegisterColumn::Cleared => {
+                            ui.label(&model.cleared_state);
+                        }
+                        RegisterColumn::Approved => {
+                            ui.label(if model.approved {
+                                "Approved"
+                            } else {
+                                "Needs approval"
+                            });
+                        }
+                        RegisterColumn::Balance => {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.monospace(
+                                        model
+                                            .running_balance_cents
+                                            .map_or_else(|| "—".into(), format_minor_units),
+                                    );
+                                },
+                            );
+                        }
+                    });
+                }
+            });
         });
+    columns.clear();
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,9 +236,7 @@ impl Default for RegisterFilter {
 
 #[derive(Clone, Debug)]
 pub struct RegisterState {
-    pub selected: BTreeSet<TransactionId>,
-    pub anchor: Option<TransactionId>,
-    pub cursor: Option<TransactionId>,
+    pub selection: TransactionSelection,
     pub sort: (RegisterColumn, SortDirection),
     pub filter: RegisterFilter,
     pub page_size: usize,
@@ -125,9 +245,7 @@ pub struct RegisterState {
 impl Default for RegisterState {
     fn default() -> Self {
         Self {
-            selected: BTreeSet::new(),
-            anchor: None,
-            cursor: None,
+            selection: TransactionSelection::default(),
             sort: (RegisterColumn::Date, SortDirection::Descending),
             filter: RegisterFilter::default(),
             page_size: 100,
@@ -137,31 +255,23 @@ impl Default for RegisterState {
 }
 impl RegisterState {
     pub fn select(&mut self, id: TransactionId, additive: bool) {
-        if !additive {
-            self.selected.clear();
+        if additive {
+            self.selection.toggle(id, AllMatchingClick::ToggleExclusion);
+        } else {
+            self.selection.select_only(id);
         }
-        self.selected.insert(id);
-        self.anchor = Some(id);
-        self.cursor = Some(id);
     }
     pub fn select_range(&mut self, rows: &[RegisterRow], id: TransactionId) {
-        let anchor = self.anchor.unwrap_or(id);
-        let a = rows.iter().position(|r| r.id == anchor);
-        let b = rows.iter().position(|r| r.id == id);
-        if let (Some(a), Some(b)) = (a, b) {
-            self.selected.clear();
-            for row in &rows[a.min(b)..=a.max(b)] {
-                self.selected.insert(row.id);
-            }
-            self.cursor = Some(id);
-        }
+        let ordered = rows.iter().map(|row| row.id).collect::<Vec<_>>();
+        self.selection.select_range(id, &ordered);
     }
     pub fn move_cursor(&mut self, rows: &[RegisterRow], delta: isize, extend: bool) {
         if rows.is_empty() {
             return;
         }
         let current = self
-            .cursor
+            .selection
+            .cursor()
             .and_then(|id| rows.iter().position(|r| r.id == id))
             .unwrap_or(0);
         let next = current.saturating_add_signed(delta).min(rows.len() - 1);
@@ -174,9 +284,19 @@ impl RegisterState {
     }
     pub fn retain_selection(&mut self, refreshed: &[RegisterRow]) {
         let ids: BTreeSet<_> = refreshed.iter().map(|r| r.id).collect();
-        self.selected.retain(|id| ids.contains(id));
-        if self.cursor.is_some_and(|id| !ids.contains(&id)) {
-            self.cursor = None;
+        if let TransactionSelection::Explicit {
+            ids: selected,
+            anchor,
+            cursor,
+        } = &mut self.selection
+        {
+            selected.retain(|id| ids.contains(id));
+            if cursor.is_some_and(|id| !ids.contains(&id)) {
+                *cursor = None;
+            }
+            if anchor.is_some_and(|id| !ids.contains(&id)) {
+                *anchor = None;
+            }
         }
     }
     pub fn visible_rows(&self, rows: &[RegisterRow]) -> Vec<RegisterRow> {
@@ -212,6 +332,7 @@ impl RegisterState {
                 RegisterColumn::Memo => a.memo.cmp(&b.memo),
                 RegisterColumn::Outflow | RegisterColumn::Inflow => a.amount.cmp(&b.amount),
                 RegisterColumn::Cleared => (a.cleared as u8).cmp(&(b.cleared as u8)),
+                RegisterColumn::Approved => (a.approved as u8).cmp(&(b.approved as u8)),
                 RegisterColumn::Balance => a.balance.cmp(&b.balance),
                 RegisterColumn::Account => a.account_id.cmp(&b.account_id),
             };
@@ -469,6 +590,10 @@ pub fn load_state(
         if ui.button("Retry").clicked() {
             commands.push(crate::app::command::AppCommand::RetryOperation);
         }
+        if let Some(page) = &query.last_successful {
+            ui.small("Showing the last successfully loaded data.");
+            show_page_table(ui, page);
+        }
         return;
     }
     match &query.last_successful {
@@ -477,6 +602,10 @@ pub fn load_state(
             if query.refresh_active {
                 ui.spinner();
                 ui.small("Refreshing…");
+            }
+            show_page_table(ui, page);
+            if page.has_more {
+                ui.small("Scroll near the end to load more…");
             }
         }
         _ => {
