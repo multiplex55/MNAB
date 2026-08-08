@@ -62,7 +62,7 @@ pub enum UndoData {
 pub struct MutationResult {
     pub command_id: CommandId,
     pub correlation_id: CorrelationId,
-    pub operation_label: &'static str,
+    pub operation_label: String,
     pub affected_entity_ids: Vec<AffectedEntityId>,
     pub undo: Option<UndoData>,
     pub invalidations: ViewInvalidations,

@@ -195,8 +195,8 @@ fn show_palette(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionC
         text_editor_owns_shortcuts: false,
         lifecycle_busy: false,
         mutation_locked: !state.operations.is_empty(),
-        can_undo: false,
-        can_redo: false,
+        can_undo: state.can_undo,
+        can_redo: state.can_redo,
         selected_account: state.selected_account.is_some(),
         selected_transaction: state.selected_transaction.is_some(),
         register_focused: state.register_focus.is_some(),
@@ -206,7 +206,22 @@ fn show_palette(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionC
             crate::app::state::EditorState::Reconciling(_)
         ),
     };
-    let descriptors = crate::app::palette::commands_for(context);
+    let mut descriptors = crate::app::palette::commands_for(context);
+    for descriptor in &mut descriptors {
+        match descriptor.command {
+            crate::app::command::AppCommand::Undo => {
+                if let Some(label) = &state.undo_label {
+                    descriptor.title = format!("Undo \"{label}\"");
+                }
+            }
+            crate::app::command::AppCommand::Redo => {
+                if let Some(label) = &state.redo_label {
+                    descriptor.title = format!("Redo \"{label}\"");
+                }
+            }
+            _ => {}
+        }
+    }
     let matches = crate::app::palette::fuzzy(&state.palette.query, &descriptors);
     if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
         state.palette.close(ctx);

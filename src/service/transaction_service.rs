@@ -1,5 +1,11 @@
 use super::account_service::Ledger;
 use crate::domain::*;
+use crate::{
+    app::command::{TransactionBatchAction, TransactionBatchCommand, TransactionBatchSelection},
+    error::RepositoryError,
+    storage::repository::{AccountRepository, AuditRepository, TransactionRepository},
+};
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -14,6 +20,202 @@ pub enum TransactionServiceError {
     Invalid(TransactionError),
     #[error("invalid transfer")]
     InvalidTransfer,
+}
+
+pub const MAX_BATCH_TRANSACTIONS: usize = 100_000;
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum BatchPreflightReason {
+    Eligible,
+    Reconciled,
+    ClosedAccount,
+    Transfer,
+    Split,
+    ArchivedOrVoided,
+    MissingOrChanged,
+    Incompatible,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchPreflightResult {
+    pub counts: BTreeMap<BatchPreflightReason, usize>,
+    pub transaction_ids: BTreeMap<BatchPreflightReason, Vec<TransactionId>>,
+    pub rejection: Option<&'static str>,
+}
+impl BatchPreflightResult {
+    fn add(&mut self, reason: BatchPreflightReason, id: TransactionId) {
+        *self.counts.entry(reason).or_default() += 1;
+        self.transaction_ids.entry(reason).or_default().push(id);
+    }
+    pub fn count(&self, reason: BatchPreflightReason) -> usize {
+        self.counts.get(&reason).copied().unwrap_or(0)
+    }
+    pub fn is_allowed(&self) -> bool {
+        self.rejection.is_none()
+            && self.count(BatchPreflightReason::Incompatible) == 0
+            && self.count(BatchPreflightReason::MissingOrChanged) == 0
+            && self.count(BatchPreflightReason::ClosedAccount) == 0
+    }
+}
+
+/// Classifies the complete snapshot before the first write. Callers must invoke this after opening
+/// their unit of work; `execute_batch` deliberately repeats it to close the TOCTOU window.
+pub fn batch_preflight<R: TransactionRepository + AccountRepository>(
+    r: &mut R,
+    command: &TransactionBatchCommand,
+) -> Result<(BatchPreflightResult, Vec<Transaction>), RepositoryError> {
+    let rows = r.selected_transactions(&command.selection, MAX_BATCH_TRANSACTIONS)?;
+    let mut result = BatchPreflightResult {
+        counts: BTreeMap::new(),
+        transaction_ids: BTreeMap::new(),
+        rejection: None,
+    };
+    if let TransactionBatchSelection::Explicit(ids) = &command.selection {
+        let found: BTreeSet<_> = rows.iter().map(|t| t.id).collect();
+        for id in ids.difference(&found) {
+            result.add(BatchPreflightReason::MissingOrChanged, *id);
+        }
+    }
+    for t in &rows {
+        if t.clearance == Clearance::Reconciled {
+            result.add(BatchPreflightReason::Reconciled, t.id);
+        }
+        if r.account(t.account_id)?.is_none_or(|a| a.closed) {
+            result.add(BatchPreflightReason::ClosedAccount, t.id);
+        }
+        if t.archived || t.voided {
+            result.add(BatchPreflightReason::ArchivedOrVoided, t.id);
+        }
+        match t.body {
+            TransactionBody::Transfer { .. } => result.add(BatchPreflightReason::Transfer, t.id),
+            TransactionBody::Split { .. } => result.add(BatchPreflightReason::Split, t.id),
+            _ => {}
+        }
+        let incompatible = matches!(
+            (&command.action, &t.body),
+            (
+                TransactionBatchAction::SetCategory(_),
+                TransactionBody::Transfer { .. } | TransactionBody::Split { .. }
+            )
+        ) || matches!(
+            command.action,
+            TransactionBatchAction::Void | TransactionBatchAction::Delete
+        ) && (t.archived || t.voided);
+        if incompatible {
+            result.add(BatchPreflightReason::Incompatible, t.id);
+        } else {
+            result.add(BatchPreflightReason::Eligible, t.id);
+        }
+    }
+    if result.count(BatchPreflightReason::Reconciled) > 0 {
+        result.rejection = Some(
+            "Reconciled transactions cannot be changed in bulk; deselect them or edit them individually.",
+        );
+    }
+    Ok((result, rows))
+}
+
+pub fn execute_batch<R: TransactionRepository + AccountRepository + AuditRepository>(
+    r: &mut R,
+    command: &TransactionBatchCommand,
+) -> Result<(BatchPreflightResult, Vec<Transaction>, Vec<TransactionId>), RepositoryError> {
+    if let TransactionBatchAction::Restore(rows) = &command.action {
+        let mut prior = Vec::new();
+        let mut affected = Vec::new();
+        for t in rows {
+            if let Some(old) = r.transaction(t.id)? {
+                prior.push(old);
+            }
+            t.validate().map_err(|_| RepositoryError::Failed {
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid inverse transaction",
+                )),
+            })?;
+            r.put_transaction(t)?;
+            r.append_audit("transaction", &t.id.to_string(), "batch restore")?;
+            affected.push(t.id);
+        }
+        let mut p = BatchPreflightResult {
+            counts: BTreeMap::new(),
+            transaction_ids: BTreeMap::new(),
+            rejection: None,
+        };
+        for id in &affected {
+            p.add(BatchPreflightReason::Eligible, *id)
+        }
+        return Ok((p, prior, affected));
+    }
+    let (preflight, rows) = batch_preflight(r, command)?;
+    if !preflight.is_allowed() {
+        return Err(RepositoryError::Failed {
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                preflight
+                    .rejection
+                    .unwrap_or("bulk transaction preflight rejected"),
+            )),
+        });
+    }
+    let mut affected = BTreeSet::new();
+    let mut prior = Vec::new();
+    for row in rows {
+        let mut group = vec![row.clone()];
+        if let TransactionBody::Transfer { transfer_id, .. } = row.body {
+            let all = r.selected_transactions(
+                &TransactionBatchSelection::AllMatching {
+                    query: crate::app::register::CanonicalQuery {
+                        scope: crate::app::view_model::RegisterScope::AllTransactions,
+                        filter: Default::default(),
+                        sort_field: crate::app::view_model::RegisterSortField::Date,
+                        sort_direction: crate::app::view_model::RegisterSortDirection::Ascending,
+                        revision: 0,
+                    },
+                    exclusions: BTreeSet::new(),
+                },
+                MAX_BATCH_TRANSACTIONS,
+            )?;
+            group=all.into_iter().filter(|t|matches!(t.body,TransactionBody::Transfer{transfer_id:id,..} if id==transfer_id)).collect();
+            if group.len() != 2 {
+                return Err(RepositoryError::Failed {
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "transfer pair is incomplete",
+                    )),
+                });
+            }
+        }
+        for mut t in group {
+            if !affected.insert(t.id) {
+                continue;
+            }
+            prior.push(t.clone());
+            match &command.action {
+                TransactionBatchAction::SetApproval(v) => t.approval = *v,
+                TransactionBatchAction::SetCategory(id) => {
+                    t.body = TransactionBody::categorized(*id)
+                }
+                TransactionBatchAction::SetPayee(id) => t.payee_id = *id,
+                TransactionBatchAction::SetClearance(v) => t.clearance = *v,
+                TransactionBatchAction::SetMemo(v) => t.memo = v.clone(),
+                TransactionBatchAction::Void => t.voided = true,
+                TransactionBatchAction::Delete => {
+                    r.delete_transaction(t.id)?;
+                    r.append_audit("transaction", &t.id.to_string(), "batch delete")?;
+                    continue;
+                }
+                TransactionBatchAction::Restore(_) => unreachable!(),
+            }
+            t.validate().map_err(|_| RepositoryError::Failed {
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "batch produced invalid transaction",
+                )),
+            })?;
+            r.put_transaction(&t)?;
+            r.append_audit("transaction", &t.id.to_string(), "batch update")?;
+        }
+    }
+    Ok((preflight, prior, affected.into_iter().collect()))
 }
 
 pub struct TransactionService<'a> {

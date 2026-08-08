@@ -359,6 +359,10 @@ pub struct AppState {
     pub palette: crate::app::palette::PaletteState,
     pub palette_shortcut: String,
     pub mutations_disabled: bool,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub undo_label: Option<String>,
+    pub redo_label: Option<String>,
 }
 impl Default for AppState {
     fn default() -> Self {
@@ -394,6 +398,10 @@ impl Default for AppState {
             palette: crate::app::palette::PaletteState::default(),
             palette_shortcut: crate::app::settings::DEFAULT_PALETTE_SHORTCUT.into(),
             mutations_disabled: false,
+            can_undo: false,
+            can_redo: false,
+            undo_label: None,
+            redo_label: None,
         }
     }
 }

@@ -4,8 +4,9 @@ use crate::{
     app::{
         command::{
             AppCommand, ApplicationAction, CancellationPolicy, CommandEnvelope, CommandHistory,
-            CommandStatus, ConfirmationState, DeduplicationKey, FailureSafety, FinancialCommand,
-            HistoryEntry, OperationClass, RetryMetadata, Reversibility, RuntimeCommand,
+            CommandId, CommandStatus, ConfirmationState, DeduplicationKey, FailureSafety,
+            FinancialCommand, HistoryEntry, OperationClass, RetryMetadata, Reversibility,
+            RuntimeCommand, TransactionCommand,
         },
         dispatcher::{ActionCollector, requires_confirmation},
         lifecycle::{DatabaseLifecycle, Lifecycle, LifecycleEffect, LifecycleState},
@@ -31,6 +32,7 @@ pub struct ApplicationRuntime {
     generation: Generation,
     view: AppState,
     history: CommandHistory<FinancialCommand>,
+    history_operations: BTreeMap<CommandId, bool>,
     invalidations: ViewInvalidations,
     pending_commands: BTreeMap<u64, RuntimeCommand>,
     terminal_sequence: u64,
@@ -149,6 +151,7 @@ impl ApplicationRuntime {
             generation: Generation { budget: 0, view: 0 },
             view,
             history: CommandHistory::new(100),
+            history_operations: BTreeMap::new(),
             invalidations: ViewInvalidations::default(),
             pending_commands: BTreeMap::new(),
             terminal_sequence: 0,
@@ -323,6 +326,10 @@ impl ApplicationRuntime {
         self.database_lifecycle
     }
     pub fn view_mut(&mut self) -> &mut AppState {
+        self.view.can_undo = self.history.can_undo();
+        self.view.can_redo = self.history.can_redo();
+        self.view.undo_label = self.history.undo_label().map(str::to_owned);
+        self.view.redo_label = self.history.redo_label().map(str::to_owned);
         &mut self.view
     }
     pub fn presentation(
@@ -559,6 +566,22 @@ impl ApplicationRuntime {
             },
         };
         use AppCommand::*;
+        if matches!(intent, Undo | Redo) {
+            let redo = intent == Redo;
+            let command = if redo {
+                self.history.next_redo()
+            } else {
+                self.history.next_undo()
+            };
+            if let Some(command) = command {
+                let id = self.next_command;
+                self.dispatch(ApplicationAction::Financial(command));
+                if self.pending_commands.contains_key(&id) {
+                    self.history_operations.insert(id, redo);
+                }
+            }
+            return;
+        }
         let disabled = match intent {
             ResetRegisterColumns => {
                 if let Some(settings) = &mut self.settings {
@@ -681,9 +704,7 @@ impl ApplicationRuntime {
             CreateBudget => "The fixed database is created during account onboarding",
             ContextualNew => "Select an account before creating a transaction",
             Import => "Select an account before importing transactions",
-            Undo if self.history.undo_len() == 0 => "Nothing to undo",
-            Redo if self.history.redo_len() == 0 => "Nothing to redo",
-            Undo | Redo => "Undo or redo is temporarily unavailable while projections refresh",
+            Undo | Redo => unreachable!("history commands handled above"),
             Commit => "No editor is active",
             Cancel => "Nothing is open to cancel",
             Edit
@@ -805,13 +826,39 @@ impl ApplicationRuntime {
                     .expect("running commits");
                 self.terminal_sequence += 1;
                 c.terminal_sequence = Some(self.terminal_sequence);
-                if let (
+                if let Some(redo) = self.history_operations.remove(&cid) {
+                    if redo {
+                        let _ = self.history.redo();
+                    } else {
+                        let _ = self.history.undo();
+                    }
+                } else if let (
                     ApplicationAction::Financial(command),
                     Some(crate::storage::protocol::UndoData::Command(inverse)),
                 ) = (&c.envelope.payload, m.undo)
                 {
                     self.history.record_success(HistoryEntry {
-                        label: c.operation_label.clone(),
+                        label: if matches!(
+                            command,
+                            FinancialCommand::Transaction(TransactionCommand::Batch(_))
+                        ) {
+                            let count = m
+                                .affected_entity_ids
+                                .iter()
+                                .filter(|id| {
+                                    matches!(
+                                        id,
+                                        crate::storage::protocol::AffectedEntityId::Transaction(_)
+                                    )
+                                })
+                                .count();
+                            m.operation_label.strip_suffix(" transactions").map_or_else(
+                                || format!("{} {count}", m.operation_label),
+                                |verb| format!("{verb} {count} transactions"),
+                            )
+                        } else {
+                            m.operation_label.clone()
+                        },
                         command: command.clone(),
                         inverse,
                     });
@@ -895,11 +942,15 @@ impl ApplicationRuntime {
         std::mem::take(&mut self.lifecycle_effects)
     }
     pub fn native_close_requested(&mut self) {
+        self.history.clear();
+        self.history_operations.clear();
         let effects = self.lifecycle.native_close_requested();
         self.lifecycle_effects.extend(effects);
         self.advance_exit_review();
     }
     pub fn request_exit(&mut self) {
+        self.history.clear();
+        self.history_operations.clear();
         let effects = self.lifecycle.request_exit();
         self.lifecycle_effects.extend(effects);
         self.advance_exit_review();
@@ -1137,7 +1188,7 @@ mod tests {
                 crate::storage::protocol::MutationResult {
                     command_id: c.envelope.command_id,
                     correlation_id: c.envelope.correlation_id,
-                    operation_label: "test",
+                    operation_label: "test".into(),
                     affected_entity_ids: vec![],
                     undo: None,
                     invalidations: Default::default(),
