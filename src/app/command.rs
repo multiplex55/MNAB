@@ -41,6 +41,8 @@ pub enum AppCommand {
     NextField,
     PreviousField,
     ToggleSelection,
+    SelectAllTransactions,
+    ResetRegisterColumns,
     Rename,
     NavigateCategories,
     NavigateReports,

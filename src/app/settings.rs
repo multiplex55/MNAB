@@ -60,25 +60,41 @@ pub enum DisplayDensity {
 pub struct RegisterColumns {
     pub order: Vec<String>,
     pub widths: Vec<f32>,
+    /// Hidden columns remain in `order`, making re-enabling deterministic.
+    pub hidden: Vec<String>,
 }
 impl Default for RegisterColumns {
     fn default() -> Self {
         Self {
             order: vec![
-                "date", "payee", "category", "memo", "outflow", "inflow", "balance",
+                "date", "payee", "category", "memo", "outflow", "inflow", "cleared", "approved",
+                "account",
             ]
             .into_iter()
             .map(str::to_owned)
             .collect(),
-            widths: vec![90.0, 180.0, 180.0, 200.0, 100.0, 100.0, 110.0],
+            widths: vec![90.0, 180.0, 180.0, 200.0, 100.0, 100.0, 80.0, 90.0, 160.0],
+            hidden: vec!["account".into()],
         }
     }
 }
 
 impl RegisterColumns {
-    pub const KNOWN: [&'static str; 7] = [
-        "date", "payee", "category", "memo", "outflow", "inflow", "balance",
+    pub const KNOWN: [&'static str; 9] = [
+        "date", "payee", "category", "memo", "outflow", "inflow", "cleared", "approved", "account",
     ];
+
+    #[must_use]
+    pub fn minimum_width(column: &str) -> f32 {
+        match column {
+            "date" => 72.0,
+            "payee" | "category" | "account" => 96.0,
+            "memo" => 120.0,
+            "outflow" | "inflow" => 80.0,
+            "cleared" | "approved" => 68.0,
+            _ => 40.0,
+        }
+    }
 
     /// Repairs untrusted persisted layouts: invalid/duplicate entries are discarded,
     /// missing columns are appended in default order, and unsafe widths are reset.
@@ -89,11 +105,16 @@ impl RegisterColumns {
         for (column, width) in self.order.iter().zip(&self.widths) {
             if Self::KNOWN.contains(&column.as_str()) && !repaired.contains(column) {
                 repaired.push(column.clone());
-                widths.push(if width.is_finite() && *width >= 40.0 && *width <= 1000.0 {
-                    *width
-                } else {
-                    defaults.widths[Self::KNOWN.iter().position(|x| x == column).unwrap()]
-                });
+                widths.push(
+                    if width.is_finite()
+                        && *width >= Self::minimum_width(column)
+                        && *width <= 1000.0
+                    {
+                        *width
+                    } else {
+                        defaults.widths[Self::KNOWN.iter().position(|x| x == column).unwrap()]
+                    },
+                );
             }
         }
         for (index, column) in Self::KNOWN.iter().enumerate() {
@@ -104,6 +125,10 @@ impl RegisterColumns {
         }
         self.order = repaired;
         self.widths = widths;
+        self.hidden
+            .retain(|column| Self::KNOWN.contains(&column.as_str()));
+        self.hidden.sort();
+        self.hidden.dedup();
     }
 
     pub fn reset(&mut self) {
@@ -114,11 +139,28 @@ impl RegisterColumns {
         let Some(index) = self.order.iter().position(|value| value == column) else {
             return false;
         };
-        if !width.is_finite() || !(40.0..=1000.0).contains(&width) {
+        if !width.is_finite() || width < Self::minimum_width(column) || width > 1000.0 {
             return false;
         }
         self.widths[index] = width;
         true
+    }
+
+    pub fn set_visible(&mut self, column: &str, visible: bool) -> bool {
+        if !Self::KNOWN.contains(&column) {
+            return false;
+        }
+        self.hidden.retain(|value| value != column);
+        if !visible {
+            self.hidden.push(column.to_owned());
+        }
+        true
+    }
+
+    #[must_use]
+    pub fn visible_for_scope(&self, column: &str, all_transactions: bool) -> bool {
+        (column != "account" || all_transactions)
+            && !self.hidden.iter().any(|value| value == column)
     }
 
     pub fn move_column(&mut self, column: &str, destination: usize) -> bool {
@@ -803,6 +845,7 @@ mod tests {
         session.value_mut().register_columns = RegisterColumns {
             order: vec!["memo".into(), "unknown".into(), "memo".into()],
             widths: vec![222.0, 1.0, 333.0],
+            hidden: vec!["unknown".into(), "account".into(), "account".into()],
         };
         session.save().unwrap();
         let loaded = SettingsSession::load(p);
@@ -816,6 +859,25 @@ mod tests {
         );
         assert_eq!(loaded.value().register_columns.order[0], "memo");
         assert_eq!(loaded.value().register_columns.widths[0], 222.0);
+        assert_eq!(loaded.value().register_columns.hidden, vec!["account"]);
+    }
+    #[test]
+    fn register_columns_enforce_typed_minimums_visibility_and_reset() {
+        let mut columns = RegisterColumns {
+            order: vec!["memo".into(), "date".into()],
+            widths: vec![1.0, f32::NAN],
+            hidden: vec!["memo".into(), "memo".into(), "unknown".into()],
+        };
+        columns.repair();
+        assert!(columns.widths.iter().zip(&columns.order).all(
+            |(width, name)| width.is_finite() && *width >= RegisterColumns::minimum_width(name)
+        ));
+        assert!(!columns.visible_for_scope("memo", true));
+        assert!(!columns.visible_for_scope("account", false));
+        assert!(columns.set_visible("memo", true));
+        assert!(columns.visible_for_scope("memo", true));
+        columns.reset();
+        assert_eq!(columns, RegisterColumns::default());
     }
     #[test]
     fn clamps_offscreen_and_selects_nearest_monitor() {

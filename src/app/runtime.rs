@@ -560,6 +560,12 @@ impl ApplicationRuntime {
         };
         use AppCommand::*;
         let disabled = match intent {
+            ResetRegisterColumns => {
+                if let Some(settings) = &mut self.settings {
+                    settings.value_mut().register_columns.reset();
+                }
+                return;
+            }
             ToggleInspector => {
                 self.view.inspector_visible = !self.view.inspector_visible;
                 return;
@@ -680,8 +686,17 @@ impl ApplicationRuntime {
             Undo | Redo => "Undo or redo is temporarily unavailable while projections refresh",
             Commit => "No editor is active",
             Cancel => "Nothing is open to cancel",
-            Edit | Delete | Rename | ToggleSelection | EditAccount | CloseAccount
-            | RenameAccountGroup | DeleteAccountGroup | MoveAccountGroup | EditTransaction
+            Edit
+            | Delete
+            | Rename
+            | ToggleSelection
+            | SelectAllTransactions
+            | EditAccount
+            | CloseAccount
+            | RenameAccountGroup
+            | DeleteAccountGroup
+            | MoveAccountGroup
+            | EditTransaction
             | DeleteTransaction => "Select the corresponding transaction, account, or group first",
             AddTransaction | CreateTransfer | ReconcileAccount => "Select an active account first",
             MoveUp | MoveDown | NextField | PreviousField => {
