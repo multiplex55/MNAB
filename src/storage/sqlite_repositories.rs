@@ -1,13 +1,13 @@
 //! SQLite mutation repositories. Every handle borrows one transaction and cannot outlive it.
 use super::{mapping::validate_transaction, repository::*};
 use crate::{domain::*, error::RepositoryError};
-use rusqlite::Transaction;
+use rusqlite::Transaction as SqlTransaction;
 
 pub struct SqliteRepositories<'tx> {
-    pub(crate) transaction: Transaction<'tx>,
+    pub(crate) transaction: SqlTransaction<'tx>,
 }
 impl<'tx> SqliteRepositories<'tx> {
-    pub(crate) const fn new(transaction: Transaction<'tx>) -> Self {
+    pub(crate) const fn new(transaction: SqlTransaction<'tx>) -> Self {
         Self { transaction }
     }
     pub(crate) fn commit(self) -> Result<(), RepositoryError> {
@@ -115,7 +115,10 @@ impl TransactionRepository for SqliteRepositories<'_> {
         };
         let account_id: AccountId = a.parse().map_err(repo)?;
         let category = c.map(|x| x.parse()).transpose().map_err(repo)?;
-        let body = if let Some(transfer) = t {
+        let split_lines = self.transaction.prepare("SELECT category_id,amount,memo FROM subtransactions WHERE transaction_id=?1 ORDER BY sort_order").map_err(repo)?.query_map([id.to_string()], |r| Ok(Subtransaction { category_id: parse(r.get(0)?)?, amount:Money::from_minor_units(r.get(1)?), memo:r.get(2)? })).map_err(repo)?.collect::<Result<Vec<_>,_>>().map_err(repo)?;
+        let body = if !split_lines.is_empty() {
+            TransactionBody::Split { lines: split_lines }
+        } else if let Some(transfer) = t {
             TransactionBody::Transfer {
                 transfer_id: transfer.parse().map_err(repo)?,
                 source_account_id: account_id,
@@ -126,10 +129,10 @@ impl TransactionRepository for SqliteRepositories<'_> {
                 category_id: category,
                 category_effect_account_id: category.map(|_| account_id),
             }
+        } else if let Some(category_id) = category {
+            TransactionBody::Categorized { category_id }
         } else {
-            TransactionBody::OpeningBalance {
-                category_id: category,
-            }
+            TransactionBody::OpeningBalance { category_id: None }
         };
         Ok(Some(crate::domain::Transaction {
             id,
@@ -163,6 +166,91 @@ impl TransactionRepository for SqliteRepositories<'_> {
             .map(|_| ())
             .map_err(repo)
     }
+    fn selected_transactions(
+        &mut self,
+        selection: &crate::app::command::TransactionBatchSelection,
+        limit: usize,
+    ) -> Result<Vec<Transaction>, RepositoryError> {
+        use crate::app::command::TransactionBatchSelection;
+        let ids: Vec<TransactionId> = match selection {
+            TransactionBatchSelection::Explicit(ids) => ids.iter().copied().collect(),
+            TransactionBatchSelection::AllMatching { query, exclusions } => {
+                // Fetch identities in bounded pages. Filtering domain values here keeps SQL an
+                // implementation detail and, importantly, happens under the same transaction as writes.
+                let mut statement = self
+                    .transaction
+                    .prepare("SELECT id FROM transactions ORDER BY transaction_date,id LIMIT ?1")
+                    .map_err(repo)?;
+                let raw = statement
+                    .query_map([i64::try_from(limit + 1).unwrap_or(i64::MAX)], |r| {
+                        r.get::<_, String>(0)
+                    })
+                    .map_err(repo)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(repo)?;
+                drop(statement);
+                let mut matched = Vec::new();
+                for raw_id in raw {
+                    let id = raw_id.parse().map_err(repo)?;
+                    if exclusions.contains(&id) {
+                        continue;
+                    }
+                    if let Some(t) = self.transaction(id)? {
+                        if sqlite_transaction_matches(&t, query) {
+                            matched.push(id);
+                        }
+                    }
+                }
+                matched
+            }
+        };
+        if ids.len() > limit {
+            return Err(repo(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "batch selection exceeds safety limit",
+            )));
+        }
+        let mut rows = Vec::new();
+        for id in ids {
+            if let Some(row) = self.transaction(id)? {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+}
+
+fn sqlite_transaction_matches(t: &Transaction, q: &crate::app::register::CanonicalQuery) -> bool {
+    use crate::app::view_model::RegisterScope;
+    let f = &q.filter;
+    (matches!(q.scope, RegisterScope::AllTransactions)
+        || matches!(q.scope, RegisterScope::Account(id) if id==t.account_id))
+        && f.from.is_none_or(|d| t.date.0 >= d)
+        && f.through.is_none_or(|d| t.date.0 <= d)
+        && f.minimum_amount_cents
+            .is_none_or(|n| t.amount.minor_units() >= n)
+        && f.maximum_amount_cents
+            .is_none_or(|n| t.amount.minor_units() <= n)
+        && (f.payee_ids.is_empty() || t.payee_id.is_some_and(|id| f.payee_ids.contains(&id)))
+        && f.cleared_state.as_deref().is_none_or(|s| {
+            s == match t.clearance {
+                Clearance::Uncleared => "uncleared",
+                Clearance::Cleared => "cleared",
+                Clearance::Reconciled => "reconciled",
+            }
+        })
+        && f.approval_state.as_deref().is_none_or(|s| {
+            s == match t.approval {
+                Approval::Approved => "approved",
+                Approval::Unapproved => "unapproved",
+            }
+        })
+        && (f.search.is_empty()
+            || t.memo
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains(&f.search.to_lowercase()))
 }
 macro_rules! unsupported {($trait:ident,$($method:ident:$ty:ty),+) => {impl $trait for SqliteRepositories<'_>{$ (fn $method(&mut self,_:&$ty)->Result<(),RepositoryError>{Err(repo(std::io::Error::new(std::io::ErrorKind::Unsupported,"repository operation is not implemented")))})+}}}
 impl PayeeRepository for SqliteRepositories<'_> {

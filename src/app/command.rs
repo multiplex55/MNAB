@@ -1,4 +1,5 @@
 //! Semantic application commands and their runtime-owned execution record.
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
@@ -95,6 +96,37 @@ pub enum TransactionCommand {
         account_id: AccountId,
         month: BudgetMonth,
     },
+    /// A query-wide transaction mutation. `AllMatching` is resolved by the worker, inside the
+    /// write transaction; the UI never expands it into row commands.
+    Batch(TransactionBatchCommand),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TransactionBatchSelection {
+    Explicit(BTreeSet<TransactionId>),
+    AllMatching {
+        query: crate::app::register::CanonicalQuery,
+        exclusions: BTreeSet<TransactionId>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TransactionBatchAction {
+    SetApproval(crate::domain::Approval),
+    SetCategory(CategoryId),
+    SetPayee(Option<PayeeId>),
+    SetClearance(crate::domain::Clearance),
+    SetMemo(Option<String>),
+    Void,
+    Delete,
+    /// Lossless, typed inverse used by undo; not exposed as an ordinary UI action.
+    Restore(Vec<Transaction>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransactionBatchCommand {
+    pub selection: TransactionBatchSelection,
+    pub action: TransactionBatchAction,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PayeeCommand {
@@ -345,6 +377,12 @@ impl<C: Clone> CommandHistory<C> {
         self.redo.push(e);
         Some(c)
     }
+    pub fn next_undo(&self) -> Option<C> {
+        self.undo.back().map(|e| e.inverse.clone())
+    }
+    pub fn next_redo(&self) -> Option<C> {
+        self.redo.last().map(|e| e.command.clone())
+    }
     pub fn redo(&mut self) -> Option<C> {
         let e = self.redo.pop()?;
         let c = e.command.clone();
@@ -353,6 +391,18 @@ impl<C: Clone> CommandHistory<C> {
     }
     pub fn undo_len(&self) -> usize {
         self.undo.len()
+    }
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+    pub fn undo_label(&self) -> Option<&str> {
+        self.undo.back().map(|e| e.label.as_str())
+    }
+    pub fn redo_label(&self) -> Option<&str> {
+        self.redo.last().map(|e| e.label.as_str())
     }
     pub fn redo_len(&self) -> usize {
         self.redo.len()

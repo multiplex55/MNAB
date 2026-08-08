@@ -38,6 +38,12 @@ pub trait TransactionRepository {
     fn put_transaction(&mut self, value: &Transaction) -> Result<(), RepositoryError>;
     fn transaction(&mut self, id: TransactionId) -> Result<Option<Transaction>, RepositoryError>;
     fn delete_transaction(&mut self, id: TransactionId) -> Result<(), RepositoryError>;
+    /// Resolves a stable semantic selection in bounded chunks while the unit of work is open.
+    fn selected_transactions(
+        &mut self,
+        selection: &crate::app::command::TransactionBatchSelection,
+        limit: usize,
+    ) -> Result<Vec<Transaction>, RepositoryError>;
 }
 pub trait AssignmentRepository {
     fn put_assignment(&mut self, value: &BudgetAssignment) -> Result<(), RepositoryError>;
@@ -232,6 +238,78 @@ impl TransactionRepository for InMemoryRepositories {
         self.transactions.remove(&id);
         Ok(())
     }
+    fn selected_transactions(
+        &mut self,
+        selection: &crate::app::command::TransactionBatchSelection,
+        limit: usize,
+    ) -> Result<Vec<Transaction>, RepositoryError> {
+        use crate::app::command::TransactionBatchSelection::*;
+        let mut values: Vec<_> = match selection {
+            Explicit(ids) => ids
+                .iter()
+                .filter_map(|id| self.transactions.get(id).cloned())
+                .collect(),
+            AllMatching { query, exclusions } => self
+                .transactions
+                .values()
+                .filter(|t| !exclusions.contains(&t.id) && transaction_matches(t, query))
+                .cloned()
+                .collect(),
+        };
+        values.sort_by_key(|t| (t.date.0, t.id));
+        if values.len() > limit {
+            return Err(RepositoryError::Failed {
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "batch selection exceeds safety limit",
+                )),
+            });
+        }
+        Ok(values)
+    }
+}
+
+fn transaction_matches(t: &Transaction, query: &crate::app::register::CanonicalQuery) -> bool {
+    use crate::app::view_model::RegisterScope;
+    let f = &query.filter;
+    (matches!(query.scope, RegisterScope::AllTransactions)
+        || matches!(query.scope, RegisterScope::Account(id) if id == t.account_id))
+        && f.from.is_none_or(|d| t.date.0 >= d)
+        && f.through.is_none_or(|d| t.date.0 <= d)
+        && f.minimum_amount_cents
+            .is_none_or(|n| t.amount.minor_units() >= n)
+        && f.maximum_amount_cents
+            .is_none_or(|n| t.amount.minor_units() <= n)
+        && (f.payee_ids.is_empty() || t.payee_id.is_some_and(|id| f.payee_ids.contains(&id)))
+        && (f.category_ids.is_empty()
+            || match &t.body {
+                crate::domain::TransactionBody::Categorized { category_id } => {
+                    f.category_ids.contains(category_id)
+                }
+                crate::domain::TransactionBody::Split { lines } => lines
+                    .iter()
+                    .any(|l| f.category_ids.contains(&l.category_id)),
+                _ => false,
+            })
+        && f.cleared_state.as_deref().is_none_or(|s| {
+            s == match t.clearance {
+                crate::domain::Clearance::Uncleared => "uncleared",
+                crate::domain::Clearance::Cleared => "cleared",
+                crate::domain::Clearance::Reconciled => "reconciled",
+            }
+        })
+        && f.approval_state.as_deref().is_none_or(|s| {
+            s == match t.approval {
+                crate::domain::Approval::Approved => "approved",
+                crate::domain::Approval::Unapproved => "unapproved",
+            }
+        })
+        && (f.search.is_empty()
+            || t.memo
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains(&f.search.to_lowercase()))
 }
 impl AssignmentRepository for InMemoryRepositories {
     fn put_assignment(&mut self, v: &BudgetAssignment) -> Result<(), RepositoryError> {

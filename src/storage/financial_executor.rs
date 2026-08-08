@@ -7,6 +7,7 @@ use super::{
     worker::WorkerError,
 };
 use crate::app::{command::*, dispatcher::invalidations_for};
+use crate::domain::Approval;
 use rusqlite::Connection;
 
 /// Envelope/generation verification happens before `begin`, so stale or malformed requests cannot
@@ -39,7 +40,7 @@ fn execute_with<F: UnitOfWorkFactory>(
     Ok(MutationResult {
         command_id: envelope.command_id,
         correlation_id: envelope.correlation_id,
-        operation_label: label,
+        operation_label: label.to_owned(),
         affected_entity_ids: affected,
         undo,
         invalidations,
@@ -169,6 +170,53 @@ fn apply<R: Repositories>(
                 }),
                 "transaction",
                 v.id.to_string(),
+            )
+        }
+        FinancialCommand::Transaction(TransactionCommand::Batch(batch)) => {
+            let (preflight, prior, affected_ids) =
+                crate::service::transaction_service::execute_batch(r, batch).map_err(repository)?;
+            let mut affected = Vec::new();
+            for old in &prior {
+                affected.push(A::Transaction(old.id));
+                affected.push(A::Account(old.account_id));
+            }
+            if let TransactionBatchAction::SetCategory(category) = &batch.action {
+                affected.push(A::Category(*category));
+            }
+            affected.sort_by_key(|id| format!("{id:?}"));
+            affected.dedup();
+            let count = affected_ids.len();
+            let label = match &batch.action {
+                TransactionBatchAction::SetApproval(Approval::Approved) => "Approve transactions",
+                TransactionBatchAction::SetApproval(Approval::Unapproved) => {
+                    "Unapprove transactions"
+                }
+                TransactionBatchAction::SetCategory(_) => "Categorize transactions",
+                TransactionBatchAction::SetPayee(_) => "Change transaction payees",
+                TransactionBatchAction::SetClearance(_) => "Change cleared state",
+                TransactionBatchAction::SetMemo(_) => "Change transaction memos",
+                TransactionBatchAction::Void => "Void transactions",
+                TransactionBatchAction::Delete => "Delete transactions",
+                TransactionBatchAction::Restore(_) => "Restore transactions",
+            };
+            let inverse = TransactionBatchCommand {
+                selection: TransactionBatchSelection::Explicit(
+                    affected_ids.iter().copied().collect(),
+                ),
+                action: TransactionBatchAction::Restore(prior),
+            };
+            (
+                label,
+                affected,
+                Some(UndoData::Command(FinancialCommand::Transaction(
+                    TransactionCommand::Batch(inverse),
+                ))),
+                "transaction_batch",
+                format!(
+                    "{count}; eligible={}",
+                    preflight
+                        .count(crate::service::transaction_service::BatchPreflightReason::Eligible)
+                ),
             )
         }
         FinancialCommand::Transaction(TransactionCommand::Delete {
