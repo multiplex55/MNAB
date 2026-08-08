@@ -471,9 +471,9 @@ pub fn load_state(
         }
         return;
     }
-    match query.last_successful {
-        Some(count) if count > 0 => {
-            ui.label(format!("{count} transactions"));
+    match &query.last_successful {
+        Some(page) if !page.rows.is_empty() => {
+            ui.label(format!("{} transactions", page.total_matches));
             if query.refresh_active {
                 ui.spinner();
                 ui.small("Refreshing…");

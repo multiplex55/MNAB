@@ -36,8 +36,7 @@ pub fn outcome(
 
 pub fn register_page(
     page: crate::storage::query_store::RegisterPage,
-    account_id: AccountId,
-    offset: u32,
+    request: crate::app::view_model::RegisterRequest,
     generation: crate::storage::worker::Generation,
 ) -> Result<crate::app::view_model::RegisterPageView, crate::error::RepositoryError> {
     use crate::app::view_model::*;
@@ -50,14 +49,54 @@ pub fn register_page(
                     uuid(&row.transaction_id, "transactions", &row.transaction_id)
                         .map_err(projection_error)?,
                 ),
+                account_id: AccountId::from_uuid(
+                    uuid(&row.account_id, "accounts", &row.account_id).map_err(projection_error)?,
+                ),
+                account_name: row.account_name,
                 date: date(&row.date, "transactions", &row.transaction_id)
                     .map_err(projection_error)?,
-                payee: row.payee,
-                category: row.category,
+                created_at: row.created_at,
+                payee_id: row
+                    .payee_id
+                    .as_deref()
+                    .map(|id| {
+                        uuid(id, "payees", id)
+                            .map(PayeeId::from_uuid)
+                            .map_err(projection_error)
+                    })
+                    .transpose()?,
+                payee_name: row.payee,
+                category_id: row
+                    .category_id
+                    .as_deref()
+                    .map(|id| {
+                        uuid(id, "categories", id)
+                            .map(CategoryId::from_uuid)
+                            .map_err(projection_error)
+                    })
+                    .transpose()?,
+                category_name: row.category,
                 memo: row.memo,
-                amount_cents: row.amount.minor_units(),
-                running_balance_cents: row.running_balance.minor_units(),
+                inflow_cents: row.amount.minor_units().max(0),
+                outflow_cents: row.amount.minor_units().saturating_neg().max(0),
+                cleared_state: row.cleared_state.clone(),
+                approved: row.approval_state == "approved",
                 reconciled: row.cleared_state == "reconciled",
+                is_transfer: row.transfer_id.is_some(),
+                transfer_id: row.transfer_id,
+                split_count: row.split_count,
+                import_batch_id: row
+                    .import_batch_id
+                    .as_deref()
+                    .map(|id| {
+                        uuid(id, "import_batches", id)
+                            .map(ImportBatchId::from_uuid)
+                            .map_err(projection_error)
+                    })
+                    .transpose()?,
+                import_source: row.import_source,
+                review_state: row.review_state,
+                running_balance_cents: row.running_balance.map(|m| m.minor_units()),
             })
         })
         .collect::<Result<Vec<_>, crate::error::RepositoryError>>()?;
@@ -65,46 +104,22 @@ pub fn register_page(
         .next_cursor
         .map(|cursor| -> Result<_, crate::error::RepositoryError> {
             Ok(RegisterCursor {
-                date: date(
-                    &cursor.transaction_date,
-                    "transactions",
-                    &cursor.transaction_id,
-                )
-                .map_err(projection_error)?,
-                transaction_id: TransactionId::from_uuid(
-                    uuid(
-                        &cursor.transaction_id,
-                        "transactions",
-                        &cursor.transaction_id,
-                    )
-                    .map_err(projection_error)?,
-                ),
+                date: cursor.date,
+                created_at: cursor.created_at,
+                transaction_id: cursor.transaction_id,
             })
         })
         .transpose()?;
-    let anchor = page
-        .running_balance_anchors
-        .iter()
-        .find(|(id, _)| id == &account_id.to_string())
-        .map_or(0, |(_, money)| money.minor_units());
     Ok(RegisterPageView {
         version: version(generation, 0),
-        account_id,
-        offset: u64::from(offset),
-        cursor: None,
+        scope: request.scope,
+        cursor: request.cursor.clone(),
+        request,
         next_cursor,
-        total_matches: rows.len() as u64,
-        running_balance_anchor_cents: anchor,
+        total_matches: page.total_matches,
+        has_more: page.has_more,
         rows,
         separators: vec![],
-        filter: RegisterFilterView {
-            text: String::new(),
-            from: None,
-            through: None,
-            category_ids: Default::default(),
-            payee_ids: Default::default(),
-            cleared_only: false,
-        },
     })
 }
 

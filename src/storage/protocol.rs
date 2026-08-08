@@ -11,6 +11,14 @@ use crate::{
     },
 };
 
+// Register reads are part of the application/storage protocol, not a
+// query-store implementation detail.
+#[allow(unused_imports)]
+pub use crate::app::view_model::{
+    RegisterCursor, RegisterFilter, RegisterRequest, RegisterScope, RegisterSortDirection,
+    RegisterSortField,
+};
+
 /// Stable purpose tag for read requests. Together with the request id and generation this lets
 /// consumers reject a late response without inspecting its payload.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

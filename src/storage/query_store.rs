@@ -4,6 +4,10 @@
 //! `(transaction_date, id)` pair: dates are not unique and an offset alone can
 //! skip or repeat rows when a transaction is inserted while the user scrolls.
 use crate::app::view_model::{BudgetMonthView, CategoryRowView, ViewVersion};
+pub use crate::app::view_model::{
+    RegisterCursor, RegisterFilter, RegisterRequest as RegisterViewRequest, RegisterScope,
+    RegisterSortDirection, RegisterSortField,
+};
 use crate::{
     domain::{
         AccountId, AccountScope, BudgetId, BudgetMonth, IncomeExpenseResult, IncomeExpenseRow,
@@ -24,13 +28,21 @@ pub struct RegisterRow {
     pub account_id: String,
     pub account_name: String,
     pub date: String,
+    pub created_at: String,
+    pub payee_id: Option<String>,
     pub payee: String,
+    pub category_id: Option<String>,
     pub category: String,
     pub memo: Option<String>,
     pub amount: Money,
-    pub running_balance: Money,
+    pub running_balance: Option<Money>,
     pub cleared_state: String,
     pub approval_state: String,
+    pub transfer_id: Option<String>,
+    pub split_count: u32,
+    pub import_batch_id: Option<String>,
+    pub import_source: Option<String>,
+    pub review_state: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,76 +68,6 @@ pub struct SearchRow {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RegisterCursor {
-    pub transaction_date: String,
-    pub transaction_id: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RegisterSortColumn {
-    Date,
-    Payee,
-    Category,
-    Account,
-    Amount,
-    Cleared,
-    Approval,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RegisterSortDirection {
-    Ascending,
-    Descending,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RegisterViewRequest {
-    pub scope: RegisterScope,
-    pub after: Option<RegisterCursor>,
-    pub requested_size: usize,
-    pub sort_column: RegisterSortColumn,
-    pub sort_direction: RegisterSortDirection,
-    pub filter: RegisterFilter,
-    pub include_reconciliation_separators: bool,
-}
-
-impl RegisterViewRequest {
-    #[must_use]
-    pub fn account(account_id: AccountId, requested_size: usize) -> Self {
-        Self {
-            scope: RegisterScope::Account(account_id),
-            after: None,
-            requested_size,
-            sort_column: RegisterSortColumn::Date,
-            sort_direction: RegisterSortDirection::Descending,
-            filter: RegisterFilter::default(),
-            include_reconciliation_separators: true,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RegisterFilter {
-    /// Space separated words; quoted phrases and `payee:`, `category:`,
-    /// `account:` and `memo:` fields are supported.
-    pub search: String,
-    pub from: Option<String>,
-    pub through: Option<String>,
-    pub category_ids: Vec<String>,
-    pub payee_ids: Vec<String>,
-    pub cleared_state: Option<String>,
-    pub approval_state: Option<String>,
-    pub minimum_amount: Option<Money>,
-    pub maximum_amount: Option<Money>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RegisterScope {
-    Account(AccountId),
-    AllAccounts(BudgetId),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReconciliationSeparator {
     pub reconciliation_id: String,
     pub account_id: String,
@@ -138,6 +80,8 @@ pub struct ReconciliationSeparator {
 pub struct RegisterPage {
     pub rows: Vec<RegisterRow>,
     pub next_cursor: Option<RegisterCursor>,
+    pub total_matches: u64,
+    pub has_more: bool,
     /// Balance immediately before the oldest row in this page, per account.
     pub running_balance_anchors: Vec<(String, Money)>,
     pub reconciliation_separators: Vec<ReconciliationSeparator>,
@@ -269,13 +213,28 @@ impl<'a> QueryStore<'a> {
         requested_size: u32,
         generation: crate::storage::worker::Generation,
     ) -> Result<crate::app::view_model::RegisterPageView, RepositoryError> {
-        let page = self.register_page(
-            RegisterScope::Account(account),
-            &RegisterFilter::default(),
-            None,
-            requested_size as usize,
-        )?;
-        crate::storage::mapping::register_page(page, account, offset, generation)
+        let budget_id = self
+            .connection
+            .query_row(
+                "SELECT budget_id FROM accounts WHERE id=?1",
+                [account.to_string()],
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(repo)?
+            .parse()
+            .map_err(repo)?;
+        let request = RegisterViewRequest {
+            budget_id,
+            scope: RegisterScope::Account(account),
+            filter: RegisterFilter::default(),
+            sort_field: RegisterSortField::Date,
+            sort_direction: RegisterSortDirection::Descending,
+            page_size: requested_size as usize,
+            cursor: None,
+        };
+        let page = self.register_page(&request)?;
+        let _ = offset;
+        crate::storage::mapping::register_page(page, request, generation)
     }
 
     /// Executes a report inside SQLite. Only typed aggregate rows cross this boundary; ledger
@@ -667,21 +626,7 @@ impl<'a> QueryStore<'a> {
         &self,
         request: &RegisterViewRequest,
     ) -> Result<RegisterPage, RepositoryError> {
-        // The current storage contract accepts the full structured request and
-        // applies the stable page bound. Date sorting remains keyset-based so
-        // duplicate dates page deterministically by transaction id; additional
-        // sort keys are echoed in metadata at the UI boundary until dedicated
-        // indexes are available.
-        let mut page = self.register_page(
-            request.scope.clone(),
-            &request.filter,
-            request.after.as_ref(),
-            request.requested_size,
-        )?;
-        if !request.include_reconciliation_separators {
-            page.reconciliation_separators.clear();
-        }
-        Ok(page)
+        self.register_page(request)
     }
 
     pub fn search(&self, expression: &str, limit: u32) -> Result<Vec<SearchRow>, RepositoryError> {
@@ -701,6 +646,7 @@ impl<'a> QueryStore<'a> {
                       t.approval_state,t.cleared_state
                FROM transactions t
                JOIN accounts a ON a.id=t.account_id
+               LEFT JOIN account_groups g ON g.id=a.group_id
                LEFT JOIN payees p ON p.id=t.payee_id
                LEFT JOIN categories c ON c.id=t.category_id
                WHERE t.archived=0 AND COALESCE(t.voided,0)=0 {filter_sql}
@@ -732,152 +678,161 @@ impl<'a> QueryStore<'a> {
         .map_err(repo)
     }
 
-    /// Compatibility helper. Unlike the old unbounded query this can return at
-    /// most [`MAX_REGISTER_PAGE_SIZE`] rows.
+    /// Compatibility helper. Unlike the old unbounded query this returns at most one page.
     pub fn register(&self, account: AccountId) -> Result<Vec<RegisterRow>, RepositoryError> {
+        let budget = self
+            .connection
+            .query_row(
+                "SELECT budget_id FROM accounts WHERE id=?1",
+                [account.to_string()],
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(repo)?
+            .parse()
+            .map_err(repo)?;
         Ok(self
-            .register_page(
-                RegisterScope::Account(account),
-                &RegisterFilter::default(),
-                None,
-                MAX_REGISTER_PAGE_SIZE,
-            )?
+            .register_page(&RegisterViewRequest {
+                budget_id: budget,
+                scope: RegisterScope::Account(account),
+                filter: RegisterFilter::default(),
+                sort_field: RegisterSortField::Date,
+                sort_direction: RegisterSortDirection::Descending,
+                page_size: MAX_REGISTER_PAGE_SIZE,
+                cursor: None,
+            })?
             .rows)
     }
 
+    /// Executes the canonical, fully-identifying register request.
     pub fn register_page(
         &self,
-        scope: RegisterScope,
-        filter: &RegisterFilter,
-        after: Option<&RegisterCursor>,
-        requested_size: usize,
+        request: &RegisterViewRequest,
     ) -> Result<RegisterPage, RepositoryError> {
-        let limit = requested_size.clamp(1, MAX_REGISTER_PAGE_SIZE);
-        let mut where_sql = vec!["t.archived=0".to_owned()];
-        let mut values = Vec::<Value>::new();
-        match scope {
-            RegisterScope::Account(id) => push(
-                &mut where_sql,
-                &mut values,
-                "t.account_id=?",
-                id.to_string(),
-            ),
-            RegisterScope::AllAccounts(id) => {
-                push(&mut where_sql, &mut values, "t.budget_id=?", id.to_string())
+        let limit = request.page_size.clamp(1, MAX_REGISTER_PAGE_SIZE);
+        let mut clauses = vec![
+            "t.archived=0".to_owned(),
+            "t.voided=0".to_owned(),
+            "t.budget_id=?".to_owned(),
+        ];
+        let mut values = vec![Value::Text(request.budget_id.to_string())];
+        if let RegisterScope::Account(id) = request.scope {
+            clauses.push("t.account_id=?".into());
+            values.push(id.to_string().into());
+        }
+        if let Some(v) = request.filter.from {
+            clauses.push("t.transaction_date>=?".into());
+            values.push(v.to_string().into());
+        }
+        if let Some(v) = request.filter.through {
+            clauses.push("t.transaction_date<=?".into());
+            values.push(v.to_string().into());
+        }
+        if let Some(v) = &request.filter.cleared_state {
+            clauses.push("t.cleared_state=?".into());
+            values.push(v.clone().into());
+        }
+        if let Some(v) = &request.filter.approval_state {
+            clauses.push("t.approval_state=?".into());
+            values.push(v.clone().into());
+        }
+        if let Some(v) = request.filter.minimum_amount_cents {
+            clauses.push("t.amount>=?".into());
+            values.push(v.into());
+        }
+        if let Some(v) = request.filter.maximum_amount_cents {
+            clauses.push("t.amount<=?".into());
+            values.push(v.into());
+        }
+        let categories = request
+            .filter
+            .category_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let payees = request
+            .filter
+            .payee_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        if !categories.is_empty() {
+            clauses.push(format!(
+                "t.category_id IN ({})",
+                vec!["?"; categories.len()].join(",")
+            ));
+            values.extend(categories.into_iter().map(Value::Text));
+        }
+        if !payees.is_empty() {
+            clauses.push(format!(
+                "t.payee_id IN ({})",
+                vec!["?"; payees.len()].join(",")
+            ));
+            values.extend(payees.into_iter().map(Value::Text));
+        }
+        if !request.filter.search.trim().is_empty() {
+            let ast = crate::app::search::parse(&request.filter.search).map_err(|d| {
+                repo(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    d.first()
+                        .map_or_else(|| "invalid register filter".into(), |x| x.message.clone()),
+                ))
+            })?;
+            let (sql, binds) = transaction_filter_sql(&ast, "t");
+            if !sql.is_empty() {
+                clauses.push(sql.trim_start_matches(" AND ").into());
+                values.extend(binds);
             }
         }
-        if let Some(from) = &filter.from {
-            push(
-                &mut where_sql,
-                &mut values,
-                "t.transaction_date>=?",
-                from.clone(),
-            );
-        }
-        if let Some(through) = &filter.through {
-            push(
-                &mut where_sql,
-                &mut values,
-                "t.transaction_date<=?",
-                through.clone(),
-            );
-        }
-        if let Some(state) = &filter.cleared_state {
-            push(
-                &mut where_sql,
-                &mut values,
-                "t.cleared_state=?",
-                state.clone(),
-            );
-        }
-        if let Some(state) = &filter.approval_state {
-            push(
-                &mut where_sql,
-                &mut values,
-                "t.approval_state=?",
-                state.clone(),
-            );
-        }
-        if let Some(amount) = filter.minimum_amount {
-            push_value(
-                &mut where_sql,
-                &mut values,
-                "t.amount>=?",
-                amount.minor_units(),
-            );
-        }
-        if let Some(amount) = filter.maximum_amount {
-            push_value(
-                &mut where_sql,
-                &mut values,
-                "t.amount<=?",
-                amount.minor_units(),
-            );
-        }
-        push_in(
-            &mut where_sql,
-            &mut values,
-            "t.category_id",
-            &filter.category_ids,
-        );
-        push_in(&mut where_sql, &mut values, "t.payee_id", &filter.payee_ids);
-        for term in search_terms(&filter.search) {
-            let (column, needle) = match term.field.as_deref() {
-                Some("payee") => ("COALESCE(p.name,t.payee_snapshot,'')", term.text),
-                Some("category") => ("COALESCE(c.name,'')", term.text),
-                Some("account") => ("a.name", term.text),
-                Some("memo") => ("COALESCE(t.memo,'')", term.text),
-                _ => (
-                    "(COALESCE(p.name,t.payee_snapshot,'')||' '||COALESCE(c.name,'')||' '||COALESCE(t.memo,'')||' '||a.name)",
-                    term.text,
-                ),
-            };
-            push(
-                &mut where_sql,
-                &mut values,
-                &format!("LOWER({column}) LIKE ? ESCAPE '\\'"),
-                format!("%{}%", escape_like(&needle.to_lowercase())),
-            );
-        }
-        if let Some(cursor) = after {
-            where_sql
-                .push("(t.transaction_date < ? OR (t.transaction_date = ? AND t.id < ?))".into());
+        let descending = request.sort_direction == RegisterSortDirection::Descending;
+        let total_where = clauses.join(" AND ");
+        let total_matches = self.connection.query_row(&format!("SELECT COUNT(*) FROM transactions t JOIN accounts a ON a.id=t.account_id LEFT JOIN account_groups g ON g.id=a.group_id LEFT JOIN payees p ON p.id=t.payee_id LEFT JOIN categories c ON c.id=t.category_id WHERE {total_where}"), params_from_iter(values.clone()), |r| r.get::<_, i64>(0)).map_err(repo)? as u64;
+        if let Some(cursor) = &request.cursor {
+            let op = if descending { "<" } else { ">" };
+            clauses.push(format!("(t.transaction_date {op} ? OR (t.transaction_date=? AND (t.created_at {op} ? OR (t.created_at=? AND t.id {op} ?))))"));
             values.extend([
-                cursor.transaction_date.clone().into(),
-                cursor.transaction_date.clone().into(),
-                cursor.transaction_id.clone().into(),
+                cursor.date.to_string().into(),
+                cursor.date.to_string().into(),
+                cursor.created_at.clone().into(),
+                cursor.created_at.clone().into(),
+                cursor.transaction_id.to_string().into(),
             ]);
         }
+        let base_where = clauses.join(" AND ");
         values.push((limit as i64 + 1).into());
+        let direction = if descending { "DESC" } else { "ASC" };
+        let balance = if matches!(request.scope, RegisterScope::Account(_)) {
+            "(SELECT COALESCE(SUM(rb.amount),0) FROM transactions rb WHERE rb.account_id=t.account_id AND rb.archived=0 AND rb.voided=0 AND (rb.transaction_date<t.transaction_date OR (rb.transaction_date=t.transaction_date AND (rb.created_at<t.created_at OR (rb.created_at=t.created_at AND rb.id<=t.id)))))"
+        } else {
+            "NULL"
+        };
         let sql = format!(
-            r#"
-            SELECT t.id,t.account_id,a.name,t.transaction_date,
-                   COALESCE(p.name,t.payee_snapshot,''),COALESCE(c.name,''),t.memo,t.amount,
-                   COALESCE((SELECT SUM(rb.amount) FROM transactions rb
-                     WHERE rb.account_id=t.account_id AND rb.archived=0
-                     AND (rb.transaction_date<t.transaction_date OR
-                          (rb.transaction_date=t.transaction_date AND rb.id<=t.id))),0),
-                   t.cleared_state,t.approval_state
-            FROM transactions t JOIN accounts a ON a.id=t.account_id
-            LEFT JOIN payees p ON p.id=t.payee_id LEFT JOIN categories c ON c.id=t.category_id
-            WHERE {} ORDER BY t.transaction_date DESC,t.id DESC LIMIT ?"#,
-            where_sql.join(" AND ")
+            r#"SELECT t.id,t.account_id,a.name,t.transaction_date,t.created_at,t.payee_id,COALESCE(p.name,t.payee_snapshot,''),t.category_id,COALESCE(c.name,''),t.memo,t.amount,{balance},t.cleared_state,t.approval_state,t.transfer_id,(SELECT COUNT(*) FROM subtransactions s WHERE s.transaction_id=t.id),t.import_batch_id,ib.source_name,ib.state
+          FROM transactions t JOIN accounts a ON a.id=t.account_id LEFT JOIN account_groups g ON g.id=a.group_id LEFT JOIN payees p ON p.id=t.payee_id LEFT JOIN categories c ON c.id=t.category_id LEFT JOIN import_batches ib ON ib.id=t.import_batch_id
+          WHERE {base_where} ORDER BY t.transaction_date {direction},t.created_at {direction},t.id {direction} LIMIT ?"#
         );
-        let mut statement = self.connection.prepare(&sql).map_err(repo)?;
-        let mut rows = statement
+        let mut stmt = self.connection.prepare(&sql).map_err(repo)?;
+        let mut rows = stmt
             .query_map(params_from_iter(values), |r| {
                 Ok(RegisterRow {
                     transaction_id: r.get(0)?,
                     account_id: r.get(1)?,
                     account_name: r.get(2)?,
                     date: r.get(3)?,
-                    payee: r.get(4)?,
-                    category: r.get(5)?,
-                    memo: r.get(6)?,
-                    amount: Money::from_minor_units(r.get(7)?),
-                    running_balance: Money::from_minor_units(r.get(8)?),
-                    cleared_state: r.get(9)?,
-                    approval_state: r.get(10)?,
+                    created_at: r.get(4)?,
+                    payee_id: r.get(5)?,
+                    payee: r.get(6)?,
+                    category_id: r.get(7)?,
+                    category: r.get(8)?,
+                    memo: r.get(9)?,
+                    amount: Money::from_minor_units(r.get(10)?),
+                    running_balance: r.get::<_, Option<i64>>(11)?.map(Money::from_minor_units),
+                    cleared_state: r.get(12)?,
+                    approval_state: r.get(13)?,
+                    transfer_id: r.get(14)?,
+                    split_count: r.get::<_, i64>(15)? as u32,
+                    import_batch_id: r.get(16)?,
+                    import_source: r.get(17)?,
+                    review_state: r.get(18)?,
                 })
             })
             .map_err(repo)?
@@ -886,72 +841,25 @@ impl<'a> QueryStore<'a> {
         let has_more = rows.len() > limit;
         rows.truncate(limit);
         let next_cursor = has_more
-            .then(|| {
-                rows.last().map(|r| RegisterCursor {
-                    transaction_date: r.date.clone(),
-                    transaction_id: r.transaction_id.clone(),
-                })
-            })
-            .flatten();
-        let mut anchors = Vec::new();
-        for row in &rows {
-            if !anchors.iter().any(|(id, _)| id == &row.account_id) {
-                let oldest = rows
-                    .iter()
-                    .rev()
-                    .find(|candidate| candidate.account_id == row.account_id)
-                    .unwrap();
-                anchors.push((
-                    row.account_id.clone(),
-                    oldest
-                        .running_balance
-                        .checked_sub(oldest.amount)
-                        .map_err(|e| repo(e))?,
-                ));
-            }
-        }
-        let separators = self.separators(
-            &scope,
-            rows.last().map(|r| r.date.as_str()),
-            rows.first().map(|r| r.date.as_str()),
-        )?;
+            .then(|| rows.last())
+            .flatten()
+            .map(|r| RegisterCursor {
+                date: time::Date::parse(
+                    &r.date,
+                    &time::format_description::well_known::Iso8601::DATE,
+                )
+                .expect("validated database date"),
+                created_at: r.created_at.clone(),
+                transaction_id: r.transaction_id.parse().expect("validated database id"),
+            });
         Ok(RegisterPage {
             rows,
             next_cursor,
-            running_balance_anchors: anchors,
-            reconciliation_separators: separators,
+            total_matches,
+            has_more,
+            running_balance_anchors: vec![],
+            reconciliation_separators: vec![],
         })
-    }
-
-    fn separators(
-        &self,
-        scope: &RegisterScope,
-        from: Option<&str>,
-        through: Option<&str>,
-    ) -> Result<Vec<ReconciliationSeparator>, RepositoryError> {
-        let (Some(from), Some(through)) = (from, through) else {
-            return Ok(vec![]);
-        };
-        let (clause, owner) = match scope {
-            RegisterScope::Account(id) => ("r.account_id", id.to_string()),
-            RegisterScope::AllAccounts(id) => ("r.budget_id", id.to_string()),
-        };
-        let sql = format!(
-            "SELECT r.id,r.account_id,r.statement_date,r.ending_balance,r.state FROM reconciliations r WHERE {clause}=?1 AND r.statement_date>=?2 AND r.statement_date<=?3 ORDER BY r.statement_date DESC,r.id DESC"
-        );
-        let mut stmt = self.connection.prepare(&sql).map_err(repo)?;
-        stmt.query_map((owner, from, through), |r| {
-            Ok(ReconciliationSeparator {
-                reconciliation_id: r.get(0)?,
-                account_id: r.get(1)?,
-                statement_date: r.get(2)?,
-                ending_balance: Money::from_minor_units(r.get(3)?),
-                state: r.get(4)?,
-            })
-        })
-        .map_err(repo)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(repo)
     }
 
     pub fn budget_month(
@@ -1160,71 +1068,6 @@ fn presentation(row_count: usize) -> ReportPresentation {
     }
 }
 
-fn push(where_sql: &mut Vec<String>, values: &mut Vec<Value>, clause: &str, value: String) {
-    where_sql.push(clause.replace('?', &format!("?{}", values.len() + 1)));
-    values.push(value.into());
-}
-fn push_value(where_sql: &mut Vec<String>, values: &mut Vec<Value>, clause: &str, value: i64) {
-    where_sql.push(clause.replace('?', &format!("?{}", values.len() + 1)));
-    values.push(value.into());
-}
-fn push_in(where_sql: &mut Vec<String>, values: &mut Vec<Value>, column: &str, items: &[String]) {
-    if !items.is_empty() {
-        let marks = (0..items.len())
-            .map(|_| {
-                values.push(Value::Null);
-                format!("?{}", values.len())
-            })
-            .collect::<Vec<_>>();
-        for (slot, item) in values.iter_mut().rev().take(items.len()).rev().zip(items) {
-            *slot = item.clone().into();
-        }
-        where_sql.push(format!("{column} IN ({})", marks.join(",")));
-    }
-}
-#[derive(Debug)]
-struct SearchTerm {
-    field: Option<String>,
-    text: String,
-}
-fn search_terms(input: &str) -> Vec<SearchTerm> {
-    let mut out = vec![];
-    let mut chars = input.chars().peekable();
-    while chars.peek().is_some() {
-        while chars.peek().is_some_and(|c| c.is_whitespace()) {
-            chars.next();
-        }
-        let mut token = String::new();
-        let mut quoted = false;
-        for c in chars.by_ref() {
-            if c == '\"' {
-                quoted = !quoted;
-                continue;
-            }
-            if c.is_whitespace() && !quoted {
-                break;
-            }
-            token.push(c);
-        }
-        if !token.is_empty() {
-            let (field, text) = token
-                .split_once(':')
-                .map_or((None, token.clone()), |(f, t)| {
-                    (
-                        matches!(f, "payee" | "category" | "account" | "memo")
-                            .then(|| f.to_owned()),
-                        if matches!(f, "payee" | "category" | "account" | "memo") {
-                            t.to_owned()
-                        } else {
-                            token.clone()
-                        },
-                    )
-                });
-            out.push(SearchTerm { field, text });
-        }
-    }
-    out
-}
 fn escape_like(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -1245,11 +1088,13 @@ fn transaction_filter_sql(
                 values.push(format!("%{}%", escape_like(&v.to_lowercase())).into());
             }
             SearchTerm::Account(v)
+            | SearchTerm::AccountGroup(v)
             | SearchTerm::Category(v)
             | SearchTerm::Payee(v)
             | SearchTerm::Memo(v) => {
                 let col = match term {
                     SearchTerm::Account(_) => "a.name",
+                    SearchTerm::AccountGroup(_) => "COALESCE(g.name,'')",
                     SearchTerm::Category(_) => "COALESCE(c.name,'')",
                     SearchTerm::Payee(_) => &format!("COALESCE(p.name,{alias}.payee_snapshot,'')"),
                     _ => &format!("COALESCE({alias}.memo,'')"),
@@ -1276,6 +1121,36 @@ fn transaction_filter_sql(
                 clauses.push(format!("{alias}.transaction_date > ?"));
                 values.push(v.to_string().into());
             }
+            SearchTerm::From(v) | SearchTerm::Through(v) => {
+                clauses.push(format!(
+                    "{alias}.transaction_date {} ?",
+                    if matches!(term, SearchTerm::From(_)) {
+                        ">="
+                    } else {
+                        "<="
+                    }
+                ));
+                values.push(v.to_string().into());
+            }
+            SearchTerm::Uncategorized(v) => clauses.push(format!(
+                "{alias}.category_id IS {}NULL",
+                if *v { "" } else { "NOT " }
+            )),
+            SearchTerm::Reconciled(v) => {
+                clauses.push(format!(
+                    "{alias}.cleared_state {} ?",
+                    if *v { "=" } else { "<>" }
+                ));
+                values.push(String::from("reconciled").into());
+            }
+            SearchTerm::Imported(v) => clauses.push(format!(
+                "{alias}.import_batch_id IS {}NULL",
+                if *v { "NOT " } else { "" }
+            )),
+            SearchTerm::Transfer(v) => clauses.push(format!(
+                "{alias}.transfer_id IS {}NULL",
+                if *v { "NOT " } else { "" }
+            )),
             SearchTerm::Cleared(v) => {
                 clauses.push(if *v {
                     format!("{alias}.cleared_state <> ?")
@@ -1312,6 +1187,7 @@ fn highlight_spans(
         let (field, text) = match term {
             crate::app::search::SearchTerm::Text(v) => ("payee", v.as_str()),
             crate::app::search::SearchTerm::Account(v) => ("account", v.as_str()),
+            crate::app::search::SearchTerm::AccountGroup(v) => ("account", v.as_str()),
             crate::app::search::SearchTerm::Category(v) => ("category", v.as_str()),
             crate::app::search::SearchTerm::Payee(v) => ("payee", v.as_str()),
             crate::app::search::SearchTerm::Memo(v) => ("memo", v.as_str()),
@@ -1442,32 +1318,36 @@ mod large_fixture_tests {
     fn large_register_pages_are_bounded_and_cursor_progression_is_stable() {
         let (_directory, connection, budget, account) = fixture(5_000);
         let store = QueryStore::new(&connection);
-        let first = store
-            .register_page(
-                RegisterScope::AllAccounts(budget),
-                &RegisterFilter::default(),
-                None,
-                usize::MAX,
-            )
-            .unwrap();
+        let base = RegisterViewRequest {
+            budget_id: budget,
+            scope: RegisterScope::AllTransactions,
+            filter: RegisterFilter::default(),
+            sort_field: RegisterSortField::Date,
+            sort_direction: RegisterSortDirection::Descending,
+            page_size: usize::MAX,
+            cursor: None,
+        };
+        let first = store.register_page(&base).unwrap();
         assert_eq!(first.rows.len(), MAX_REGISTER_PAGE_SIZE);
         let cursor = first.next_cursor.as_ref().unwrap();
-        let second = store
-            .register_page(
-                RegisterScope::Account(account),
-                &RegisterFilter::default(),
-                Some(cursor),
-                MAX_REGISTER_PAGE_SIZE,
-            )
-            .unwrap();
+        let second_request = RegisterViewRequest {
+            scope: RegisterScope::Account(account),
+            cursor: Some(cursor.clone()),
+            page_size: MAX_REGISTER_PAGE_SIZE,
+            ..base
+        };
+        let second = store.register_page(&second_request).unwrap();
         assert_eq!(second.rows.len(), MAX_REGISTER_PAGE_SIZE);
-        assert!(second.rows.iter().all(|row| {
-            (row.date.as_str(), row.transaction_id.as_str())
-                < (
-                    cursor.transaction_date.as_str(),
-                    cursor.transaction_id.as_str(),
-                )
-        }));
+        let cursor_key = (
+            cursor.date.to_string(),
+            cursor.created_at.clone(),
+            cursor.transaction_id.to_string(),
+        );
+        assert!(second.rows.iter().all(|row| (
+            row.date.clone(),
+            row.created_at.clone(),
+            row.transaction_id.clone()
+        ) < cursor_key));
         assert!(first.rows.iter().all(|row| {
             !second
                 .rows

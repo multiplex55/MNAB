@@ -74,7 +74,7 @@ pub fn submit_command<S: CommandSubmitter>(
 
 #[must_use]
 pub fn invalidations_for(c: &FinancialCommand) -> ViewInvalidations {
-    match c {
+    let mut invalidations: ViewInvalidations = match c {
         FinancialCommand::Inbox(_) => [
             V::Inbox,
             V::Accounts,
@@ -146,7 +146,11 @@ pub fn invalidations_for(c: &FinancialCommand) -> ViewInvalidations {
         ]
         .into_iter()
         .collect(),
-    }
+    };
+    // Every ledger or label mutation can change membership, amounts, or a
+    // materialized label in the cross-account projection.
+    invalidations.insert(V::AllTransactions);
+    invalidations
 }
 
 #[cfg(test)]

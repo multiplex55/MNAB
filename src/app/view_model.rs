@@ -5,7 +5,6 @@
 //! at the query boundary which constructs these values.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 
 use time::Date;
 
@@ -178,30 +177,75 @@ pub struct CategoryRowView {
     pub inspector: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+/// The identity of a register.  This is the only register scope used by the
+/// application, worker protocol, storage query, and widgets.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RegisterScope {
+    Account(AccountId),
+    AllTransactions,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RegisterCursor {
     pub date: Date,
+    pub created_at: String,
     pub transaction_id: TransactionId,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RegisterFilterView {
-    pub text: String,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegisterSortDirection {
+    Ascending,
+    Descending,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegisterSortField {
+    Date,
+}
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RegisterFilter {
+    pub search: String,
     pub from: Option<Date>,
     pub through: Option<Date>,
-    pub category_ids: BTreeSet<CategoryId>,
-    pub payee_ids: BTreeSet<PayeeId>,
-    pub cleared_only: bool,
+    pub category_ids: Vec<CategoryId>,
+    pub payee_ids: Vec<PayeeId>,
+    pub cleared_state: Option<String>,
+    pub approval_state: Option<String>,
+    pub minimum_amount_cents: Option<i64>,
+    pub maximum_amount_cents: Option<i64>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegisterRequest {
+    pub budget_id: BudgetId,
+    pub scope: RegisterScope,
+    pub filter: RegisterFilter,
+    pub sort_field: RegisterSortField,
+    pub sort_direction: RegisterSortDirection,
+    pub page_size: usize,
+    pub cursor: Option<RegisterCursor>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegisterRowView {
     pub transaction_id: TransactionId,
+    pub account_id: AccountId,
+    pub account_name: String,
     pub date: Date,
-    pub payee: String,
-    pub category: String,
+    pub created_at: String,
+    pub payee_id: Option<PayeeId>,
+    pub payee_name: String,
+    pub category_id: Option<CategoryId>,
+    pub category_name: String,
     pub memo: Option<String>,
-    pub amount_cents: i64,
-    pub running_balance_cents: i64,
+    pub inflow_cents: i64,
+    pub outflow_cents: i64,
+    pub cleared_state: String,
+    pub approved: bool,
     pub reconciled: bool,
+    pub transfer_id: Option<String>,
+    pub is_transfer: bool,
+    pub split_count: u32,
+    pub import_batch_id: Option<ImportBatchId>,
+    pub import_source: Option<String>,
+    pub review_state: Option<String>,
+    pub running_balance_cents: Option<i64>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReconciliationSeparatorView {
@@ -212,32 +256,34 @@ pub struct ReconciliationSeparatorView {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegisterPageView {
     pub version: ViewVersion,
-    pub account_id: AccountId,
-    pub offset: u64,
+    pub scope: RegisterScope,
+    pub request: RegisterRequest,
     pub cursor: Option<RegisterCursor>,
     pub next_cursor: Option<RegisterCursor>,
     pub total_matches: u64,
-    pub running_balance_anchor_cents: i64,
+    pub has_more: bool,
     pub rows: Vec<RegisterRowView>,
     pub separators: Vec<ReconciliationSeparatorView>,
-    pub filter: RegisterFilterView,
 }
 
 pub const MAX_REGISTER_PAGE_SIZE: usize = 200;
 impl RegisterPageView {
     /// Enforces deterministic `(date, id)` order and the hard UI page bound.
     pub fn normalize(&mut self) {
-        self.rows.sort_by_key(|row| (row.date, row.transaction_id));
+        self.rows
+            .sort_by_key(|row| (row.date, row.created_at.clone(), row.transaction_id));
         self.rows.truncate(MAX_REGISTER_PAGE_SIZE);
         self.next_cursor = self.rows.last().map(|row| RegisterCursor {
             date: row.date,
+            created_at: row.created_at.clone(),
             transaction_id: row.transaction_id,
         });
     }
     pub fn continues_after(&self, cursor: RegisterCursor) -> bool {
-        self.rows
-            .first()
-            .is_none_or(|row| (row.date, row.transaction_id) > (cursor.date, cursor.transaction_id))
+        self.rows.first().is_none_or(|row| {
+            (row.date, &row.created_at, row.transaction_id)
+                > (cursor.date, &cursor.created_at, cursor.transaction_id)
+        })
     }
 }
 
@@ -407,34 +453,51 @@ mod tests {
     fn row(id: TransactionId, date: Date) -> RegisterRowView {
         RegisterRowView {
             transaction_id: id,
+            account_id: AccountId::new(),
+            account_name: "Account".into(),
             date,
-            payee: String::new(),
-            category: String::new(),
+            created_at: "2026-08-04T00:00:00Z".into(),
+            payee_id: None,
+            payee_name: String::new(),
+            category_id: None,
+            category_name: String::new(),
             memo: None,
-            amount_cents: 0,
-            running_balance_cents: 0,
+            inflow_cents: 0,
+            outflow_cents: 0,
+            cleared_state: "uncleared".into(),
+            approved: false,
             reconciled: false,
+            transfer_id: None,
+            is_transfer: false,
+            split_count: 0,
+            import_batch_id: None,
+            import_source: None,
+            review_state: None,
+            running_balance_cents: Some(0),
         }
     }
     fn page(rows: Vec<RegisterRowView>) -> RegisterPageView {
+        let budget_id = BudgetId::new();
+        let account = AccountId::new();
+        let request = RegisterRequest {
+            budget_id,
+            scope: RegisterScope::Account(account),
+            filter: RegisterFilter::default(),
+            sort_field: RegisterSortField::Date,
+            sort_direction: RegisterSortDirection::Ascending,
+            page_size: 200,
+            cursor: None,
+        };
         RegisterPageView {
             version: ViewVersion::default(),
-            account_id: AccountId::new(),
-            offset: 0,
+            scope: request.scope,
+            request,
             cursor: None,
             next_cursor: None,
             total_matches: rows.len() as u64,
-            running_balance_anchor_cents: 0,
+            has_more: false,
             rows,
             separators: vec![],
-            filter: RegisterFilterView {
-                text: String::new(),
-                from: None,
-                through: None,
-                category_ids: BTreeSet::new(),
-                payee_ids: BTreeSet::new(),
-                cleared_only: false,
-            },
         }
     }
     #[test]
@@ -451,11 +514,13 @@ mod tests {
             p.rows.iter().map(|r| r.transaction_id).collect::<Vec<_>>(),
             vec![low, high]
         );
-        let continuation = page(vec![row(high, date!(2026 - 08 - 04))]);
-        assert!(continuation.continues_after(RegisterCursor {
-            date: date!(2026 - 08 - 04),
-            transaction_id: low
-        }));
+        assert!(
+            page(vec![row(high, date!(2026 - 08 - 04))]).continues_after(RegisterCursor {
+                date: date!(2026 - 08 - 04),
+                created_at: "2026-08-04T00:00:00Z".into(),
+                transaction_id: low
+            })
+        );
     }
     #[test]
     fn page_size_is_bounded() {

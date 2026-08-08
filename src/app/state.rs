@@ -69,6 +69,88 @@ impl<T> ViewQueryState<T> {
     }
 }
 
+/// Correlated register paging state. A failed refresh deliberately leaves
+/// `last_successful` intact so the ledger never disappears behind an error.
+#[derive(Clone, Debug, Default)]
+pub struct RegisterQueryState {
+    pub last_successful: Option<crate::app::view_model::RegisterPageView>,
+    pub active_request: Option<crate::app::view_model::RegisterRequest>,
+    pub refresh_active: bool,
+    pub next_page_active: bool,
+    pub latest_request_id: Option<RequestId>,
+    pub latest_generation: Generation,
+    pub safe_failure: Option<String>,
+}
+impl RegisterQueryState {
+    pub fn begin(
+        &mut self,
+        id: RequestId,
+        generation: Generation,
+        request: crate::app::view_model::RegisterRequest,
+        next_page: bool,
+    ) {
+        self.latest_request_id = Some(id);
+        self.latest_generation = generation;
+        self.active_request = Some(request);
+        self.next_page_active = next_page;
+        self.refresh_active = !next_page;
+        self.safe_failure = None;
+    }
+    pub fn accept(
+        &mut self,
+        id: RequestId,
+        generation: Generation,
+        page: crate::app::view_model::RegisterPageView,
+    ) -> bool {
+        if self.latest_request_id != Some(id)
+            || self.latest_generation != generation
+            || self.active_request.as_ref() != Some(&page.request)
+        {
+            return false;
+        }
+        if self.next_page_active {
+            let Some(current) = self.last_successful.as_mut() else {
+                return false;
+            };
+            if current.next_cursor != page.cursor {
+                return false;
+            }
+            let known = current
+                .rows
+                .iter()
+                .map(|r| r.transaction_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            if page.rows.iter().any(|r| known.contains(&r.transaction_id)) {
+                return false;
+            }
+            current.rows.extend(page.rows);
+            current.next_cursor = page.next_cursor;
+            current.has_more = page.has_more;
+            current.total_matches = page.total_matches;
+        } else {
+            self.last_successful = Some(page);
+        }
+        self.refresh_active = false;
+        self.next_page_active = false;
+        self.safe_failure = None;
+        true
+    }
+    pub fn fail(
+        &mut self,
+        id: RequestId,
+        generation: Generation,
+        error: impl Into<String>,
+    ) -> bool {
+        if self.latest_request_id != Some(id) || self.latest_generation != generation {
+            return false;
+        }
+        self.refresh_active = false;
+        self.next_page_active = false;
+        self.safe_failure = Some(error.into());
+        true
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AccountSummary {
     pub id: AccountId,
@@ -271,7 +353,7 @@ pub struct AppState {
     pub inspector_width: f32,
     pub accounts: Vec<AccountSummary>,
     pub account_groups: Vec<crate::domain::AccountGroup>,
-    pub register_query: ViewQueryState<usize>,
+    pub register_query: RegisterQueryState,
     pub search: String,
     pub search_id: Id,
     pub palette: crate::app::palette::PaletteState,
@@ -306,7 +388,7 @@ impl Default for AppState {
             inspector_width: 280.0,
             accounts: vec![],
             account_groups: vec![],
-            register_query: ViewQueryState::default(),
+            register_query: RegisterQueryState::default(),
             search: String::new(),
             search_id: Id::new("global-search"),
             palette: crate::app::palette::PaletteState::default(),
@@ -330,6 +412,7 @@ impl AppState {
         self.operations.clear();
         self.latest_by_purpose.clear();
         self.purpose_by_request.clear();
+        self.register_query = RegisterQueryState::default();
     }
 
     pub fn open_dialog(&mut self, dialog: Dialog, initiating: Id, fallback: Id) {

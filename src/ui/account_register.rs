@@ -82,14 +82,14 @@ pub enum RegisterAction {
 /// Render an immutable query snapshot and emit only stable-ID actions.
 pub fn show(ui: &mut egui::Ui, page: &RegisterPageView, actions: &mut Vec<RegisterAction>) {
     if ui.button("New transaction").clicked() {
-        actions.push(RegisterAction::BeginCreate {
-            account_id: page.account_id,
-        });
+        if let crate::app::view_model::RegisterScope::Account(account_id) = page.scope {
+            actions.push(RegisterAction::BeginCreate { account_id });
+        }
     }
     // `show_rows` invokes the closure only for the visible range. A ten-year
     // register therefore creates the same number of widgets as a short one.
     egui::ScrollArea::vertical().show_rows(ui, 24.0, page.rows.len(), |ui, range| {
-        egui::Grid::new(("register", page.account_id))
+        egui::Grid::new(("register", page.scope))
             .striped(true)
             .show(ui, |ui| {
                 for heading in [
@@ -103,20 +103,15 @@ pub fn show(ui: &mut egui::Ui, page: &RegisterPageView, actions: &mut Vec<Regist
                     if response.clicked() {
                         actions.push(RegisterAction::Select(row.transaction_id));
                     }
-                    ui.label(&row.payee);
-                    ui.label(&row.category);
+                    ui.label(&row.payee_name);
+                    ui.label(&row.category_name);
                     ui.label(row.memo.as_deref().unwrap_or_default());
-                    ui.label(if row.amount_cents < 0 {
-                        (-row.amount_cents).to_string()
-                    } else {
-                        String::new()
-                    });
-                    ui.label(if row.amount_cents >= 0 {
-                        row.amount_cents.to_string()
-                    } else {
-                        String::new()
-                    });
-                    ui.label(row.running_balance_cents.to_string());
+                    ui.label(row.outflow_cents.to_string());
+                    ui.label(row.inflow_cents.to_string());
+                    ui.label(
+                        row.running_balance_cents
+                            .map_or_else(String::new, |x| x.to_string()),
+                    );
                     ui.end_row();
                 }
             });
