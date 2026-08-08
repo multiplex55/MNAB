@@ -43,6 +43,18 @@ impl CategoryUsage {
             || self.import_mappings
             || self.reconciliation_history
     }
+
+    /// Number of distinct historical/reference sources using this category.
+    #[must_use]
+    pub const fn source_count(self) -> usize {
+        self.transactions as usize
+            + self.splits as usize
+            + self.assignments as usize
+            + self.targets as usize
+            + self.schedules as usize
+            + self.import_mappings as usize
+            + self.reconciliation_history as usize
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -65,6 +77,28 @@ pub enum CategoryCommandError {
 }
 
 impl CategoryCatalog {
+    /// Archives `source` and returns the ID all persistent references must be
+    /// retargeted to. Persistence performs those updates atomically; the source
+    /// row remains so snapshots and audit history can still resolve it.
+    pub fn merge(
+        &mut self,
+        source: CategoryId,
+        destination: CategoryId,
+    ) -> Result<CategoryId, CategoryCommandError> {
+        if source == destination
+            || !self
+                .categories
+                .iter()
+                .any(|category| category.id == destination)
+        {
+            return Err(CategoryCommandError::NotFound);
+        }
+        if self.is_managed_payment_category(source) {
+            return Err(CategoryCommandError::Managed);
+        }
+        self.archive(source)?;
+        Ok(destination)
+    }
     #[must_use]
     pub fn is_managed_payment_category(&self, id: CategoryId) -> bool {
         self.managed_payment_categories
@@ -344,5 +378,30 @@ mod tests {
         );
         catalog.delete_if_unused(unused).unwrap();
         assert!(!catalog.categories.iter().any(|v| v.id == unused));
+    }
+
+    #[test]
+    fn merge_archives_source_and_preserves_destination() {
+        let mut catalog = CategoryCatalog::default();
+        let group = catalog.add_group("Living").unwrap();
+        let old = catalog.add_category(group, "Old rent").unwrap();
+        let current = catalog.add_category(group, "Rent").unwrap();
+        assert_eq!(catalog.merge(old, current), Ok(current));
+        assert!(
+            catalog
+                .categories
+                .iter()
+                .find(|c| c.id == old)
+                .unwrap()
+                .archived
+        );
+        assert!(
+            !catalog
+                .categories
+                .iter()
+                .find(|c| c.id == current)
+                .unwrap()
+                .archived
+        );
     }
 }

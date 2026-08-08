@@ -32,20 +32,28 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, _commands: &mut ActionCollector
                 [
                     "Spending by category",
                     "Spending by payee",
-                    "Monthly spending trend",
-                    "Income vs expense",
+                    "Income by category",
+                    "Cash flow by account",
+                    "Balance history",
                     "Net worth",
-                    "Budget progress",
+                    "Transfers between accounts",
+                    "Goal progress and activity",
+                    "Uncategorized activity",
+                    "Credit-card spending and payments",
                 ][controls.kind],
             )
             .show_ui(ui, |ui| {
                 for (index, label) in [
                     "Spending by category",
                     "Spending by payee",
-                    "Monthly spending trend",
-                    "Income vs expense",
+                    "Income by category",
+                    "Cash flow by account",
+                    "Balance history",
                     "Net worth",
-                    "Budget progress",
+                    "Transfers between accounts",
+                    "Goal progress and activity",
+                    "Uncategorized activity",
+                    "Credit-card spending and payments",
                 ]
                 .iter()
                 .enumerate()
