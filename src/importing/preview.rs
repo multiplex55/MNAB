@@ -21,12 +21,36 @@ pub struct ImportProposal {
     pub warnings: Vec<String>,
     pub match_candidates: Vec<TransactionId>,
     pub selected_destination_account: Option<AccountId>,
+    pub auto_categorized: bool,
+    pub matched_merchant_rule: Option<String>,
 }
 impl ImportProposal {
     #[must_use]
     pub fn included_by_default(&self) -> bool {
         self.duplicate_state != CandidateClassification::ExactDuplicate
             && self.decision != ReviewDecision::Ignore
+    }
+    /// Applies only a high-confidence exact-normalized match. The review row
+    /// intentionally remains pending/unapproved and can still be overridden.
+    pub fn apply_merchant_rule(
+        &mut self,
+        book: &crate::service::merchant_rule_service::MerchantRuleBook,
+        account: AccountId,
+    ) -> bool {
+        let merchant = self
+            .proposed_payee
+            .as_deref()
+            .or(self.source.payee.as_deref())
+            .unwrap_or("");
+        let Some(rule) = book.match_high_confidence(merchant, account) else {
+            return false;
+        };
+        self.proposed_category = Some(rule.category_id.to_string());
+        self.selected_destination_account = Some(account);
+        self.auto_categorized = true;
+        self.matched_merchant_rule = Some(rule.normalized_merchant.clone());
+        self.decision = ReviewDecision::Pending;
+        true
     }
 }
 
@@ -50,6 +74,7 @@ impl ImportReviewWorkspace {
     }
     pub fn override_category(candidate: &mut ImportProposal, category: impl Into<String>) {
         candidate.proposed_category = Some(category.into());
+        candidate.auto_categorized = false;
     }
     pub fn override_memo(candidate: &mut ImportProposal, memo: impl Into<String>) {
         candidate.proposed_memo = Some(memo.into());

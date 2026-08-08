@@ -65,7 +65,12 @@ impl AccountDialogForm {
 }
 
 pub fn show(ui: &mut egui::Ui, state: &AppState, commands: &mut ActionCollector) {
-    ui.heading("All Accounts");
+    ui.heading("All Transactions");
+    ui.small("Filter by account/group, date, payee, category, amount, approval, clearance, import source, transfer, uncategorized, or reconciliation state.");
+    crate::ui::workspaces::register::show_register_header(
+        ui,
+        crate::ui::workspaces::register::ALL_TRANSACTION_COLUMNS,
+    );
     crate::ui::workspaces::register::load_state(
         ui,
         state,
@@ -73,6 +78,24 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, commands: &mut ActionCollector)
         "Add a transaction or import a statement to get started.",
         commands,
     );
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AllTransactionsFilter {
+    pub account: Option<AccountId>,
+    pub account_group: Option<crate::domain::AccountGroupId>,
+    pub date_from: Option<TransactionDate>,
+    pub date_to: Option<TransactionDate>,
+    pub payee: Option<String>,
+    pub category: Option<crate::domain::CategoryId>,
+    pub amount_min: Option<Money>,
+    pub amount_max: Option<Money>,
+    pub approval: Option<crate::domain::Approval>,
+    pub clearance: Option<crate::domain::Clearance>,
+    pub import_source: Option<String>,
+    pub transfer_only: bool,
+    pub uncategorized: bool,
+    pub reconciled: Option<bool>,
 }
 
 #[cfg(test)]

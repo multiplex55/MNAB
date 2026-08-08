@@ -6,6 +6,7 @@ pub mod backup_service;
 pub mod budget_service;
 pub mod category_service;
 pub mod import_service;
+pub mod merchant_rule_service;
 pub mod onboarding_service;
 pub mod payee_service;
 pub mod reconciliation_service;
