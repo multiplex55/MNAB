@@ -355,6 +355,22 @@ impl ApplicationRuntime {
             self.fail_editor("Open a budget before saving.");
             return;
         };
+        if let EditorState::CreatingTransaction(editor) | EditorState::EditingTransaction(editor) =
+            &mut self.view.editor
+        {
+            match editor.build_transaction(budget_id) {
+                Ok(_) => editor.errors = Default::default(),
+                Err(errors) => {
+                    editor.errors = errors;
+                    editor.metadata.commit_state = crate::app::state::CommitState::Failed;
+                    editor.metadata.pending_command_id = None;
+                    // Transaction validation is intentionally not copied into the generic
+                    // string bag: the register renders the structured field errors.
+                    editor.metadata.validation_errors.clear();
+                    return;
+                }
+            }
+        }
         let command = match &self.view.editor {
             EditorState::CreatingAccount(editor) | EditorState::EditingAccount(editor) => editor
                 .form
@@ -381,51 +397,17 @@ impl ApplicationRuntime {
                 .map_err(str::to_owned),
             EditorState::CreatingTransaction(editor) | EditorState::EditingTransaction(editor) => {
                 editor
-                    .draft
-                    .validate()
-                    .map_err(|e| format!("{e:?}"))
-                    .and_then(|(date, amount, splits)| {
-                        let account_id = editor
-                            .draft
-                            .account_id
-                            .ok_or_else(|| "Choose an account.".to_owned())?;
-                        let body = if splits.is_empty() {
-                            editor.draft.category_id.map_or(
-                                crate::domain::TransactionBody::OpeningBalance {
-                                    category_id: None,
-                                },
-                                crate::domain::TransactionBody::categorized,
-                            )
-                        } else {
-                            crate::domain::TransactionBody::split(amount, splits)
-                                .map_err(|e| e.to_string())?
-                        };
-                        Ok(FinancialCommand::Transaction(TransactionCommand::Save(
-                            crate::domain::Transaction {
-                                id: editor
-                                    .transaction_id
-                                    .unwrap_or_else(crate::domain::TransactionId::new),
-                                budget_id,
-                                account_id,
-                                date,
-                                payee_id: editor.draft.payee_id,
-                                amount,
-                                memo: (!editor.draft.memo.trim().is_empty())
-                                    .then(|| editor.draft.memo.trim().to_owned()),
-                                clearance: editor
-                                    .draft
-                                    .clearance
-                                    .unwrap_or(crate::domain::Clearance::Uncleared),
-                                approval: if editor.draft.approved {
-                                    crate::domain::Approval::Approved
-                                } else {
-                                    crate::domain::Approval::Unapproved
-                                },
-                                body,
-                                archived: false,
-                                voided: false,
-                            },
-                        )))
+                    .build_transaction(budget_id)
+                    .map(|transaction| {
+                        FinancialCommand::Transaction(TransactionCommand::Save(transaction))
+                    })
+                    .map_err(|errors| {
+                        errors
+                            .form
+                            .or(errors.amount)
+                            .or(errors.date)
+                            .or(errors.account)
+                            .unwrap_or_else(|| "Transaction has invalid fields".into())
                     })
             }
             EditorState::CreatingTransfer(editor) => editor
@@ -1198,17 +1180,13 @@ impl ApplicationRuntime {
                     .last_successful
                     .as_ref()
                     .and_then(|p| p.rows.iter().find(|r| r.transaction_id == id));
-                if let Some(draft) = row.and_then(crate::ui::workspaces::register::editor_from_row)
-                {
-                    self.view.editor = crate::app::state::EditorState::EditingTransaction(
-                        crate::app::state::InlineTransactionEditorState {
-                            transaction_id: Some(id),
-                            draft,
-                            metadata: crate::app::state::EditorMetadata::new(egui::Id::new(
-                                "register",
-                            )),
-                        },
-                    );
+                if let Some(draft) = row.and_then(|row| {
+                    crate::ui::workspaces::register::editor_from_row(
+                        row,
+                        crate::app::state::EditorMetadata::new(egui::Id::new("register")),
+                    )
+                }) {
+                    self.view.editor = crate::app::state::EditorState::EditingTransaction(draft);
                 } else {
                     self.view
                         .notifications
@@ -1231,8 +1209,7 @@ impl ApplicationRuntime {
             navigation::Workspace,
             state::{
                 AccountEditorState, Dialog, EditorMetadata, EditorState, GroupEditorState,
-                ImportEditorState, InlineTransactionEditorState, ReconciliationEditorState,
-                TransferEditorState,
+                ImportEditorState, ReconciliationEditorState, TransferEditorState,
             },
         };
         use AppCommand::*;
@@ -1462,24 +1439,22 @@ impl ApplicationRuntime {
                 return;
             }
             AddTransaction if self.view.selected_account.is_some() => {
-                self.view.editor = EditorState::CreatingTransaction(InlineTransactionEditorState {
-                    transaction_id: None,
-                    draft: crate::ui::workspaces::register::TransactionEditor {
-                        account_id: self.view.selected_account,
-                        ..Default::default()
-                    },
-                    metadata: EditorMetadata::new(egui::Id::new("register")),
-                });
+                self.view.editor = EditorState::CreatingTransaction(
+                    crate::app::transaction_editor::TransactionEditorState::new(
+                        self.view.selected_account,
+                        EditorMetadata::new(egui::Id::new("register")),
+                    ),
+                );
                 return;
             }
             EditTransaction if let Some(id) = self.view.selected_transaction => {
-                self.view.editor = EditorState::EditingTransaction(InlineTransactionEditorState {
-                    transaction_id: Some(id),
-                    draft: crate::ui::workspaces::register::TransactionEditor {
-                        account_id: self.view.selected_account,
-                        ..Default::default()
-                    },
-                    metadata: EditorMetadata::new(egui::Id::new("register")),
+                self.view.editor = EditorState::EditingTransaction({
+                    let mut e = crate::app::transaction_editor::TransactionEditorState::new(
+                        self.view.selected_account,
+                        EditorMetadata::new(egui::Id::new("register")),
+                    );
+                    e.transaction_id = Some(id);
+                    e
                 });
                 return;
             }
@@ -1512,14 +1487,12 @@ impl ApplicationRuntime {
                 return;
             }
             ContextualNew if self.view.selected_account.is_some() => {
-                self.view.editor = EditorState::CreatingTransaction(InlineTransactionEditorState {
-                    transaction_id: None,
-                    draft: crate::ui::workspaces::register::TransactionEditor {
-                        account_id: self.view.selected_account,
-                        ..Default::default()
-                    },
-                    metadata: EditorMetadata::new(egui::Id::new("register")),
-                });
+                self.view.editor = EditorState::CreatingTransaction(
+                    crate::app::transaction_editor::TransactionEditorState::new(
+                        self.view.selected_account,
+                        EditorMetadata::new(egui::Id::new("register")),
+                    ),
+                );
                 return;
             }
             Commit if self.view.editor.is_active() => {

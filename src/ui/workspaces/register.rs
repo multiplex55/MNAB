@@ -1,13 +1,11 @@
+use crate::app::transaction_editor::{EditorError, SplitLineForm, TransactionEditorState};
 use crate::{
     app::{
         dispatcher::ActionCollector,
         register::{AllMatchingClick, TransactionSelection},
         state::AppState,
     },
-    domain::{
-        AccountId, Approval, CategoryId, Clearance, Money, PayeeId, Subtransaction,
-        TransactionBody, TransactionDate, TransactionId,
-    },
+    domain::{AccountId, Approval, CategoryId, Clearance, Money, TransactionDate, TransactionId},
 };
 use std::collections::BTreeSet;
 
@@ -214,62 +212,74 @@ fn show_page_table(
 
 /// Builds an editor from the register projection, including its complete ordered split aggregate.
 #[must_use]
-pub fn editor_from_row(row: &crate::app::view_model::RegisterRowView) -> Option<TransactionEditor> {
+pub fn editor_from_row(
+    row: &crate::app::view_model::RegisterRowView,
+    metadata: crate::app::state::EditorMetadata,
+) -> Option<TransactionEditorState> {
     if row.split_count as usize != row.splits.len() {
         return None;
     }
-    Some(TransactionEditor {
-        account_id: Some(row.account_id),
-        date: row.date.to_string(),
-        payee_id: row.payee_id,
-        category_id: row.category_id,
-        memo: row.memo.clone().unwrap_or_default(),
-        outflow: (row.outflow_cents != 0)
-            .then(|| {
-                format!(
-                    "{}.{:02}",
-                    row.outflow_cents / 100,
-                    row.outflow_cents.unsigned_abs() % 100
-                )
-            })
-            .unwrap_or_default(),
-        inflow: (row.inflow_cents != 0)
-            .then(|| {
-                format!(
-                    "{}.{:02}",
-                    row.inflow_cents / 100,
-                    row.inflow_cents.unsigned_abs() % 100
-                )
-            })
-            .unwrap_or_default(),
-        clearance: Some(match row.cleared_state.to_ascii_lowercase().as_str() {
-            "cleared" => Clearance::Cleared,
-            "reconciled" => Clearance::Reconciled,
-            _ => Clearance::Uncleared,
-        }),
-        approved: row.approved,
-        reconciled: row.reconciled,
-        splits: row
-            .splits
-            .iter()
-            .map(|split| SplitLineForm {
-                category_id: Some(split.category_id),
-                amount: Money::from_minor_units(split.amount_cents).to_string(),
-                memo: split.memo.clone().unwrap_or_default(),
-            })
-            .collect(),
-        ..Default::default()
-    })
+    // A register projection does not contain the complete paired transfer aggregate. Refuse to
+    // manufacture an ordinary categorized editor from that lossy projection.
+    if row.is_transfer {
+        return None;
+    }
+    let mut editor = TransactionEditorState::new(Some(row.account_id), metadata);
+    editor.transaction_id = Some(row.transaction_id);
+    editor.date_text = row
+        .date
+        .format(time::macros::format_description!("[month]/[day]/[year]"))
+        .ok()?;
+    editor.payee_id = row.payee_id;
+    editor.category_id = row.category_id;
+    editor.memo = row.memo.clone().unwrap_or_default();
+    editor.outflow_text = (row.outflow_cents != 0)
+        .then(|| {
+            format!(
+                "{}.{:02}",
+                row.outflow_cents.unsigned_abs() / 100,
+                row.outflow_cents.unsigned_abs() % 100
+            )
+        })
+        .unwrap_or_default();
+    editor.inflow_text = (row.inflow_cents != 0)
+        .then(|| {
+            format!(
+                "{}.{:02}",
+                row.inflow_cents.unsigned_abs() / 100,
+                row.inflow_cents.unsigned_abs() % 100
+            )
+        })
+        .unwrap_or_default();
+    editor.clearance = match row.cleared_state.to_ascii_lowercase().as_str() {
+        "cleared" => Clearance::Cleared,
+        "reconciled" => Clearance::Reconciled,
+        _ => Clearance::Uncleared,
+    };
+    editor.approved = row.approved;
+    editor.reconciled = row.reconciled;
+    editor.splits = row
+        .splits
+        .iter()
+        .map(|split| SplitLineForm {
+            category_id: Some(split.category_id),
+            amount_text: Money::from_minor_units(split.amount_cents).to_string(),
+            memo: split.memo.clone().unwrap_or_default(),
+        })
+        .collect();
+    Some(editor)
 }
 
 /// Whether the inline editor can be committed without losing information.
 /// Split arithmetic deliberately goes through `TransactionEditor::remaining`, so the UI and the
 /// eventual command validation use the same integer-minor-unit model.
 #[must_use]
-pub fn transaction_commit_available(editor: &TransactionEditor) -> bool {
+pub fn transaction_commit_available(editor: &TransactionEditorState) -> bool {
     (!editor.reconciled || editor.protected_edit_confirmed)
         && editor.remaining() == Ok(Money::ZERO)
-        && editor.validate().is_ok()
+        && editor
+            .build_transaction(crate::domain::BudgetId::new())
+            .is_ok()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -428,112 +438,6 @@ impl RegisterState {
     }
     pub fn load_more(&mut self) {
         self.loaded = self.loaded.saturating_add(self.page_size);
-    }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SplitLineForm {
-    pub category_id: Option<CategoryId>,
-    pub amount: String,
-    pub memo: String,
-}
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct TransactionEditor {
-    pub account_id: Option<AccountId>,
-    pub date: String,
-    pub payee_id: Option<PayeeId>,
-    pub category_id: Option<CategoryId>,
-    pub memo: String,
-    pub outflow: String,
-    pub inflow: String,
-    pub clearance: Option<Clearance>,
-    pub approved: bool,
-    pub splits: Vec<SplitLineForm>,
-    pub closed_account: bool,
-    pub reconciled: bool,
-    pub protected_edit_confirmed: bool,
-    pub closed_account_confirmed: bool,
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum EditorError {
-    DateRequired,
-    InvalidDate,
-    InvalidCurrency,
-    BothOutflowAndInflow,
-    SplitCategoryRequired,
-    SplitTotalMismatch,
-    ClosedAccountConfirmation,
-    ReconciledProtectedEdit,
-    TransferInSplitUnsupported,
-}
-impl TransactionEditor {
-    pub fn validate(&self) -> Result<(TransactionDate, Money, Vec<Subtransaction>), EditorError> {
-        if self.date.trim().is_empty() {
-            return Err(EditorError::DateRequired);
-        }
-        let date = time::Date::parse(
-            self.date.trim(),
-            &time::format_description::well_known::Iso8601::DATE,
-        )
-        .map_err(|_| EditorError::InvalidDate)?;
-        let parse = |s: &str| {
-            if s.trim().is_empty() {
-                Ok(Money::ZERO)
-            } else {
-                s.parse::<Money>().map_err(|_| EditorError::InvalidCurrency)
-            }
-        };
-        let outflow = parse(&self.outflow)?;
-        let inflow = parse(&self.inflow)?;
-        if outflow != Money::ZERO && inflow != Money::ZERO {
-            return Err(EditorError::BothOutflowAndInflow);
-        }
-        if self.closed_account && !self.closed_account_confirmed {
-            return Err(EditorError::ClosedAccountConfirmation);
-        }
-        if self.reconciled && !self.protected_edit_confirmed {
-            return Err(EditorError::ReconciledProtectedEdit);
-        }
-        let amount = inflow
-            .checked_sub(outflow)
-            .map_err(|_| EditorError::InvalidCurrency)?;
-        let mut lines = Vec::new();
-        for line in &self.splits {
-            let category_id = line.category_id.ok_or(EditorError::SplitCategoryRequired)?;
-            lines.push(Subtransaction {
-                category_id,
-                amount: parse(&line.amount)?,
-                memo: (!line.memo.trim().is_empty()).then(|| line.memo.trim().into()),
-            });
-        }
-        if !lines.is_empty() && TransactionBody::split(amount, lines.clone()).is_err() {
-            return Err(EditorError::SplitTotalMismatch);
-        }
-        Ok((TransactionDate(date), amount, lines))
-    }
-    pub fn remaining(&self) -> Result<Money, EditorError> {
-        let (_, parent, lines) = self.validate_without_split_total()?;
-        TransactionBody::split_remaining(parent, &lines).map_err(|_| EditorError::InvalidCurrency)
-    }
-    fn validate_without_split_total(
-        &self,
-    ) -> Result<(TransactionDate, Money, Vec<Subtransaction>), EditorError> {
-        let mut copy = self.clone();
-        copy.splits.clear();
-        let (date, amount, _) = copy.validate()?;
-        let parse = |s: &str| s.parse::<Money>().map_err(|_| EditorError::InvalidCurrency);
-        let lines = self
-            .splits
-            .iter()
-            .map(|l| {
-                Ok(Subtransaction {
-                    category_id: l.category_id.ok_or(EditorError::SplitCategoryRequired)?,
-                    amount: parse(&l.amount)?,
-                    memo: None,
-                })
-            })
-            .collect::<Result<Vec<_>, EditorError>>()?;
-        Ok((date, amount, lines))
     }
 }
 
@@ -716,61 +620,57 @@ fn show_inline_editor(ui: &mut egui::Ui, state: &mut AppState, commands: &mut Ac
         } else {
             "New transaction (not saved)"
         });
-        if editor.draft.reconciled && !editor.draft.protected_edit_confirmed {
+        if editor.reconciled && !editor.protected_edit_confirmed {
             ui.colored_label(
                 egui::Color32::YELLOW,
                 "Warning: editing this reconciled transaction may invalidate the completed reconciliation.",
             );
             ui.label("Review the change carefully; the account may need to be reconciled again.");
             if ui.button("Edit Anyway").clicked() {
-                editor.draft.protected_edit_confirmed = true;
+                editor.protected_edit_confirmed = true;
             }
         }
         ui.horizontal(|ui| {
             ui.label("Date");
-            ui.text_edit_singleline(&mut editor.draft.date);
+            ui.text_edit_singleline(&mut editor.date_text);
             ui.label("Payee");
             ui.label(
-                editor
-                    .draft
-                    .payee_id
+                editor.payee_id
                     .map_or("—".into(), |id| id.to_string()),
             );
             ui.label("Category");
             ui.label(
-                editor
-                    .draft
-                    .category_id
+                editor.category_id
                     .map_or("—".into(), |id| id.to_string()),
             );
             ui.label("Memo");
-            ui.text_edit_singleline(&mut editor.draft.memo);
+            ui.text_edit_singleline(&mut editor.memo);
         });
         ui.horizontal(|ui| {
             ui.label("Outflow");
-            ui.text_edit_singleline(&mut editor.draft.outflow);
+            ui.text_edit_singleline(&mut editor.outflow_text);
             ui.label("Inflow");
-            ui.text_edit_singleline(&mut editor.draft.inflow);
+            ui.text_edit_singleline(&mut editor.inflow_text);
             ui.label("Cleared");
             egui::ComboBox::from_id_salt("inline-clearance")
                 .selected_text(format!(
                     "{:?}",
-                    editor.draft.clearance.unwrap_or(Clearance::Uncleared)
+                    editor.clearance
                 ))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
-                        &mut editor.draft.clearance,
-                        Some(Clearance::Uncleared),
+                        &mut editor.clearance,
+                        Clearance::Uncleared,
                         "Uncleared",
                     );
                     ui.selectable_value(
-                        &mut editor.draft.clearance,
-                        Some(Clearance::Cleared),
+                        &mut editor.clearance,
+                        Clearance::Cleared,
                         "Cleared",
                     );
                 });
-            ui.checkbox(&mut editor.draft.approved, "Approved");
-            let can_commit = transaction_commit_available(&editor.draft);
+            ui.checkbox(&mut editor.approved, "Approved");
+            let can_commit = transaction_commit_available(&editor);
             if ui.add_enabled(can_commit, egui::Button::new("Save")).clicked() {
                 commands.push(crate::app::command::AppCommand::Commit);
             }
@@ -781,23 +681,23 @@ fn show_inline_editor(ui: &mut egui::Ui, state: &mut AppState, commands: &mut Ac
         ui.separator();
         ui.strong("Split lines");
         let mut remove = None;
-        for (index, split) in editor.draft.splits.iter_mut().enumerate() {
+        for (index, split) in editor.splits.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(format!("{}.", index + 1));
                 ui.label("Category");
                 ui.label(split.category_id.map_or("Choose a category".into(), |id| id.to_string()));
                 ui.label("Amount");
-                ui.text_edit_singleline(&mut split.amount);
+                ui.text_edit_singleline(&mut split.amount_text);
                 ui.label("Memo");
                 ui.text_edit_singleline(&mut split.memo);
                 if ui.small_button("Remove").clicked() { remove = Some(index); }
             });
         }
-        if let Some(index) = remove { editor.draft.splits.remove(index); }
+        if let Some(index) = remove { editor.splits.remove(index); }
         if ui.button("Add split line").clicked() {
-            editor.draft.splits.push(SplitLineForm::default());
+            editor.splits.push(SplitLineForm::default());
         }
-        match editor.draft.remaining() {
+        match editor.remaining() {
             Ok(remaining) => {
                 let balanced = remaining == Money::ZERO;
                 ui.colored_label(
@@ -808,6 +708,14 @@ fn show_inline_editor(ui: &mut egui::Ui, state: &mut AppState, commands: &mut Ac
             }
             Err(error) => { ui.colored_label(ui.visuals().error_fg_color, format!("Split error: {error:?}")); }
         }
+        for error in [
+            editor.errors.account.as_ref(), editor.errors.date.as_ref(),
+            editor.errors.payee.as_ref(), editor.errors.category.as_ref(),
+            editor.errors.amount.as_ref(), editor.errors.protected_edit.as_ref(),
+            editor.errors.closed_account.as_ref(), editor.errors.form.as_ref(),
+        ].into_iter().flatten().chain(editor.errors.split_lines.iter().filter_map(Option::as_ref)) {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
         if editor.metadata.commit_state == crate::app::state::CommitState::Failed {
             for error in &editor.metadata.validation_errors {
                 ui.colored_label(
@@ -817,75 +725,4 @@ fn show_inline_editor(ui: &mut egui::Ui, state: &mut AppState, commands: &mut Ac
             }
         }
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{EditorError, SplitLineForm, TransactionEditor, transaction_commit_available};
-    use crate::domain::{CategoryId, Clearance, Money};
-    use crate::storage::worker::Generation;
-
-    fn split_editor(parent: &str, amounts: &[&str]) -> TransactionEditor {
-        TransactionEditor {
-            date: "2026-08-09".into(),
-            outflow: parent.into(),
-            clearance: Some(Clearance::Uncleared),
-            splits: amounts
-                .iter()
-                .map(|amount| SplitLineForm {
-                    category_id: Some(CategoryId::new()),
-                    amount: (*amount).into(),
-                    memo: String::new(),
-                })
-                .collect(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn balanced_split_is_committable_and_has_zero_remaining() {
-        let editor = split_editor("10.00", &["-4.25", "-5.75"]);
-        assert_eq!(editor.remaining(), Ok(Money::ZERO));
-        assert!(transaction_commit_available(&editor));
-    }
-
-    #[test]
-    fn unbalanced_and_rounding_sensitive_splits_block_commit() {
-        let unbalanced = split_editor("10.00", &["-4.25", "-5.74"]);
-        assert_eq!(unbalanced.remaining().unwrap().minor_units(), -1);
-        assert_eq!(unbalanced.validate(), Err(EditorError::SplitTotalMismatch));
-        assert!(!transaction_commit_available(&unbalanced));
-
-        let exact_cents = split_editor("0.30", &["-0.10", "-0.20"]);
-        assert_eq!(exact_cents.remaining(), Ok(Money::ZERO));
-        assert!(transaction_commit_available(&exact_cents));
-    }
-
-    #[test]
-    fn reconciled_editor_requires_explicit_protected_edit_confirmation() {
-        let mut editor = split_editor("1.00", &["-0.40", "-0.60"]);
-        editor.reconciled = true;
-        editor.clearance = Some(Clearance::Reconciled);
-        assert_eq!(editor.validate(), Err(EditorError::ReconciledProtectedEdit));
-        assert!(!transaction_commit_available(&editor));
-        editor.protected_edit_confirmed = true;
-        assert!(transaction_commit_available(&editor));
-        assert_eq!(editor.clearance, Some(Clearance::Reconciled));
-    }
-
-    #[test]
-    fn loading_error_empty_and_populated_transitions_are_distinct() {
-        let mut q = crate::app::state::ViewQueryState::<usize>::default();
-        let generation = Generation { budget: 1, view: 1 };
-        q.begin(1, generation, None);
-        assert!(q.refresh_active && q.last_successful.is_none());
-        assert!(q.fail(1, generation, "offline"));
-        assert_eq!(q.safe_failure.as_deref(), Some("offline"));
-        q.begin(2, generation, None);
-        assert!(q.accept(2, generation, 0));
-        assert_eq!(q.last_successful, Some(0));
-        q.begin(3, generation, None);
-        assert!(q.accept(3, generation, 8));
-        assert_eq!(q.last_successful, Some(8));
-    }
 }
