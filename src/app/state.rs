@@ -416,6 +416,7 @@ pub struct AppState {
     pub navigation: Navigation,
     pub selected_account: Option<AccountId>,
     pub selected_transaction: Option<TransactionId>,
+    pub register_selection: crate::app::register::TransactionSelection,
     pub register_focus: Option<Id>,
     pub editor: EditorState,
     pub selected_month: BudgetMonth,
@@ -467,6 +468,7 @@ impl Default for AppState {
             navigation: nav,
             selected_account: None,
             selected_transaction: None,
+            register_selection: Default::default(),
             register_focus: None,
             editor: EditorState::Idle,
             selected_month: BudgetMonth::new(now.year(), u8::from(now.month()))
@@ -543,6 +545,7 @@ impl AppState {
             _ => None,
         };
         self.selected_transaction = None;
+        self.register_selection.clear();
         self.editor = EditorState::Idle;
         self.generation.view = self.generation.view.saturating_add(1);
         let request =
@@ -558,6 +561,7 @@ impl AppState {
         self.database_path = None;
         self.selected_account = None;
         self.selected_transaction = None;
+        self.register_selection.clear();
         self.editor = EditorState::Idle;
         self.report_query = ReportQueryState::default();
         self.accounts.clear();

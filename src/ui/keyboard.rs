@@ -148,7 +148,7 @@ pub fn map(stroke: KeyStroke, scope: Scope) -> Option<AppCommand> {
         (K::Tab, false, false, _) => C::NextField,
         (K::Tab, false, true, _) => C::PreviousField,
         (K::Space, false, _, _) => C::ToggleSelection,
-        (K::F2, false, _, _) => C::Rename,
+        (K::F2, false, _, _) => C::Edit,
         (K::Digit1, true, false, false) => C::NavigateCategories,
         (K::Digit2, true, false, false) => C::NavigateReports,
         (K::Digit3, true, false, false) => C::NavigateAllTransactions,

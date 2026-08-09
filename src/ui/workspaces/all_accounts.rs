@@ -64,7 +64,7 @@ impl AccountDialogForm {
     }
 }
 
-pub fn show(ui: &mut egui::Ui, state: &AppState, commands: &mut ActionCollector) {
+pub fn show(ui: &mut egui::Ui, state: &mut AppState, commands: &mut ActionCollector) {
     ui.heading("All Transactions");
     ui.small("Filter by account/group, date, payee, category, amount, approval, clearance, import source, transfer, uncategorized, or reconciliation state.");
     crate::ui::workspaces::register::show_register_header(
