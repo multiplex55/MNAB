@@ -216,6 +216,8 @@ pub struct EditorMetadata {
     /// editor makes worker completion correlation explicit and prevents a
     /// second press of Commit from enqueueing duplicate work.
     pub pending_command_id: Option<u64>,
+    pub pending_request_id: Option<RequestId>,
+    pub pending_generation: Option<Generation>,
 }
 impl EditorMetadata {
     pub fn new(restore_focus: Id) -> Self {
@@ -225,6 +227,8 @@ impl EditorMetadata {
             commit_state: CommitState::Editing,
             restore_focus,
             pending_command_id: None,
+            pending_request_id: None,
+            pending_generation: None,
         }
     }
 
@@ -239,6 +243,8 @@ impl EditorMetadata {
         }
         self.commit_state = CommitState::Validating;
         self.pending_command_id = None;
+        self.pending_request_id = None;
+        self.pending_generation = None;
         self.validation_errors.clear();
         true
     }
@@ -251,6 +257,8 @@ impl EditorMetadata {
     pub fn fail(&mut self, error: impl Into<String>) {
         self.commit_state = CommitState::Failed;
         self.pending_command_id = None;
+        self.pending_request_id = None;
+        self.pending_generation = None;
         self.validation_errors = vec![error.into()];
     }
 }

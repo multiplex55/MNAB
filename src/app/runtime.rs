@@ -338,6 +338,84 @@ impl ApplicationRuntime {
         self.view.editor = crate::app::state::EditorState::Idle;
     }
 
+    /// Mount exactly one fresh transaction draft for the current register.
+    fn begin_transaction_editor(&mut self) {
+        use crate::app::{
+            navigation::Workspace,
+            state::{EditorMetadata, EditorState},
+        };
+        let account_id = match self.view.navigation.workspace {
+            Workspace::Account(id) => Some(id),
+            Workspace::AllTransactions => None,
+            _ => return,
+        };
+        let mut editor = crate::app::transaction_editor::TransactionEditorState::new(
+            account_id,
+            EditorMetadata::new(egui::Id::new("register")),
+        );
+        editor.transaction_id = Some(crate::domain::TransactionId::new());
+        editor.date_text = time::OffsetDateTime::now_utc()
+            .date()
+            .format(time::macros::format_description!("[month]/[day]/[year]"))
+            .expect("fixed date format");
+        editor.approved = true;
+        self.view.editor = EditorState::CreatingTransaction(editor);
+    }
+
+    /// Validate with the authoritative editor model and enqueue one Save through the dispatcher.
+    fn commit_transaction_editor(&mut self, budget_id: crate::domain::BudgetId) {
+        use crate::app::state::{CommitState, EditorState};
+        let transaction = {
+            let editor = match &mut self.view.editor {
+                EditorState::CreatingTransaction(e) | EditorState::EditingTransaction(e) => e,
+                _ => return,
+            };
+            match editor.build_transaction(budget_id) {
+                Ok(transaction) => {
+                    editor.errors = Default::default();
+                    transaction
+                }
+                Err(errors) => {
+                    editor.focus_field = errors
+                        .first_invalid_field()
+                        .unwrap_or(crate::app::transaction_editor::TransactionEditorField::Form);
+                    editor.errors = errors;
+                    editor.metadata.commit_state = CommitState::Failed;
+                    editor.metadata.pending_command_id = None;
+                    editor.metadata.pending_request_id = None;
+                    editor.metadata.pending_generation = None;
+                    editor.metadata.validation_errors.clear();
+                    return;
+                }
+            }
+        };
+        let command_id = self.next_command;
+        self.view
+            .editor
+            .metadata_mut()
+            .unwrap()
+            .begin_submission(command_id);
+        self.dispatch(ApplicationAction::Financial(FinancialCommand::Transaction(
+            TransactionCommand::Save(transaction),
+        )));
+        let association = self
+            .pending_commands
+            .get(&command_id)
+            .filter(|command| command.status == CommandStatus::Running)
+            .and_then(|command| {
+                command
+                    .worker_request_id
+                    .map(|request| (request, self.generation))
+            });
+        if let Some((request, generation)) = association {
+            let metadata = self.view.editor.metadata_mut().unwrap();
+            metadata.pending_request_id = Some(request);
+            metadata.pending_generation = Some(generation);
+        } else {
+            self.fail_editor("The operation could not be submitted. You may safely retry.");
+        }
+    }
+
     /// Validate the complete workflow model and turn it into a domain command.
     /// The editor deliberately remains mounted until the correlated worker
     /// response succeeds, so validation and storage errors never erase input.
@@ -355,21 +433,12 @@ impl ApplicationRuntime {
             self.fail_editor("Open a budget before saving.");
             return;
         };
-        if let EditorState::CreatingTransaction(editor) | EditorState::EditingTransaction(editor) =
-            &mut self.view.editor
-        {
-            match editor.build_transaction(budget_id) {
-                Ok(_) => editor.errors = Default::default(),
-                Err(errors) => {
-                    editor.errors = errors;
-                    editor.metadata.commit_state = crate::app::state::CommitState::Failed;
-                    editor.metadata.pending_command_id = None;
-                    // Transaction validation is intentionally not copied into the generic
-                    // string bag: the register renders the structured field errors.
-                    editor.metadata.validation_errors.clear();
-                    return;
-                }
-            }
+        if matches!(
+            self.view.editor,
+            EditorState::CreatingTransaction(_) | EditorState::EditingTransaction(_)
+        ) {
+            self.commit_transaction_editor(budget_id);
+            return;
         }
         let command = match &self.view.editor {
             EditorState::CreatingAccount(editor) | EditorState::EditingAccount(editor) => editor
@@ -395,20 +464,8 @@ impl ApplicationRuntime {
                     })
                 })
                 .map_err(str::to_owned),
-            EditorState::CreatingTransaction(editor) | EditorState::EditingTransaction(editor) => {
-                editor
-                    .build_transaction(budget_id)
-                    .map(|transaction| {
-                        FinancialCommand::Transaction(TransactionCommand::Save(transaction))
-                    })
-                    .map_err(|errors| {
-                        errors
-                            .form
-                            .or(errors.amount)
-                            .or(errors.date)
-                            .or(errors.account)
-                            .unwrap_or_else(|| "Transaction has invalid fields".into())
-                    })
+            EditorState::CreatingTransaction(_) | EditorState::EditingTransaction(_) => {
+                unreachable!()
             }
             EditorState::CreatingTransfer(editor) => editor
                 .draft
@@ -1213,6 +1270,24 @@ impl ApplicationRuntime {
             },
         };
         use AppCommand::*;
+        // Workspace navigation is never an implicit save. Discard the active UI draft first;
+        // Escape/Cancel follows this exact same path.
+        if matches!(
+            intent,
+            NavigateOverview
+                | NavigateBudget
+                | NavigateCategories
+                | NavigateReports
+                | NavigateAllTransactions
+        ) && self.view.editor.is_active()
+        {
+            if self.view.editor.metadata().is_some_and(|metadata| {
+                metadata.commit_state == crate::app::state::CommitState::Submitting
+            }) {
+                return;
+            }
+            self.cancel_editor();
+        }
         if matches!(intent, Undo | Redo) {
             let redo = intent == Redo;
             let command = if redo {
@@ -1438,13 +1513,13 @@ impl ApplicationRuntime {
                 });
                 return;
             }
-            AddTransaction if self.view.selected_account.is_some() => {
-                self.view.editor = EditorState::CreatingTransaction(
-                    crate::app::transaction_editor::TransactionEditorState::new(
-                        self.view.selected_account,
-                        EditorMetadata::new(egui::Id::new("register")),
-                    ),
-                );
+            AddTransaction
+                if matches!(
+                    self.view.navigation.workspace,
+                    Workspace::Account(_) | Workspace::AllTransactions
+                ) =>
+            {
+                self.begin_transaction_editor();
                 return;
             }
             EditTransaction if let Some(id) = self.view.selected_transaction => {
@@ -1487,12 +1562,7 @@ impl ApplicationRuntime {
                 return;
             }
             ContextualNew if self.view.selected_account.is_some() => {
-                self.view.editor = EditorState::CreatingTransaction(
-                    crate::app::transaction_editor::TransactionEditorState::new(
-                        self.view.selected_account,
-                        EditorMetadata::new(egui::Id::new("register")),
-                    ),
-                );
+                self.begin_transaction_editor();
                 return;
             }
             Commit if self.view.editor.is_active() => {
@@ -1500,6 +1570,11 @@ impl ApplicationRuntime {
                 return;
             }
             Cancel if self.view.editor.is_active() => {
+                if self.view.editor.metadata().is_some_and(|metadata| {
+                    metadata.commit_state == crate::app::state::CommitState::Submitting
+                }) {
+                    return;
+                }
                 self.cancel_editor();
                 return;
             }
@@ -1880,6 +1955,17 @@ impl ApplicationRuntime {
         result: Result<crate::storage::worker::TypedResult, crate::storage::worker::WorkerError>,
         safe: Option<crate::storage::worker::SafeUserError>,
     ) {
+        let transaction_editor = matches!(
+            self.view.editor,
+            crate::app::state::EditorState::CreatingTransaction(_)
+                | crate::app::state::EditorState::EditingTransaction(_)
+        );
+        let editor_matches = self.view.editor.metadata().is_some_and(|metadata| {
+            metadata.pending_command_id == Some(cid)
+                && (!transaction_editor
+                    || (metadata.pending_request_id == Some(id)
+                        && metadata.pending_generation == Some(generation)))
+        });
         let Some(c) = self.pending_commands.get_mut(&cid) else {
             return;
         };
@@ -1901,12 +1987,7 @@ impl ApplicationRuntime {
                     }
                     _ => "Changes saved",
                 };
-                if self
-                    .view
-                    .editor
-                    .metadata()
-                    .is_some_and(|metadata| metadata.pending_command_id == Some(cid))
-                {
+                if editor_matches {
                     if let Some(transaction_id) = m.affected_entity_ids.iter().find_map(|id| {
                         if let crate::storage::protocol::AffectedEntityId::Transaction(id) = id {
                             Some(*id)
@@ -2011,11 +2092,7 @@ impl ApplicationRuntime {
                 .notifications
                 .push(Notification::actionable_error("Operation failed", detail));
         }
-        let editor_owns_response = self
-            .view
-            .editor
-            .metadata()
-            .is_some_and(|metadata| metadata.pending_command_id == Some(cid));
+        let editor_owns_response = editor_matches;
         let (editor_result, editor_error) =
             self.pending_commands
                 .get(&cid)
@@ -2030,12 +2107,37 @@ impl ApplicationRuntime {
                 });
         self.prune_commands();
         match editor_result {
-            Some(CommandStatus::Committed) => self.cancel_editor(),
-            Some(CommandStatus::Failed) => self.fail_editor(editor_error.unwrap_or_else(|| {
-                "The operation failed without changing your data. You may retry.".into()
-            })),
+            Some(CommandStatus::Committed) => self.handle_editor_success(cid),
+            Some(CommandStatus::Failed) => {
+                self.handle_editor_failure(editor_error.unwrap_or_else(|| {
+                    "The operation failed without changing your data. You may retry.".into()
+                }))
+            }
             _ => {}
         }
+    }
+
+    fn handle_editor_success(&mut self, command_id: u64) {
+        if let Some(RuntimeCommand {
+            envelope:
+                CommandEnvelope {
+                    payload:
+                        ApplicationAction::Financial(FinancialCommand::Transaction(
+                            TransactionCommand::Save(transaction),
+                        )),
+                    ..
+                },
+            ..
+        }) = self.pending_commands.get(&command_id)
+        {
+            self.view.register_selection.select_only(transaction.id);
+            self.view.selected_transaction = Some(transaction.id);
+        }
+        self.cancel_editor();
+    }
+
+    fn handle_editor_failure(&mut self, error: String) {
+        self.fail_editor(error);
     }
     pub fn cancel_command(&mut self, id: u64) -> bool {
         let Some(c) = self.pending_commands.get_mut(&id) else {
@@ -2792,6 +2894,98 @@ mod tests {
             crate::app::state::CommitState::Submitting
         );
         assert!(runtime.pending_commands.len() > before);
+    }
+
+    #[test]
+    fn new_transaction_defaults_follow_register_scope() {
+        let (_dir, mut runtime) = runtime_with_worker();
+        let account = AccountId::new();
+        runtime.select_account(account);
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::AddTransaction));
+        let crate::app::state::EditorState::CreatingTransaction(editor) = &runtime.view.editor
+        else {
+            panic!("one transaction draft should be active")
+        };
+        assert_eq!(editor.account_id, Some(account));
+        assert_eq!(editor.date_text.len(), 10);
+        assert_eq!(editor.date_text.as_bytes()[2], b'/');
+        assert_eq!(editor.clearance, crate::domain::Clearance::Uncleared);
+        assert!(editor.approved);
+        assert!(editor.splits.is_empty());
+        assert!(editor.transaction_id.is_some());
+        assert_eq!(
+            editor.focus_field,
+            crate::app::transaction_editor::TransactionEditorField::Payee
+        );
+
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::NavigateAllTransactions));
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::AddTransaction));
+        let crate::app::state::EditorState::CreatingTransaction(editor) = &runtime.view.editor
+        else {
+            panic!("all-transactions draft should be active")
+        };
+        assert_eq!(editor.account_id, None);
+        assert_eq!(
+            editor.focus_field,
+            crate::app::transaction_editor::TransactionEditorField::Account
+        );
+    }
+
+    #[test]
+    fn transaction_validation_submission_and_cancel_are_single_shot() {
+        let (_dir, mut runtime) = runtime_with_worker();
+        runtime.select_account(AccountId::new());
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::AddTransaction));
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::Commit));
+        assert!(runtime.pending_commands.is_empty());
+
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::Cancel));
+        assert!(matches!(
+            runtime.view.editor,
+            crate::app::state::EditorState::Idle
+        ));
+        assert!(runtime.pending_commands.is_empty());
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::AddTransaction));
+
+        let crate::app::state::EditorState::CreatingTransaction(editor) = &mut runtime.view.editor
+        else {
+            panic!()
+        };
+        editor.category_id = Some(crate::domain::CategoryId::new());
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::Commit));
+        assert_eq!(runtime.pending_commands.len(), 1);
+        assert!(matches!(
+            runtime
+                .pending_commands
+                .values()
+                .next()
+                .unwrap()
+                .envelope
+                .payload,
+            ApplicationAction::Financial(FinancialCommand::Transaction(TransactionCommand::Save(
+                _
+            )))
+        ));
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::Commit));
+        assert_eq!(runtime.pending_commands.len(), 1);
+
+        // Cancel is disabled while persistence is in flight, retaining the correlated draft.
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::Cancel));
+        assert!(runtime.view.editor.is_active());
+        assert_eq!(runtime.pending_commands.len(), 1);
+    }
+
+    #[test]
+    fn workspace_navigation_discards_transaction_draft_without_commit() {
+        let (_dir, mut runtime) = runtime_with_worker();
+        runtime.select_account(AccountId::new());
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::AddTransaction));
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::NavigateBudget));
+        assert!(matches!(
+            runtime.view.editor,
+            crate::app::state::EditorState::Idle
+        ));
+        assert!(runtime.pending_commands.is_empty());
     }
 
     #[test]
