@@ -1,5 +1,25 @@
 use crate::app::{dispatcher::ActionCollector, navigation::Workspace, state::AppState};
 
+#[must_use]
+pub fn search_hint(
+    workspace: Workspace,
+    accounts: &[crate::app::state::AccountSummary],
+) -> Option<String> {
+    match workspace {
+        Workspace::Account(id) => Some(format!(
+            "Search {}",
+            accounts
+                .iter()
+                .find(|a| a.id == id)
+                .map_or("account", |a| a.name.as_str())
+        )),
+        Workspace::AllTransactions => Some("Search all transactions".into()),
+        Workspace::Reports => Some("Filter current report".into()),
+        Workspace::Inbox => Some("Search inbox".into()),
+        Workspace::Overview | Workspace::Budget | Workspace::Categories => None,
+    }
+}
+
 pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionCollector) {
     let palette_pressed = ctx.input(|input| {
         input.events.iter().any(|event| match event {
@@ -62,14 +82,16 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.strong(format!("MNAB · {}", state.budget_name));
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut state.search)
-                        .hint_text("Search (Cmd/Ctrl+F)")
-                        .desired_width(180.0)
-                        .id(state.search_id),
-                );
-                if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
-                    response.request_focus();
+                if let Some(hint) = search_hint(state.navigation.workspace, &state.accounts) {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut state.search)
+                            .hint_text(format!("{hint} (Cmd/Ctrl+F)"))
+                            .desired_width(210.0)
+                            .id(state.search_id),
+                    );
+                    if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
+                        response.request_focus();
+                    }
                 }
                 if ui
                     .button(format!("Inbox ({})", state.inbox_counts.total))
@@ -163,6 +185,42 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
     show_palette(ctx, state, actions);
     show_workflow_editor(ctx, state, actions);
     show_budget_dialog(ctx, state, actions);
+}
+
+#[cfg(test)]
+mod search_scope_tests {
+    use super::*;
+
+    #[test]
+    fn search_scope_is_workspace_specific() {
+        let id = crate::domain::AccountId::new();
+        let mut state = AppState::default();
+        state.accounts.push(crate::app::state::AccountSummary {
+            id,
+            name: "Checking".into(),
+            working_balance: crate::domain::Money::ZERO,
+            cleared_balance: crate::domain::Money::ZERO,
+            unreconciled: false,
+            tracking: false,
+            closed: false,
+            group_id: None,
+            favorite: false,
+            account_type: crate::domain::AccountType::Checking,
+        });
+        assert_eq!(
+            search_hint(Workspace::Account(id), &state.accounts).as_deref(),
+            Some("Search Checking")
+        );
+        assert_eq!(
+            search_hint(Workspace::AllTransactions, &[]).as_deref(),
+            Some("Search all transactions")
+        );
+        assert_eq!(search_hint(Workspace::Budget, &[]), None);
+        assert_eq!(
+            search_hint(Workspace::Reports, &[]).as_deref(),
+            Some("Filter current report")
+        );
+    }
 }
 
 fn show_notifications(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionCollector) {
