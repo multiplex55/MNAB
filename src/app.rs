@@ -14,6 +14,7 @@ pub mod session;
 pub mod settings;
 pub mod startup;
 pub mod state;
+pub mod transaction_editor;
 pub mod view_invalidation;
 pub mod view_model;
 

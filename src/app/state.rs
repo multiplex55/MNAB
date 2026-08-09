@@ -261,12 +261,6 @@ pub struct AccountEditorState {
     pub metadata: EditorMetadata,
 }
 #[derive(Clone, Debug)]
-pub struct InlineTransactionEditorState {
-    pub transaction_id: Option<TransactionId>,
-    pub draft: crate::ui::workspaces::register::TransactionEditor,
-    pub metadata: EditorMetadata,
-}
-#[derive(Clone, Debug)]
 pub struct TransferEditorState {
     pub draft: crate::ui::workspaces::register::TransferEditor,
     pub metadata: EditorMetadata,
@@ -311,8 +305,8 @@ pub enum EditorState {
     Idle,
     CreatingAccount(AccountEditorState),
     EditingAccount(AccountEditorState),
-    CreatingTransaction(InlineTransactionEditorState),
-    EditingTransaction(InlineTransactionEditorState),
+    CreatingTransaction(crate::app::transaction_editor::TransactionEditorState),
+    EditingTransaction(crate::app::transaction_editor::TransactionEditorState),
     CreatingTransfer(TransferEditorState),
     Importing(ImportEditorState),
     Reconciling(ReconciliationEditorState),
