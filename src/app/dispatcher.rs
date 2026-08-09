@@ -92,16 +92,23 @@ pub fn invalidations_for(c: &FinancialCommand) -> ViewInvalidations {
         ]
         .into_iter()
         .collect(),
-        FinancialCommand::Assignment(AssignmentCommand::Set(a)) => [
-            V::BudgetMonth(a.month),
-            V::BudgetRolloverFrom(a.month),
-            V::Reports,
-            V::Targets,
-            V::Inbox,
-            V::Inspectors,
-        ]
-        .into_iter()
-        .collect(),
+        FinancialCommand::Assignment(assignment) => {
+            let month = match assignment {
+                AssignmentCommand::Set(a) => a.month,
+                AssignmentCommand::Remove { month, .. } => *month,
+                AssignmentCommand::Batch(batch) => batch.month,
+            };
+            [
+                V::BudgetMonth(month),
+                V::BudgetRolloverFrom(month),
+                V::Reports,
+                V::Targets,
+                V::Inbox,
+                V::Inspectors,
+            ]
+            .into_iter()
+            .collect()
+        }
         FinancialCommand::Transaction(TransactionCommand::Delete {
             account_id, month, ..
         }) => [

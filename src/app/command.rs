@@ -103,6 +103,39 @@ pub enum CategoryCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AssignmentCommand {
     Set(BudgetAssignment),
+    Remove {
+        category_id: CategoryId,
+        month: BudgetMonth,
+    },
+    /// An all-or-nothing assignment edit based on a particular budget snapshot.
+    Batch(AssignmentBatch),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssignmentBatch {
+    pub month: BudgetMonth,
+    pub expected_source_revision: u64,
+    pub changes: Vec<AssignmentBatchChange>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AssignmentBatchChange {
+    Set {
+        category_id: CategoryId,
+        amount: crate::domain::Money,
+    },
+    Remove {
+        category_id: CategoryId,
+    },
+}
+
+impl AssignmentBatchChange {
+    #[must_use]
+    pub const fn category_id(&self) -> CategoryId {
+        match self {
+            Self::Set { category_id, .. } | Self::Remove { category_id } => *category_id,
+        }
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransactionCommand {
@@ -430,6 +463,19 @@ impl<C: Clone> CommandHistory<C> {
         let c = e.command.clone();
         self.undo.push_back(e);
         Some(c)
+    }
+    /// Rebinds the command contract after an undo has committed. This is important for
+    /// revision-checked commands: redo must use the revision produced by the undo transaction.
+    pub fn replace_next_redo(&mut self, command: C) {
+        if let Some(entry) = self.redo.last_mut() {
+            entry.command = command;
+        }
+    }
+    /// Rebinds the inverse contract after a redo has committed.
+    pub fn replace_next_undo(&mut self, inverse: C) {
+        if let Some(entry) = self.undo.back_mut() {
+            entry.inverse = inverse;
+        }
     }
     pub fn undo_len(&self) -> usize {
         self.undo.len()
