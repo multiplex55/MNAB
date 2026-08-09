@@ -211,9 +211,9 @@ pub enum InspectorContext {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommitState {
     Editing,
+    Validating,
     Submitting,
     Failed,
-    Committed,
 }
 
 #[derive(Clone, Debug)]
@@ -222,6 +222,10 @@ pub struct EditorMetadata {
     pub dirty: bool,
     pub commit_state: CommitState,
     pub restore_focus: Id,
+    /// Runtime command owning the in-flight submission.  Keeping this on the
+    /// editor makes worker completion correlation explicit and prevents a
+    /// second press of Commit from enqueueing duplicate work.
+    pub pending_command_id: Option<u64>,
 }
 impl EditorMetadata {
     pub fn new(restore_focus: Id) -> Self {
@@ -230,31 +234,39 @@ impl EditorMetadata {
             dirty: false,
             commit_state: CommitState::Editing,
             restore_focus,
+            pending_command_id: None,
         }
     }
 }
 #[derive(Clone, Debug)]
-pub struct AccountDraft {
-    pub name: String,
+pub struct AccountEditorState {
+    pub account_id: Option<AccountId>,
+    pub form: crate::ui::workspaces::all_accounts::AccountDialogForm,
     pub metadata: EditorMetadata,
 }
 #[derive(Clone, Debug)]
-pub struct TransactionDraft {
-    pub memo: String,
+pub struct InlineTransactionEditorState {
+    pub transaction_id: Option<TransactionId>,
+    pub draft: crate::ui::workspaces::register::TransactionEditor,
     pub metadata: EditorMetadata,
 }
 #[derive(Clone, Debug)]
-pub struct TransferDraft {
-    pub memo: String,
+pub struct TransferEditorState {
+    pub draft: crate::ui::workspaces::register::TransferEditor,
     pub metadata: EditorMetadata,
 }
 #[derive(Clone, Debug)]
-pub struct ImportState {
-    pub source: String,
+pub struct ImportEditorState {
+    pub account_id: Option<AccountId>,
+    pub source: PathBuf,
+    pub batch_id: Option<ImportBatchId>,
     pub metadata: EditorMetadata,
 }
 #[derive(Clone, Debug)]
-pub struct ReconciliationState {
+pub struct ReconciliationEditorState {
+    pub account_id: Option<AccountId>,
+    pub statement_balance: String,
+    pub statement_date: String,
     pub metadata: EditorMetadata,
 }
 #[derive(Clone, Debug)]
@@ -281,13 +293,13 @@ pub struct GroupEditorState {
 pub enum EditorState {
     #[default]
     Idle,
-    CreatingAccount(AccountDraft),
-    EditingAccount(AccountId, AccountDraft),
-    CreatingTransaction(TransactionDraft),
-    EditingTransaction(TransactionId, TransactionDraft),
-    CreatingTransfer(TransferDraft),
-    Importing(ImportState),
-    Reconciling(ReconciliationState),
+    CreatingAccount(AccountEditorState),
+    EditingAccount(AccountEditorState),
+    CreatingTransaction(InlineTransactionEditorState),
+    EditingTransaction(InlineTransactionEditorState),
+    CreatingTransfer(TransferEditorState),
+    Importing(ImportEditorState),
+    Reconciling(ReconciliationEditorState),
     ManagingCategory(CategoryEditorState),
     ManagingAccountGroup(GroupEditorState),
 }
@@ -295,13 +307,25 @@ impl EditorState {
     pub fn metadata(&self) -> Option<&EditorMetadata> {
         match self {
             Self::Idle => None,
-            Self::CreatingAccount(x) | Self::EditingAccount(_, x) => Some(&x.metadata),
-            Self::CreatingTransaction(x) | Self::EditingTransaction(_, x) => Some(&x.metadata),
+            Self::CreatingAccount(x) | Self::EditingAccount(x) => Some(&x.metadata),
+            Self::CreatingTransaction(x) | Self::EditingTransaction(x) => Some(&x.metadata),
             Self::CreatingTransfer(x) => Some(&x.metadata),
             Self::Importing(x) => Some(&x.metadata),
             Self::Reconciling(x) => Some(&x.metadata),
             Self::ManagingCategory(x) => Some(&x.metadata),
             Self::ManagingAccountGroup(x) => Some(&x.metadata),
+        }
+    }
+    pub fn metadata_mut(&mut self) -> Option<&mut EditorMetadata> {
+        match self {
+            Self::Idle => None,
+            Self::CreatingAccount(x) | Self::EditingAccount(x) => Some(&mut x.metadata),
+            Self::CreatingTransaction(x) | Self::EditingTransaction(x) => Some(&mut x.metadata),
+            Self::CreatingTransfer(x) => Some(&mut x.metadata),
+            Self::Importing(x) => Some(&mut x.metadata),
+            Self::Reconciling(x) => Some(&mut x.metadata),
+            Self::ManagingCategory(x) => Some(&mut x.metadata),
+            Self::ManagingAccountGroup(x) => Some(&mut x.metadata),
         }
     }
     pub fn is_active(&self) -> bool {
