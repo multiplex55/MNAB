@@ -84,16 +84,66 @@ pub const fn columns_for(scope: RegisterScope) -> &'static [RegisterColumn] {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum EditorRowIdentity {
-    Draft,
-    Transaction(TransactionId),
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionEditorMode {
+    Creating,
+    Editing,
 }
-pub const fn editor_row_identity(id: Option<TransactionId>) -> EditorRowIdentity {
-    match id {
-        Some(id) => EditorRowIdentity::Transaction(id),
-        None => EditorRowIdentity::Draft,
+
+/// The editor policy comes from the state variant, never from whether persistence has
+/// already assigned the draft an id.
+pub const fn transaction_editor_mode(
+    state: &crate::app::state::EditorState,
+) -> Option<TransactionEditorMode> {
+    match state {
+        crate::app::state::EditorState::CreatingTransaction(_) => {
+            Some(TransactionEditorMode::Creating)
+        }
+        crate::app::state::EditorState::EditingTransaction(_) => {
+            Some(TransactionEditorMode::Editing)
+        }
+        _ => None,
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TableRowPlacement {
+    Saved(usize),
+    Editor { replaces: Option<usize> },
+}
+
+/// Produces the visual register rows. Identity is used only to correlate an edit with
+/// its saved row; mode alone controls the placement policy.
+pub fn table_row_placements(
+    saved: &[TransactionId],
+    mode: Option<TransactionEditorMode>,
+    transaction_id: Option<TransactionId>,
+) -> Vec<TableRowPlacement> {
+    let mut rows = Vec::with_capacity(saved.len() + usize::from(mode.is_some()));
+    match mode {
+        Some(TransactionEditorMode::Creating) => {
+            rows.push(TableRowPlacement::Editor { replaces: None });
+            rows.extend((0..saved.len()).map(TableRowPlacement::Saved));
+        }
+        Some(TransactionEditorMode::Editing) => {
+            let found = transaction_id.and_then(|id| saved.iter().position(|saved| *saved == id));
+            if found.is_none() {
+                // Keep an unavailable cached edit mounted in a deterministic position.
+                rows.push(TableRowPlacement::Editor { replaces: None });
+            }
+            for index in 0..saved.len() {
+                if Some(index) == found {
+                    rows.push(TableRowPlacement::Editor {
+                        replaces: Some(index),
+                    });
+                } else {
+                    rows.push(TableRowPlacement::Saved(index));
+                }
+            }
+        }
+        None => rows.extend((0..saved.len()).map(TableRowPlacement::Saved)),
+    }
+    rows
 }
 pub const fn editor_visible(surface: crate::app::state::EditorSurface) -> bool {
     matches!(surface, crate::app::state::EditorSurface::InlineRegister)
@@ -303,12 +353,69 @@ mod tests {
         assert!(!editor_visible(EditorSurface::None));
     }
     #[test]
-    fn editor_identity_is_stable() {
-        let id = TransactionId::new();
-        assert_eq!(editor_row_identity(None), EditorRowIdentity::Draft);
+    fn creating_is_inserted_at_zero_even_after_id_assignment() {
+        let saved = [TransactionId::new()];
+        for id in [None, Some(TransactionId::new())] {
+            assert_eq!(
+                table_row_placements(&saved, Some(TransactionEditorMode::Creating), id),
+                vec![
+                    TableRowPlacement::Editor { replaces: None },
+                    TableRowPlacement::Saved(0)
+                ]
+            );
+        }
+    }
+    #[test]
+    fn editing_replaces_only_the_correlated_saved_row() {
+        let a = TransactionId::new();
+        let b = TransactionId::new();
         assert_eq!(
-            editor_row_identity(Some(id)),
-            EditorRowIdentity::Transaction(id)
+            table_row_placements(&[a, b], Some(TransactionEditorMode::Editing), Some(a)),
+            vec![
+                TableRowPlacement::Editor { replaces: Some(0) },
+                TableRowPlacement::Saved(1)
+            ]
+        );
+    }
+    #[test]
+    fn editor_identity_never_duplicates_a_saved_row() {
+        let a = TransactionId::new();
+        let rows = table_row_placements(&[a], Some(TransactionEditorMode::Editing), Some(a));
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            rows[0],
+            TableRowPlacement::Editor { replaces: Some(0) }
+        ));
+    }
+    #[test]
+    fn cancelling_restores_saved_presentation() {
+        let a = TransactionId::new();
+        assert_eq!(
+            table_row_placements(&[a], None, Some(a)),
+            vec![TableRowPlacement::Saved(0)]
+        );
+    }
+    #[test]
+    fn unavailable_edit_remains_mounted() {
+        assert_eq!(
+            table_row_placements(
+                &[],
+                Some(TransactionEditorMode::Editing),
+                Some(TransactionId::new())
+            ),
+            vec![TableRowPlacement::Editor { replaces: None }]
+        );
+    }
+    #[test]
+    fn creating_and_editing_have_distinct_stable_placement() {
+        let id = TransactionId::new();
+        assert_eq!(
+            table_row_placements(&[id], Some(TransactionEditorMode::Creating), Some(id))[0],
+            TableRowPlacement::Editor { replaces: None }
+        );
+        assert_eq!(
+            table_row_placements(&[id], Some(TransactionEditorMode::Editing), Some(id))[0],
+            TableRowPlacement::Editor { replaces: Some(0) }
         );
     }
     #[test]
