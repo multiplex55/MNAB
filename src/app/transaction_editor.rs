@@ -149,6 +149,8 @@ pub struct TransactionEditorState {
     pub errors: TransactionEditorErrors,
     /// Field which should receive keyboard focus on the next frame.
     pub focus_field: TransactionEditorField,
+    /// Set whenever focus is redirected. The view clears it after the owning widget mounts.
+    pub focus_pending: bool,
     pub metadata: EditorMetadata,
 }
 impl TransactionEditorState {
@@ -176,6 +178,7 @@ impl TransactionEditorState {
             } else {
                 TransactionEditorField::Account
             },
+            focus_pending: true,
             metadata,
         }
     }
@@ -185,6 +188,7 @@ impl TransactionEditorState {
     }
     pub fn move_focus(&mut self, backwards: bool) {
         self.focus_field = traverse_field(self.focus_field, backwards, self.account_id.is_none());
+        self.focus_pending = true;
     }
 
     /// Blur is the only point at which valid keyboard input is rewritten.

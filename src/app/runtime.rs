@@ -21,6 +21,26 @@ use crate::{
     storage::worker::{Generation, RequestId, StorageResponse, StorageWorker},
 };
 
+fn format_transaction_date(now: time::OffsetDateTime) -> String {
+    now.date()
+        .format(time::macros::format_description!("[month]/[day]/[year]"))
+        .expect("fixed date format")
+}
+
+fn transaction_date_from(
+    local: Result<time::OffsetDateTime, time::error::IndeterminateOffset>,
+    utc: time::OffsetDateTime,
+) -> String {
+    format_transaction_date(local.unwrap_or(utc))
+}
+
+fn current_transaction_date() -> String {
+    transaction_date_from(
+        time::OffsetDateTime::now_local(),
+        time::OffsetDateTime::now_utc(),
+    )
+}
+
 /// Owns all mutable application-lifetime and active-session machinery. The UI
 /// receives only `AppState` (its view model) and a frame-local action sink.
 pub struct ApplicationRuntime {
@@ -359,11 +379,13 @@ impl ApplicationRuntime {
             account_id,
             EditorMetadata::new(egui::Id::new("register")),
         );
+        editor.focus_field = crate::ui::register::initial_focus(if account_id.is_some() {
+            crate::ui::register::RegisterScope::Account
+        } else {
+            crate::ui::register::RegisterScope::AllTransactions
+        });
         editor.transaction_id = Some(crate::domain::TransactionId::new());
-        editor.date_text = time::OffsetDateTime::now_utc()
-            .date()
-            .format(time::macros::format_description!("[month]/[day]/[year]"))
-            .expect("fixed date format");
+        editor.date_text = current_transaction_date();
         editor.approved = true;
         self.view.editor = EditorState::CreatingTransaction(editor);
     }
@@ -385,6 +407,7 @@ impl ApplicationRuntime {
                     editor.focus_field = errors
                         .first_invalid_field()
                         .unwrap_or(crate::app::transaction_editor::TransactionEditorField::Form);
+                    editor.focus_pending = true;
                     editor.errors = errors;
                     editor.metadata.commit_state = CommitState::Failed;
                     editor.metadata.pending_command_id = None;
@@ -2203,9 +2226,7 @@ impl ApplicationRuntime {
                     ApplicationAction::Financial(FinancialCommand::Assignment(_)) => {
                         "Assignments updated"
                     }
-                    ApplicationAction::Financial(FinancialCommand::Import(_)) => {
-                        "Import completed"
-                    }
+                    ApplicationAction::Financial(FinancialCommand::Import(_)) => "Import completed",
                     ApplicationAction::Financial(FinancialCommand::Reconciliation(_)) => {
                         "Reconciliation completed"
                     }
@@ -2372,7 +2393,9 @@ impl ApplicationRuntime {
     }
 
     fn handle_editor_failure(&mut self, error: String) {
-        self.fail_editor(error);
+        self.fail_editor(format!(
+            "{error} Changes were not lost; correct the problem and Retry."
+        ));
     }
     pub fn cancel_command(&mut self, id: u64) -> bool {
         let Some(c) = self.pending_commands.get_mut(&id) else {
@@ -3278,5 +3301,16 @@ mod tests {
         runtime.select_account(id);
         assert!(runtime.generation.view > before);
         assert!(runtime.invalidations.iter().any(|v| *v == crate::app::view_invalidation::ViewInvalidation::AccountRegister(id)));
+    }
+
+    #[test]
+    fn transaction_date_prefers_local_and_falls_back_to_utc_without_midnight_races() {
+        let local = time::macros::datetime!(2026-08-09 23:59 +02:00);
+        let utc = time::macros::datetime!(2026-08-08 21:59 UTC);
+        assert_eq!(transaction_date_from(Ok(local), utc), "08/09/2026");
+        assert_eq!(
+            transaction_date_from(Err(time::error::IndeterminateOffset), utc),
+            "08/08/2026"
+        );
     }
 }
