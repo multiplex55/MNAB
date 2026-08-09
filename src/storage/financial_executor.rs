@@ -69,6 +69,46 @@ fn apply<R: Repositories>(
                 v.id.to_string(),
             )
         }
+        FinancialCommand::Account(AccountCommand::CreateWithOpening {
+            account,
+            opening_magnitude,
+            opening_date,
+        }) => {
+            validate_name(&account.name)?;
+            let amount = account
+                .account_type
+                .opening_amount(*opening_magnitude)
+                .map_err(|_| safe("opening balance overflowed"))?;
+            r.put_account(account).map_err(repository)?;
+            let transaction = crate::domain::Transaction {
+                id: crate::domain::TransactionId::new(),
+                budget_id: account.budget_id,
+                account_id: account.id,
+                date: *opening_date,
+                payee_id: None,
+                amount,
+                memo: Some("Opening balance".into()),
+                clearance: crate::domain::Clearance::Cleared,
+                approval: crate::domain::Approval::Approved,
+                body: crate::domain::TransactionBody::OpeningBalance { category_id: None },
+                archived: false,
+                voided: false,
+            };
+            let mut affected = vec![A::Account(account.id)];
+            if amount != crate::domain::Money::ZERO {
+                r.put_transaction(&transaction).map_err(repository)?;
+                affected.push(A::Transaction(transaction.id));
+            }
+            (
+                "Create account",
+                affected,
+                Some(UndoData::Command(FinancialCommand::Account(
+                    AccountCommand::Close(account.id),
+                ))),
+                "account",
+                account.id.to_string(),
+            )
+        }
         FinancialCommand::Account(AccountCommand::Update(v)) => {
             validate_name(&v.name)?;
             let old = r
@@ -99,6 +139,79 @@ fn apply<R: Repositories>(
                 vec![A::Account(*id)],
                 Some(UndoData::Command(FinancialCommand::Account(
                     AccountCommand::Update(inverse),
+                ))),
+                "account",
+                id.to_string(),
+            )
+        }
+        FinancialCommand::Account(AccountCommand::Reopen(id)) => {
+            let mut account = r
+                .account(*id)
+                .map_err(repository)?
+                .ok_or_else(|| safe("account not found"))?;
+            let inverse = account.clone();
+            account.closed = false;
+            r.put_account(&account).map_err(repository)?;
+            (
+                "Reopen account",
+                vec![A::Account(*id)],
+                Some(UndoData::Command(FinancialCommand::Account(
+                    AccountCommand::Update(inverse),
+                ))),
+                "account",
+                id.to_string(),
+            )
+        }
+        FinancialCommand::Account(AccountCommand::SetFavorite { id, favorite }) => {
+            let mut account = r
+                .account(*id)
+                .map_err(repository)?
+                .ok_or_else(|| safe("account not found"))?;
+            let inverse = account.clone();
+            account.favorite = *favorite;
+            r.put_account(&account).map_err(repository)?;
+            (
+                "Update favorite",
+                vec![A::Account(*id)],
+                Some(UndoData::Command(FinancialCommand::Account(
+                    AccountCommand::Update(inverse),
+                ))),
+                "account",
+                id.to_string(),
+            )
+        }
+        FinancialCommand::Account(AccountCommand::MoveToGroup { id, group_id }) => {
+            let mut account = r
+                .account(*id)
+                .map_err(repository)?
+                .ok_or_else(|| safe("account not found"))?;
+            let inverse = account.clone();
+            account.group_id = *group_id;
+            r.put_account(&account).map_err(repository)?;
+            (
+                "Move account",
+                vec![A::Account(*id)],
+                Some(UndoData::Command(FinancialCommand::Account(
+                    AccountCommand::Update(inverse),
+                ))),
+                "account",
+                id.to_string(),
+            )
+        }
+        FinancialCommand::Account(AccountCommand::DeleteUnused(id)) => {
+            if r.account_is_used(*id).map_err(repository)? {
+                return Err(safe("only a genuinely unused account can be deleted"));
+            }
+            let old = r
+                .account(*id)
+                .map_err(repository)?
+                .ok_or_else(|| safe("account not found"))?;
+            r.delete_account(*id).map_err(repository)?;
+            (
+                "Delete unused account",
+                vec![A::Account(*id)],
+                Some(UndoData::Command(FinancialCommand::Account(
+                    AccountCommand::Create(old),
                 ))),
                 "account",
                 id.to_string(),
@@ -291,6 +404,42 @@ fn apply<R: Repositories>(
                 v.id.to_string(),
             )
         }
+        FinancialCommand::Transaction(TransactionCommand::SaveTransfer {
+            source,
+            destination,
+        }) => {
+            source
+                .validate()
+                .map_err(|_| safe("invalid transfer source"))?;
+            destination
+                .validate()
+                .map_err(|_| safe("invalid transfer destination"))?;
+            if source.account_id == destination.account_id
+                || source
+                    .amount
+                    .checked_add(destination.amount)
+                    .map_err(|_| safe("transfer amount overflowed"))?
+                    != crate::domain::Money::ZERO
+            {
+                return Err(safe(
+                    "transfer legs must use distinct accounts and opposite amounts",
+                ));
+            }
+            r.put_transaction(source).map_err(repository)?;
+            r.put_transaction(destination).map_err(repository)?;
+            (
+                "Create transfer",
+                vec![A::Transaction(source.id), A::Transaction(destination.id)],
+                None,
+                "transfer",
+                match &source.body {
+                    crate::domain::TransactionBody::Transfer { transfer_id, .. } => {
+                        transfer_id.to_string()
+                    }
+                    _ => source.id.to_string(),
+                },
+            )
+        }
         FinancialCommand::Transaction(TransactionCommand::Batch(batch)) => {
             let (preflight, prior, affected_ids) =
                 crate::service::transaction_service::execute_batch(r, batch).map_err(repository)?;
@@ -422,6 +571,23 @@ fn apply<R: Repositories>(
                 None,
                 "schedule",
                 id.to_string(),
+            )
+        }
+        FinancialCommand::Reconciliation(ReconciliationCommand::CompleteSnapshot(record)) => {
+            if record.difference != crate::domain::Money::ZERO
+                || record.state != crate::domain::ReconciliationState::Completed
+            {
+                return Err(safe(
+                    "reconciliation completion requires an exact zero difference",
+                ));
+            }
+            r.put_reconciliation(record).map_err(repository)?;
+            (
+                "Complete reconciliation",
+                vec![A::Reconciliation(record.id), A::Account(record.account_id)],
+                None,
+                "reconciliation",
+                record.id.to_string(),
             )
         }
         FinancialCommand::Inbox(InboxCommand::Resolve {

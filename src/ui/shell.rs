@@ -129,7 +129,105 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
         Workspace::Account(id) => super::workspaces::register::show(ui, state, id, actions),
     });
     show_palette(ctx, state, actions);
+    show_workflow_editor(ctx, state, actions);
     show_budget_dialog(ctx, state, actions);
+}
+
+/// Renders the runtime-owned editor state.  Editors remain visible while a typed worker request is
+/// in flight or after a retryable failure, so a failed operation never discards user input.
+fn show_workflow_editor(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionCollector) {
+    use crate::app::state::{CommitState, EditorState};
+    if !state.editor.is_active() {
+        return;
+    }
+    let mut cancel = false;
+    let mut commit = false;
+    egui::Window::new("Workflow")
+        .id(egui::Id::new("workflow-editor"))
+        .collapsible(false).resizable(true).show(ctx, |ui| {
+        match &mut state.editor {
+            EditorState::CreatingAccount(editor) | EditorState::EditingAccount(editor) => {
+                let creating = editor.account_id.is_none();
+                ui.heading(if creating { "Create account" } else { "Edit account" });
+                ui.label("Name"); ui.text_edit_singleline(&mut editor.form.name);
+                egui::ComboBox::from_label("Type").selected_text(editor.form.account_type.map_or("Choose…".into(), |v| format!("{v:?}"))).show_ui(ui, |ui| {
+                    for kind in [crate::domain::AccountType::Checking, crate::domain::AccountType::Savings, crate::domain::AccountType::Cash, crate::domain::AccountType::CreditCard, crate::domain::AccountType::Loan, crate::domain::AccountType::Asset, crate::domain::AccountType::Liability] { ui.selectable_value(&mut editor.form.account_type, Some(kind), format!("{kind:?}")); }
+                });
+                if creating { ui.label("Opening balance (positive magnitude)"); ui.text_edit_singleline(&mut editor.form.opening_magnitude); ui.label("Opening date (YYYY-MM-DD)"); ui.text_edit_singleline(&mut editor.form.opening_date); }
+                egui::ComboBox::from_label("Group").selected_text(editor.form.group_id.and_then(|id| state.account_groups.iter().find(|g| g.id == id).map(|g| g.name.clone())).unwrap_or_else(|| "Ungrouped".into())).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut editor.form.group_id, None, "Ungrouped");
+                    for group in &state.account_groups { ui.selectable_value(&mut editor.form.group_id, Some(group.id), &group.name); }
+                });
+                ui.label("Note"); ui.text_edit_multiline(&mut editor.form.note);
+                ui.checkbox(&mut editor.form.favorite, "Favorite");
+            }
+            EditorState::CreatingTransfer(editor) => {
+                ui.heading("Transfer");
+                account_picker(ui, "From account", &mut editor.draft.from_account, &state.accounts);
+                account_picker(ui, "To account", &mut editor.draft.to_account, &state.accounts);
+                ui.label("Amount"); ui.text_edit_singleline(&mut editor.draft.amount);
+                ui.label("Date (YYYY-MM-DD)"); ui.text_edit_singleline(&mut editor.draft.date);
+                ui.label("Memo"); ui.text_edit_singleline(&mut editor.draft.memo);
+                ui.small("Optional category/goal effect is applied to the destination account.");
+                if let Ok(summary) = editor.draft.summary() { ui.separator(); ui.strong("Balance effect preview"); ui.label(format!("From: {} · To: {} · Goal/category: {}", summary.cash_decreases, summary.savings_increases, summary.goal_increases)); }
+            }
+            EditorState::Importing(editor) => {
+                ui.heading("Import transactions");
+                ui.label("1. Select file  2. Parse  3. Map CSV  4. Match & deduplicate  5. Review  6. Apply atomically");
+                ui.label(format!("File: {}", if editor.source.as_os_str().is_empty() { "No file selected".into() } else { editor.source.display().to_string() }));
+                if ui.button("Choose CSV or OFX file…").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Statements", &["csv", "ofx", "qfx"])
+                        .pick_file()
+                {
+                    editor.source = path;
+                    editor.metadata.dirty = true;
+                }
+                ui.small("Exact duplicates are excluded by default. Applied transactions appear in Inbox for approval and categorization.");
+            }
+            EditorState::Reconciling(editor) => {
+                ui.heading("Reconcile account");
+                ui.label("Statement date (YYYY-MM-DD)"); ui.text_edit_singleline(&mut editor.statement_date);
+                ui.label("Statement balance"); ui.text_edit_singleline(&mut editor.statement_balance);
+                let cleared = editor.account_id.and_then(|id| state.accounts.iter().find(|a| a.id == id)).map_or(crate::domain::Money::ZERO, |a| a.cleared_balance);
+                ui.label(format!("Current cleared balance: {cleared}"));
+                if let Ok(statement) = editor.statement_balance.parse::<crate::domain::Money>() { if let Ok(difference) = statement.checked_sub(cleared) { ui.label(format!("Difference: {difference}")); ui.small(if difference == crate::domain::Money::ZERO { "Ready to complete: difference is exactly zero." } else { "Completion requires an exact zero difference." }); } }
+                ui.small("Transactions on or before the statement date may be cleared. Previously reconciled transactions are protected and require explicit confirmation to edit or delete.");
+            }
+            EditorState::CreatingTransaction(_) | EditorState::EditingTransaction(_) => { ui.heading("Transaction editor"); ui.label("Complete the transaction fields in the register."); }
+            EditorState::ManagingCategory(_) | EditorState::ManagingAccountGroup(_) | EditorState::Idle => {}
+        }
+        if let Some(meta) = state.editor.metadata() {
+            for error in &meta.validation_errors { ui.colored_label(egui::Color32::RED, error); }
+            if meta.commit_state == CommitState::Submitting { ui.spinner(); ui.label("Submitting…"); }
+            ui.horizontal(|ui| { if ui.add_enabled(meta.commit_state != CommitState::Submitting, egui::Button::new(if meta.commit_state == CommitState::Failed { "Retry" } else { "Commit" })).clicked() { commit = true; } if ui.button("Cancel").clicked() { cancel = true; } });
+        }
+    });
+    if commit {
+        actions.push(crate::app::command::AppCommand::Commit);
+    }
+    if cancel {
+        actions.push(crate::app::command::AppCommand::Cancel);
+    }
+}
+
+fn account_picker(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: &mut Option<crate::domain::AccountId>,
+    accounts: &[crate::app::state::AccountSummary],
+) {
+    egui::ComboBox::from_label(label)
+        .selected_text(
+            selected
+                .and_then(|id| accounts.iter().find(|a| a.id == id).map(|a| a.name.clone()))
+                .unwrap_or_else(|| "Choose…".into()),
+        )
+        .show_ui(ui, |ui| {
+            for account in accounts.iter().filter(|a| !a.closed) {
+                ui.selectable_value(selected, Some(account.id), &account.name);
+            }
+        });
 }
 
 fn show_budget_dialog(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionCollector) {

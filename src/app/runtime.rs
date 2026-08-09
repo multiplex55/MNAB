@@ -398,15 +398,23 @@ impl ApplicationRuntime {
             EditorState::CreatingAccount(editor) | EditorState::EditingAccount(editor) => editor
                 .form
                 .validate()
-                .map(|(name, account_type, _, _)| {
+                .map(|(name, account_type, opening_magnitude, opening_date)| {
                     let mut account = crate::domain::Account::new(budget_id, name, account_type);
+                    account.group_id = editor.form.group_id;
+                    account.note = (!editor.form.note.trim().is_empty())
+                        .then(|| editor.form.note.trim().to_owned());
+                    account.favorite = editor.form.favorite;
                     if let Some(id) = editor.account_id {
                         account.id = id;
                     }
                     FinancialCommand::Account(if editor.account_id.is_some() {
                         crate::app::command::AccountCommand::Update(account)
                     } else {
-                        crate::app::command::AccountCommand::Create(account)
+                        crate::app::command::AccountCommand::CreateWithOpening {
+                            account,
+                            opening_magnitude,
+                            opening_date,
+                        }
                     })
                 })
                 .map_err(str::to_owned),
@@ -459,15 +467,115 @@ impl ApplicationRuntime {
                         )))
                     })
             }
-            // These workflows now own their complete forms, but their domain
-            // command needs additional preview/session identities before it can
-            // be submitted. Keep the form recoverable and explain the remedy.
             EditorState::CreatingTransfer(editor) => editor
                 .draft
                 .validate()
-                .map(|_| ())
                 .map_err(|e| format!("{e:?}"))
-                .and_then(|_| Err("Transfer preview must be completed before saving.".to_owned())),
+                .and_then(|(from, to, date, amount)| {
+                    let summary_account = |id| {
+                        self.view
+                            .accounts
+                            .iter()
+                            .find(|account| account.id == id)
+                            .ok_or_else(|| "Choose an available account.".to_owned())
+                    };
+                    let source_summary = summary_account(from)?;
+                    let destination_summary = summary_account(to)?;
+                    let mut source_account = crate::domain::Account::new(
+                        budget_id,
+                        &source_summary.name,
+                        source_summary.account_type,
+                    );
+                    source_account.id = from;
+                    let mut destination_account = crate::domain::Account::new(
+                        budget_id,
+                        &destination_summary.name,
+                        destination_summary.account_type,
+                    );
+                    destination_account.id = to;
+                    let transfer_id = crate::domain::TransferId::new();
+                    let source_amount = amount.checked_neg().map_err(|error| error.to_string())?;
+                    let (source_body, destination_body) =
+                        crate::domain::TransactionBody::categorized_transfer(
+                            transfer_id,
+                            &source_account,
+                            source_amount,
+                            &destination_account,
+                            amount,
+                            editor.draft.category_id,
+                            editor.draft.category_effect_account,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    let make = |account_id, leg_amount, body| crate::domain::Transaction {
+                        id: crate::domain::TransactionId::new(),
+                        budget_id,
+                        account_id,
+                        date,
+                        payee_id: None,
+                        amount: leg_amount,
+                        memo: (!editor.draft.memo.trim().is_empty())
+                            .then(|| editor.draft.memo.trim().to_owned()),
+                        clearance: crate::domain::Clearance::Uncleared,
+                        approval: crate::domain::Approval::Approved,
+                        body,
+                        archived: false,
+                        voided: false,
+                    };
+                    Ok(FinancialCommand::Transaction(
+                        TransactionCommand::SaveTransfer {
+                            source: make(from, source_amount, source_body),
+                            destination: make(to, amount, destination_body),
+                        },
+                    ))
+                }),
+            EditorState::Reconciling(editor) => (|| {
+                let account_id = editor
+                    .account_id
+                    .ok_or_else(|| "Choose an account.".to_owned())?;
+                let statement_date = time::Date::parse(
+                    editor.statement_date.trim(),
+                    &time::format_description::well_known::Iso8601::DATE,
+                )
+                .map_err(|_| "Statement date must be YYYY-MM-DD.".to_owned())?;
+                let ending_balance = editor
+                    .statement_balance
+                    .parse::<crate::domain::Money>()
+                    .map_err(|_| "Enter a valid statement balance.".to_owned())?;
+                let cleared = self
+                    .view
+                    .accounts
+                    .iter()
+                    .find(|account| account.id == account_id)
+                    .map_or(crate::domain::Money::ZERO, |account| {
+                        account.cleared_balance
+                    });
+                let difference = crate::domain::reconciliation_difference(ending_balance, cleared)
+                    .map_err(|error| error.to_string())?;
+                if difference != crate::domain::Money::ZERO {
+                    return Err(
+                        "Reconciliation can complete only when the difference is exactly zero."
+                            .into(),
+                    );
+                }
+                Ok(FinancialCommand::Reconciliation(
+                    crate::app::command::ReconciliationCommand::CompleteSnapshot(
+                        crate::domain::Reconciliation {
+                            id: crate::domain::ReconciliationId::new(),
+                            budget_id,
+                            account_id,
+                            statement_date: crate::domain::StatementDate(statement_date),
+                            ending_balance,
+                            calculated_cleared_balance: cleared,
+                            difference,
+                            included_transaction_ids: vec![],
+                            state: crate::domain::ReconciliationState::Completed,
+                            created_at: time::OffsetDateTime::now_utc(),
+                            completed_at: Some(time::OffsetDateTime::now_utc()),
+                            invalidated_at: None,
+                        },
+                    ),
+                ))
+            })(),
             _ => Err("Complete the required workflow details before saving.".to_owned()),
         };
         let command = match command {
@@ -1044,9 +1152,25 @@ impl ApplicationRuntime {
                 return;
             }
             EditAccount if let Some(id) = self.view.selected_account => {
+                let form = self
+                    .view
+                    .accounts
+                    .iter()
+                    .find(|account| account.id == id)
+                    .map_or_else(Default::default, |account| {
+                        crate::ui::workspaces::all_accounts::AccountDialogForm {
+                            name: account.name.clone(),
+                            account_type: Some(account.account_type),
+                            opening_magnitude: "0".into(),
+                            opening_date: time::OffsetDateTime::now_utc().date().to_string(),
+                            group_id: account.group_id,
+                            note: String::new(),
+                            favorite: account.favorite,
+                        }
+                    });
                 self.view.editor = EditorState::EditingAccount(AccountEditorState {
                     account_id: Some(id),
-                    form: Default::default(),
+                    form,
                     metadata: EditorMetadata::new(egui::Id::new("account-summary")),
                 });
                 return;

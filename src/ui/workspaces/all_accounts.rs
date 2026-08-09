@@ -41,6 +41,9 @@ pub struct AccountDialogForm {
     /// User-entered non-negative magnitude; the service applies the account sign.
     pub opening_magnitude: String,
     pub opening_date: String,
+    pub group_id: Option<crate::domain::AccountGroupId>,
+    pub note: String,
+    pub favorite: bool,
 }
 
 impl AccountDialogForm {
@@ -108,6 +111,7 @@ mod tests {
             account_type: Some(AccountType::CreditCard),
             opening_magnitude: "-1".into(),
             opening_date: "2026-08-04".into(),
+            ..Default::default()
         };
         assert!(form.validate().is_err());
         form.opening_magnitude = "$1,234.00".into();

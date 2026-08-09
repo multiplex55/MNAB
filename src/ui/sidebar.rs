@@ -60,6 +60,7 @@ fn group(
     id: AccountGroupId,
     depth: usize,
     state: &mut AppState,
+    actions: &mut ActionCollector,
 ) -> Option<AccountId> {
     let Some(index) = state.account_groups.iter().position(|g| g.id == id) else {
         return None;
@@ -99,20 +100,17 @@ fn group(
                 account_row(ui, account, state.selected_account == Some(account.id))
             })
             .inner;
+        let account_id = account.id;
+        let closed = account.closed;
+        let favorite = account.favorite;
         r.context_menu(|ui| {
-            for label in [
-                "Rename",
-                "Move…",
-                if account.closed { "Reopen" } else { "Close…" },
-                if account.favorite {
-                    "Remove favorite"
-                } else {
-                    "Favorite"
-                },
-                "Delete if unused…",
-            ] {
-                ui.label(label);
-            }
+            use crate::app::command::{AccountCommand, ApplicationAction, FinancialCommand};
+            if ui.button("Edit / rename…").clicked() { state.selected_account = Some(account_id); actions.push(AppCommand::EditAccount); ui.close(); }
+            if ui.button("Move to ungrouped").clicked() { actions.push(ApplicationAction::Financial(FinancialCommand::Account(AccountCommand::MoveToGroup { id: account_id, group_id: None }))); ui.close(); }
+            if ui.button(if closed { "Reopen" } else { "Close…" }).clicked() { actions.push(ApplicationAction::Financial(FinancialCommand::Account(if closed { AccountCommand::Reopen(account_id) } else { AccountCommand::Close(account_id) }))); ui.close(); }
+            if ui.button(if favorite { "Remove favorite" } else { "Favorite" }).clicked() { actions.push(ApplicationAction::Financial(FinancialCommand::Account(AccountCommand::SetFavorite { id: account_id, favorite: !favorite }))); ui.close(); }
+            if ui.button("Delete if genuinely unused…").clicked() { actions.push(ApplicationAction::Financial(FinancialCommand::Account(AccountCommand::DeleteUnused(account_id)))); ui.close(); }
+            ui.small("This deletes only the unused account record; it never deletes or resets mnab.sqlite3.");
         });
         if r.clicked() {
             selected = Some(account_id);
@@ -133,7 +131,7 @@ fn group(
             .unwrap_or(0)
     });
     for child in children {
-        selected = group(ui, child, depth + 1, state).or(selected);
+        selected = group(ui, child, depth + 1, state, actions).or(selected);
     }
     selected
 }
@@ -196,7 +194,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollect
             .unwrap_or(0)
     });
     for root in roots {
-        if let Some(id) = group(ui, root, 0, state) {
+        if let Some(id) = group(ui, root, 0, state, actions) {
             state.selected_account = Some(id);
             state.navigation.workspace = Workspace::Account(id);
         }
