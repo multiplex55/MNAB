@@ -44,6 +44,7 @@ pub struct ApplicationRuntime {
     lifecycle_effects: Vec<LifecycleEffect>,
     shutdown_steps: ShutdownSteps,
     read_only: bool,
+    hydrated_generation: Option<u64>,
 }
 
 #[derive(Default)]
@@ -163,6 +164,7 @@ impl ApplicationRuntime {
             lifecycle_effects: Vec::new(),
             shutdown_steps: ShutdownSteps::default(),
             read_only: false,
+            hydrated_generation: None,
         };
         runtime.apply_startup(startup);
         runtime
@@ -193,7 +195,6 @@ impl ApplicationRuntime {
             Ok(prepared) => {
                 self.commit_session(prepared.session, prepared.worker);
                 self.database_lifecycle = DatabaseLifecycle::Ready;
-                self.resolve_startup_destination();
                 if startup.marker_was_absent {
                     self.startup_notice(NotificationKind::Information, "Startup diagnostics passed", "Integrity, foreign-key, and financial diagnostics passed after the unclean shutdown.");
                 }
@@ -218,21 +219,10 @@ impl ApplicationRuntime {
             }
         }
     }
-    fn resolve_startup_destination(&mut self) {
-        let Some(session) = &self.session else {
-            return;
-        };
-        let Ok(connection) = rusqlite::Connection::open_with_flags(
-            &session.database_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ) else {
-            return;
-        };
-        let Ok(tree) = crate::storage::query_store::QueryStore::new(&connection)
-            .account_tree(session.budget_id)
-        else {
-            return;
-        };
+    fn resolve_startup_destination(
+        &mut self,
+        tree: &[crate::storage::query_store::AccountTreeGroup],
+    ) {
         let accounts: Vec<_> = tree
             .iter()
             .flat_map(|g| &g.accounts)
@@ -544,6 +534,82 @@ impl ApplicationRuntime {
                 .expect("current calendar month is valid");
         self.view.database_path = Some(database_path);
         self.view.budget_name = budget_name;
+        self.hydrated_generation = None;
+        self.hydrate_session();
+    }
+    /// Schedules the immutable projections needed to render a newly opened session.
+    /// Repeated calls for the same budget generation are deliberately idempotent.
+    pub fn hydrate_session(&mut self) {
+        let Some(budget_id) = self.view.active_budget else {
+            return;
+        };
+        if self.hydrated_generation == Some(self.generation.budget) {
+            return;
+        }
+        self.hydrated_generation = Some(self.generation.budget);
+
+        let account_id = self.allocate_request();
+        self.view
+            .account_tree
+            .begin(account_id, self.generation, None);
+        let month_id = self.allocate_request();
+        self.view
+            .budget_month
+            .begin(month_id, self.generation, None);
+        let inbox_id = self.allocate_request();
+        self.view
+            .inbox_summary
+            .begin(inbox_id, self.generation, None);
+        self.request_category_catalog(None);
+
+        let requests = [
+            crate::storage::worker::StorageRequest {
+                id: account_id,
+                generation: self.generation,
+                operation: crate::storage::worker::WorkerOperation::Account(
+                    crate::storage::worker::AccountViewOperation::Tree { budget_id },
+                ),
+            },
+            crate::storage::worker::StorageRequest {
+                id: month_id,
+                generation: self.generation,
+                operation: crate::storage::worker::WorkerOperation::Budget(
+                    crate::storage::worker::BudgetViewOperation::Month {
+                        budget_id,
+                        month: self.view.selected_month,
+                    },
+                ),
+            },
+            crate::storage::worker::StorageRequest {
+                id: inbox_id,
+                generation: self.generation,
+                operation: crate::storage::worker::WorkerOperation::Inbox(
+                    crate::storage::worker::InboxViewOperation::Summary { budget_id },
+                ),
+            },
+        ];
+        for request in requests {
+            if self
+                .worker
+                .as_ref()
+                .is_none_or(|worker| worker.submit(request).is_err())
+            {
+                let message = "Session projection could not be requested.";
+                let _ = self
+                    .view
+                    .account_tree
+                    .fail(account_id, self.generation, message);
+                let _ = self
+                    .view
+                    .budget_month
+                    .fail(month_id, self.generation, message);
+                let _ = self
+                    .view
+                    .inbox_summary
+                    .fail(inbox_id, self.generation, message);
+                break;
+            }
+        }
     }
     pub fn close_session(&mut self) {
         if let Some(mut worker) = self.worker.take() {
@@ -556,6 +622,7 @@ impl ApplicationRuntime {
         self.history.clear();
         // Retain terminal/in-flight records for diagnostics. The worker was joined first.
         self.view.clear_budget_state();
+        self.hydrated_generation = None;
     }
     pub fn drain_worker_responses(&mut self) {
         let ready = self
@@ -1185,6 +1252,19 @@ impl ApplicationRuntime {
         safe: Option<crate::storage::worker::SafeUserError>,
     ) {
         match result {
+            Ok(crate::storage::worker::TypedResult::AccountTree(value)) => {
+                if self.view.account_tree.accept(id, generation, value.clone()) {
+                    self.resolve_startup_destination(&value);
+                }
+            }
+            Ok(crate::storage::worker::TypedResult::BudgetMonth(value)) => {
+                if self.view.budget_month.accept(id, generation, value.clone()) {
+                    self.view.budget_month_cache.insert(value);
+                }
+            }
+            Ok(crate::storage::worker::TypedResult::InboxSummary(value)) => {
+                let _ = self.view.inbox_summary.accept(id, generation, value);
+            }
             Ok(crate::storage::worker::TypedResult::CategoryCatalog(value)) => {
                 let _ = self.view.category_catalog.accept(id, generation, value);
             }
@@ -1207,7 +1287,14 @@ impl ApplicationRuntime {
                     .view
                     .category_detail
                     .fail(id, generation, message.clone());
-                let _ = self.view.report_query.view.fail(id, generation, message);
+                let _ = self
+                    .view
+                    .report_query
+                    .view
+                    .fail(id, generation, message.clone());
+                let _ = self.view.account_tree.fail(id, generation, message.clone());
+                let _ = self.view.budget_month.fail(id, generation, message.clone());
+                let _ = self.view.inbox_summary.fail(id, generation, message);
             }
             _ => self.view.complete_request(id),
         }
@@ -1615,7 +1702,81 @@ mod tests {
             },
             worker,
         );
+        for _ in 0..50 {
+            runtime.drain_worker_responses();
+            if !runtime.view.account_tree.refresh_active
+                && !runtime.view.budget_month.refresh_active
+                && !runtime.view.category_catalog.refresh_active
+                && !runtime.view.inbox_summary.refresh_active
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         (dir, runtime)
+    }
+
+    #[test]
+    fn hydration_is_scheduled_once_per_session() {
+        let (_dir, mut runtime) = runtime_with_worker();
+        let next = runtime.next_request;
+        runtime.hydrate_session();
+        runtime.hydrate_session();
+        assert_eq!(runtime.next_request, next);
+        assert!(runtime.view.account_tree.last_successful.is_some());
+        assert!(runtime.view.budget_month.last_successful.is_some());
+        assert!(!runtime.view.category_catalog.refresh_active);
+        assert!(runtime.view.inbox_summary.last_successful.is_some());
+    }
+
+    #[test]
+    fn stale_month_response_is_ignored_and_failure_is_visible() {
+        let (_dir, mut runtime) = runtime_with_worker();
+        let generation = runtime.generation;
+        let current_id = runtime.allocate_request();
+        runtime
+            .view
+            .budget_month
+            .begin(current_id, generation, None);
+        let month = runtime.view.selected_month;
+        let stale = crate::app::view_model::BudgetMonthView {
+            version: crate::app::view_model::ViewVersion {
+                generation: generation.budget,
+                revision: 1,
+            },
+            month,
+            calculation_revision: 1,
+            ready_to_assign_cents: 1,
+            assigned_cents: 0,
+            activity_cents: 0,
+            available_cents: 0,
+            overspending_cents: 0,
+            rows: vec![],
+            inspector: vec![],
+        };
+        runtime.handle_view_response(
+            current_id - 1,
+            generation,
+            Ok(crate::storage::worker::TypedResult::BudgetMonth(stale)),
+            None,
+        );
+        assert!(runtime.view.budget_month.refresh_active);
+        runtime.handle_view_response(
+            current_id,
+            generation,
+            Err(crate::storage::worker::WorkerError::Repository(
+                "offline".into(),
+            )),
+            None,
+        );
+        assert!(
+            runtime
+                .view
+                .budget_month
+                .safe_failure
+                .as_deref()
+                .is_some_and(|message| message.contains("offline"))
+        );
     }
 
     #[test]

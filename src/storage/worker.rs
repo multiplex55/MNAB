@@ -28,11 +28,29 @@ pub enum WorkerOperation {
     Register(RegisterPageOperation),
     RegisterView(RegisterViewOperation),
     Category(CategoryViewOperation),
+    Account(AccountViewOperation),
+    Budget(BudgetViewOperation),
+    Inbox(InboxViewOperation),
     Search(GlobalSearchOperation),
     Import(ImportOperation),
     Diagnostics(DiagnosticsOperation),
     Report(ReportOperation),
     Occurrences(OccurrenceOperation),
+}
+#[derive(Debug)]
+pub enum AccountViewOperation {
+    Tree { budget_id: crate::domain::BudgetId },
+}
+#[derive(Debug)]
+pub enum BudgetViewOperation {
+    Month {
+        budget_id: crate::domain::BudgetId,
+        month: crate::domain::BudgetMonth,
+    },
+}
+#[derive(Debug)]
+pub enum InboxViewOperation {
+    Summary { budget_id: crate::domain::BudgetId },
 }
 #[derive(Debug)]
 pub enum SessionOperation {
@@ -115,6 +133,9 @@ pub enum TypedResult {
     Report(crate::app::view_model::ReportView),
     RegisterPage(crate::app::view_model::RegisterPageView),
     CategoryCatalog(crate::app::view_model::CategoryCatalogView),
+    AccountTree(Vec<crate::storage::query_store::AccountTreeGroup>),
+    BudgetMonth(crate::app::view_model::BudgetMonthView),
+    InboxSummary(crate::app::view_model::InboxSummaryView),
     CategoryDetail(crate::app::view_model::CategoryDetailView),
     SearchResults(crate::app::view_model::SearchResultsView),
     ImportParsed(crate::app::view_model::CommandOutcomeView),
@@ -511,6 +532,38 @@ fn execute_operation(
                     .map(TypedResult::CategoryDetail),
             }
             .map_err(|e| WorkerError::Repository(e.to_string()))
+        }
+        WorkerOperation::Account(AccountViewOperation::Tree { budget_id }) => {
+            crate::storage::query_store::QueryStore::new(c)
+                .account_tree(*budget_id)
+                .map(TypedResult::AccountTree)
+                .map_err(|e| WorkerError::Repository(e.to_string()))
+        }
+        WorkerOperation::Budget(BudgetViewOperation::Month { budget_id, month }) => {
+            let key = format!("{:04}-{:02}", month.year(), month.month());
+            crate::storage::query_store::QueryStore::new(c)
+                .budget_month(*budget_id, &key)
+                .map(|mut view| {
+                    view.version.generation = generation.budget;
+                    TypedResult::BudgetMonth(view)
+                })
+                .map_err(|e| WorkerError::Repository(e.to_string()))
+        }
+        WorkerOperation::Inbox(InboxViewOperation::Summary { budget_id }) => {
+            let budget = budget_id.to_string();
+            let count = |sql: &str| c.query_row(sql, [&budget], |row| row.get::<_, u64>(0));
+            let view = crate::app::view_model::InboxSummaryView {
+                version: crate::app::view_model::ViewVersion { generation: generation.budget, revision: 0 },
+                unapproved_count: count("SELECT count(*) FROM transactions WHERE budget_id=?1 AND approval_state='unapproved' AND archived=0")
+                    .map_err(|e| WorkerError::Repository(e.to_string()))?,
+                import_count: count("SELECT count(*) FROM staged_import_candidates WHERE budget_id=?1 AND review_decision='pending'")
+                    .map_err(|e| WorkerError::Repository(e.to_string()))?,
+                scheduled_count: count("SELECT count(*) FROM scheduled_occurrences WHERE budget_id=?1 AND disposition='pending'")
+                    .map_err(|e| WorkerError::Repository(e.to_string()))?,
+                target_attention_count: count("SELECT count(*) FROM targets WHERE budget_id=?1")
+                    .map_err(|e| WorkerError::Repository(e.to_string()))?,
+            };
+            Ok(TypedResult::InboxSummary(view))
         }
         WorkerOperation::Search(search) => {
             let store = crate::storage::query_store::QueryStore::new(c);
