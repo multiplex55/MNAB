@@ -22,18 +22,15 @@ pub fn show(
         .iter()
         .find(|account| account.id == account_id)
     {
-        let header = crate::ui::account_header::format(
+        let header = crate::ui::account_header::model(
             &account.name,
             account.account_type,
             account.working_balance,
             account.cleared_balance,
+            account.closed,
+            account.unreconciled,
         );
-        ui.heading(header.name);
-        ui.horizontal(|ui| {
-            ui.label(format!("Working: {}", header.working));
-            ui.label(format!("Cleared: {}", header.cleared));
-            ui.label(format!("Uncleared: {}", header.uncleared));
-        });
+        crate::ui::account_header::show(ui, &header, state.action_context(), commands);
     } else {
         ui.heading("Account Transactions");
     }

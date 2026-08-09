@@ -79,7 +79,7 @@ impl Default for BudgetUiState {
 }
 impl BudgetUiState {
     pub fn begin_edit(&mut self, id: CategoryId, value: Money) {
-        let value = value.to_string();
+        let value = crate::ui::format::money(value);
         self.edit = Some(AssignmentEdit {
             category_id: id,
             original: value.clone(),
@@ -408,7 +408,7 @@ fn render_grid(
                     state.focused_category = Some(row.category_id);
                 }
                 assignment_cell(ui, row, view, state, &visible, actions);
-                ui.label(cents(row.activity_cents).to_string());
+                ui.label(crate::ui::format::money(cents(row.activity_cents)));
                 let (color, label) = availability(row);
                 ui.colored_label(color, label);
                 if row.underfunded_cents > 0 {
@@ -441,7 +441,10 @@ fn assignment_cell(
         .as_ref()
         .is_some_and(|e| e.category_id == row.category_id);
     if !editing {
-        if ui.button(cents(row.assigned_cents).to_string()).clicked() {
+        if ui
+            .button(crate::ui::format::money(cents(row.assigned_cents)))
+            .clicked()
+        {
             state.begin_edit(row.category_id, cents(row.assigned_cents));
         }
         return;
@@ -488,7 +491,7 @@ fn availability(row: &CategoryRowView) -> (egui::Color32, String) {
     if row.overspending_cents >= 0 {
         return (
             egui::Color32::from_rgb(35, 130, 70),
-            cents(row.available_cents).to_string(),
+            crate::ui::format::money(cents(row.available_cents)),
         );
     }
     if row.credit_card_payment {

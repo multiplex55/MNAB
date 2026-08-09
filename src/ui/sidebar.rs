@@ -21,7 +21,7 @@ fn account_row(ui: &mut egui::Ui, account: &AccountSummary, selected: bool) -> e
             warning,
             kind,
             closed,
-            account.working_balance
+            crate::ui::format::money(account.working_balance)
         ),
     )
 }
@@ -201,7 +201,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollect
         ui.horizontal(|ui| {
             ui.strong(section);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.strong(total.to_string());
+                crate::ui::format::money_cell(ui, total);
             });
         });
         let mut ordered = accounts;

@@ -164,7 +164,7 @@ fn show_detail(ui: &mut egui::Ui, state: &AppState, actions: &mut ActionCollecto
         ui.label(
             detail
                 .due_date
-                .map_or_else(|| "No date".into(), |v| v.to_string()),
+                .map_or_else(|| "No date".into(), crate::ui::format::date),
         );
         ui.end_row();
         ui.label("Current / remaining");

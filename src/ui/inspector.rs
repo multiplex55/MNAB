@@ -21,12 +21,12 @@ pub fn show_target_recommendation(ui: &mut egui::Ui, value: &TargetRecommendatio
             ("Suggested this month", value.monthly_recommendation),
         ] {
             ui.label(label);
-            ui.strong(amount.to_string());
+            ui.strong(crate::ui::format::money(amount));
             ui.end_row();
         }
     });
     if let Some(due) = value.due_date {
-        ui.label(format!("Due {due}"));
+        ui.label(format!("Due {}", crate::ui::format::date(due)));
     }
     ui.label(if value.status == TargetStatus::Funded {
         "Funded"
@@ -41,8 +41,8 @@ pub fn show_occurrences(ui: &mut egui::Ui, occurrences: &[ScheduledOccurrence]) 
     ui.heading("Upcoming scheduled items");
     for item in occurrences {
         ui.horizontal(|ui| {
-            ui.strong(item.date.to_string());
-            ui.label(item.amount.to_string());
+            ui.strong(crate::ui::format::date(item.date));
+            ui.label(crate::ui::format::money(item.amount));
             let _ = ui.button("Enter now");
             let _ = ui.button("Skip");
             let _ = ui.button("Modify");
@@ -82,7 +82,7 @@ pub fn show_credit_card(ui: &mut egui::Ui, result: &CreditCardResult) {
             ("Payment available", result.payment_available),
         ] {
             ui.label(label);
-            ui.strong(value.to_string());
+            ui.strong(crate::ui::format::money(value));
             ui.end_row();
         }
     });
@@ -100,13 +100,13 @@ pub struct ReconciliationInspector<'a> {
 pub fn show_reconciliation(ui: &mut egui::Ui, model: &ReconciliationInspector<'_>) {
     egui::Grid::new("reconciliation-totals").show(ui, |ui| {
         ui.label("Statement balance");
-        ui.strong(model.statement_balance.to_string());
+        ui.strong(crate::ui::format::money(model.statement_balance));
         ui.end_row();
         ui.label("Cleared balance");
-        ui.strong(model.cleared_balance.to_string());
+        ui.strong(crate::ui::format::money(model.cleared_balance));
         ui.end_row();
         ui.label("Difference");
-        ui.strong(model.difference.to_string());
+        ui.strong(crate::ui::format::money(model.difference));
         ui.end_row();
     });
     ui.label(format!("{} eligible register rows", model.eligible.len()));

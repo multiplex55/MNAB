@@ -20,12 +20,6 @@ pub fn show_header_preview(ui: &mut egui::Ui, columns: &[RegisterColumn]) {
         }
     });
 }
-fn money(cents: i64) -> String {
-    let sign = if cents < 0 { "-" } else { "" };
-    let n = cents.unsigned_abs();
-    format!("{sign}${}.{:02}", n / 100, n % 100)
-}
-
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut AppState,
@@ -157,7 +151,7 @@ fn cell(
             ui.label(&m.account_name);
         }
         RegisterColumn::Date => {
-            ui.label(m.date.to_string());
+            ui.label(crate::ui::format::register_date(m.date));
         }
         RegisterColumn::PayeeTransfer => {
             ui.label(&m.payee_name);
@@ -169,10 +163,16 @@ fn cell(
             ui.label(m.memo.as_deref().unwrap_or(""));
         }
         RegisterColumn::Outflow => {
-            ui.monospace(money(m.outflow_cents));
+            crate::ui::format::money_cell(
+                ui,
+                crate::domain::Money::from_minor_units(m.outflow_cents),
+            );
         }
         RegisterColumn::Inflow => {
-            ui.monospace(money(m.inflow_cents));
+            crate::ui::format::money_cell(
+                ui,
+                crate::domain::Money::from_minor_units(m.inflow_cents),
+            );
         }
         RegisterColumn::Cleared => {
             ui.label(&m.cleared_state);
@@ -185,7 +185,11 @@ fn cell(
             });
         }
         RegisterColumn::RunningBalance => {
-            ui.monospace(m.running_balance_cents.map_or_else(|| "—".into(), money));
+            if let Some(value) = m.running_balance_cents {
+                crate::ui::format::money_cell(ui, crate::domain::Money::from_minor_units(value));
+            } else {
+                ui.label("—");
+            }
         }
     }
 }
