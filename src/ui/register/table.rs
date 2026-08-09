@@ -2,7 +2,7 @@ use super::{RegisterColumn, RegisterScope, RowMenuAction};
 use crate::app::{
     command::{AppCommand, ApplicationAction, RegisterAction},
     dispatcher::ActionCollector,
-    state::{AppState, EditorState},
+    state::{AppState, EditorSurface},
 };
 
 fn width(column: RegisterColumn) -> f32 {
@@ -56,9 +56,10 @@ pub fn show(
         RegisterScope::Account
     };
     let columns = super::columns_for(scope);
-    let editor_active = matches!(
-        state.editor,
-        EditorState::CreatingTransaction(_) | EditorState::EditingTransaction(_)
+    let editor_active = super::editor_visible(state.editor.surface());
+    debug_assert_eq!(
+        editor_active,
+        state.editor.surface() == EditorSurface::InlineRegister
     );
     if page.as_ref().is_none_or(|p| p.rows.is_empty()) && !editor_active {
         let model = crate::ui::empty_state::model(

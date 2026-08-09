@@ -68,6 +68,11 @@ pub fn show(
     commands: &mut ActionCollector,
     scope: super::RegisterScope,
 ) {
+    debug_assert_eq!(
+        state.editor.surface(),
+        crate::app::state::EditorSurface::InlineRegister
+    );
+    let creating = matches!(state.editor, EditorState::CreatingTransaction(_));
     let accounts = &state.accounts;
     let payee_names = state
         .register_query
@@ -336,7 +341,7 @@ pub fn show(
             }
         })
         .response;
-    if editor.transaction_id.is_none() {
+    if creating {
         response.scroll_to_me(Some(egui::Align::Center));
     }
 }

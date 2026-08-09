@@ -183,7 +183,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
     });
     super::notifications::show(ctx, state, actions);
     show_palette(ctx, state, actions);
-    show_workflow_editor(ctx, state, actions);
+    show_modal_editor(ctx, state, actions);
     show_budget_dialog(ctx, state, actions);
 }
 
@@ -225,15 +225,20 @@ mod search_scope_tests {
 
 /// Renders the runtime-owned editor state.  Editors remain visible while a typed worker request is
 /// in flight or after a retryable failure, so a failed operation never discards user input.
-fn show_workflow_editor(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionCollector) {
-    use crate::app::state::{CommitState, EditorState};
-    if !state.editor.is_active() {
+const fn renders_modal_editor(surface: crate::app::state::EditorSurface) -> bool {
+    matches!(surface, crate::app::state::EditorSurface::Modal)
+}
+
+fn show_modal_editor(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionCollector) {
+    use crate::app::state::{CommitState, EditorState, EditorSurface};
+    if !renders_modal_editor(state.editor.surface()) {
         return;
     }
+    debug_assert_eq!(state.editor.surface(), EditorSurface::Modal);
     let mut cancel = false;
     let mut commit = false;
-    egui::Window::new("Workflow")
-        .id(egui::Id::new("workflow-editor"))
+    egui::Window::new("Editor")
+        .id(egui::Id::new("modal-editor"))
         .collapsible(false).resizable(true).show(ctx, |ui| {
         match &mut state.editor {
             EditorState::CreatingAccount(editor) | EditorState::EditingAccount(editor) => {
@@ -284,8 +289,11 @@ fn show_workflow_editor(ctx: &egui::Context, state: &mut AppState, actions: &mut
                 if let Ok(statement) = editor.statement_balance.parse::<crate::domain::Money>() { if let Ok(difference) = statement.checked_sub(cleared) { ui.label(format!("Difference: {difference}")); ui.small(if difference == crate::domain::Money::ZERO { "Ready to complete: difference is exactly zero." } else { "Completion requires an exact zero difference." }); } }
                 ui.small("Transactions on or before the statement date may be cleared. Previously reconciled transactions are protected and require explicit confirmation to edit or delete.");
             }
-            EditorState::CreatingTransaction(_) | EditorState::EditingTransaction(_) => { ui.heading("Transaction editor"); ui.label("Complete the transaction fields in the register."); }
-            EditorState::ManagingCategory(_) | EditorState::ManagingAccountGroup(_) | EditorState::Idle => {}
+            EditorState::CreatingTransaction(_)
+            | EditorState::EditingTransaction(_)
+            | EditorState::ManagingCategory(_)
+            | EditorState::ManagingAccountGroup(_)
+            | EditorState::Idle => unreachable!("non-modal editor reached the modal renderer"),
         }
         if let Some(meta) = state.editor.metadata() {
             for error in &meta.validation_errors { ui.colored_label(egui::Color32::RED, error); }
@@ -298,6 +306,22 @@ fn show_workflow_editor(ctx: &egui::Context, state: &mut AppState, actions: &mut
     }
     if cancel {
         actions.push(crate::app::command::AppCommand::Cancel);
+    }
+}
+
+#[cfg(test)]
+mod editor_surface_tests {
+    use super::*;
+    use crate::app::state::EditorSurface;
+
+    #[test]
+    fn modal_and_inline_renderers_claim_disjoint_surfaces() {
+        assert!(renders_modal_editor(EditorSurface::Modal));
+        assert!(!renders_modal_editor(EditorSurface::InlineRegister));
+        assert!(crate::ui::register::editor_visible(
+            EditorSurface::InlineRegister
+        ));
+        assert!(!crate::ui::register::editor_visible(EditorSurface::Modal));
     }
 }
 

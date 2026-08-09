@@ -95,8 +95,8 @@ pub const fn editor_row_identity(id: Option<TransactionId>) -> EditorRowIdentity
         None => EditorRowIdentity::Draft,
     }
 }
-pub const fn editor_visible(editor_active: bool, _saved_row_count: usize) -> bool {
-    editor_active
+pub const fn editor_visible(surface: crate::app::state::EditorSurface) -> bool {
+    matches!(surface, crate::app::state::EditorSurface::InlineRegister)
 }
 pub const fn initial_focus(scope: RegisterScope) -> TransactionEditorField {
     match scope {
@@ -296,9 +296,11 @@ mod tests {
     }
     #[test]
     fn editor_is_visible_empty_or_populated() {
-        assert!(editor_visible(true, 0));
-        assert!(editor_visible(true, 4));
-        assert!(!editor_visible(false, 0));
+        use crate::app::state::EditorSurface;
+        assert!(editor_visible(EditorSurface::InlineRegister));
+        assert!(!editor_visible(EditorSurface::Modal));
+        assert!(!editor_visible(EditorSurface::Workspace));
+        assert!(!editor_visible(EditorSurface::None));
     }
     #[test]
     fn editor_identity_is_stable() {
