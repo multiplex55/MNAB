@@ -294,6 +294,8 @@ impl ApplicationRuntime {
                 self.view.selected_account.map(|id| id.to_string());
             settings.value_mut().last_workspace = Some(
                 match self.view.navigation.workspace {
+                    crate::app::navigation::Workspace::Overview => "overview",
+                    crate::app::navigation::Workspace::Budget => "budget",
                     crate::app::navigation::Workspace::Account(_) => "account",
                     crate::app::navigation::Workspace::AllTransactions => "all_transactions",
                     crate::app::navigation::Workspace::Categories => "categories",
@@ -406,6 +408,11 @@ impl ApplicationRuntime {
         // for correlation diagnostics; generation checks make late responses harmless.
         self.view.clear_budget_state();
         self.view.active_budget = Some(budget_id);
+        let now =
+            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        self.view.selected_month =
+            crate::domain::BudgetMonth::new(now.year(), u8::from(now.month()))
+                .expect("current calendar month is valid");
         self.view.database_path = Some(database_path);
         self.view.budget_name = budget_name;
     }
@@ -609,6 +616,19 @@ impl ApplicationRuntime {
                 self.view.register_focus = Some(self.view.search_id);
                 return;
             }
+            NavigateOverview => {
+                self.view.navigation.workspace = Workspace::Overview;
+                return;
+            }
+            NavigateBudget => {
+                self.view.navigation.workspace = Workspace::Budget;
+                self.invalidations.insert(
+                    crate::app::view_invalidation::ViewInvalidation::BudgetMonth(
+                        self.view.selected_month,
+                    ),
+                );
+                return;
+            }
             NavigateCategories => {
                 self.view.navigation.workspace = Workspace::Categories;
                 self.request_category_catalog(None);
@@ -736,7 +756,15 @@ impl ApplicationRuntime {
             MoveUp | MoveDown | NextField | PreviousField => {
                 "Select an editable account group item first"
             }
-            PreviousMonth | NextMonth => "Use the date filter in Reports to change months",
+            PreviousMonth | NextMonth if self.view.navigation.workspace == Workspace::Budget => {
+                if let Some(month) = self.view.step_budget_month(intent == NextMonth) {
+                    self.invalidations.insert(
+                        crate::app::view_invalidation::ViewInvalidation::BudgetMonth(month),
+                    );
+                }
+                return;
+            }
+            PreviousMonth | NextMonth => "Open Budget to change its month",
             Backup if self.database_lifecycle == DatabaseLifecycle::Ready => {
                 self.view.open_dialog(
                     Dialog::RecentBudgets,

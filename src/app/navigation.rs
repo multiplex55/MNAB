@@ -6,10 +6,11 @@ use crate::{
     domain::AccountId,
 };
 
-/// Stable, account-centric destinations. Calendar months belong to report/date filters,
-/// never to application navigation.
+/// Stable destinations. The active budget month remains state, not a route parameter.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Workspace {
+    Overview,
+    Budget,
     Account(AccountId),
     #[default]
     AllTransactions,
@@ -66,9 +67,14 @@ mod tests {
     }
 
     #[test]
-    fn navigation_and_inspector_do_not_reference_monthly_assignment_workspace() {
-        let sources = include_str!("../ui/inspector.rs");
-        assert!(!sources.contains("BudgetMonth"));
-        assert!(!sources.contains("Workspace::Budget"));
+    fn budget_and_overview_are_first_class_monthless_destinations() {
+        assert_eq!(
+            Navigation::new(Workspace::Budget).workspace,
+            Workspace::Budget
+        );
+        assert_eq!(
+            Navigation::new(Workspace::Overview).workspace,
+            Workspace::Overview
+        );
     }
 }

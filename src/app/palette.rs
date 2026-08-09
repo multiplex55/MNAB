@@ -16,6 +16,8 @@ pub struct CommandContext {
     pub database_available: bool,
     pub account_register: bool,
     pub categories_workspace: bool,
+    pub budget_workspace: bool,
+    pub overview_workspace: bool,
     pub mutations_disabled: bool,
     pub has_selection: bool,
     pub editing: bool,
@@ -52,7 +54,11 @@ pub enum ExecuteError {
 fn availability_context(context: CommandContext) -> CommandAvailabilityContext {
     CommandAvailabilityContext {
         database_available: context.database_available,
-        workspace: if context.account_register {
+        workspace: if context.budget_workspace {
+            CommandWorkspace::Budget
+        } else if context.overview_workspace {
+            CommandWorkspace::Overview
+        } else if context.account_register {
             CommandWorkspace::AccountRegister
         } else if context.categories_workspace {
             CommandWorkspace::Categories
@@ -99,6 +105,18 @@ pub fn commands_for(context: CommandContext) -> Vec<CommandDescriptor> {
     use AppCommand::*;
     use RequiredContext::*;
     [
+        (
+            NavigateOverview,
+            "Open overview",
+            "overview home dashboard",
+            BudgetOpen,
+        ),
+        (
+            NavigateBudget,
+            "Open budget",
+            "budget plan assign month",
+            BudgetOpen,
+        ),
         (
             ContextualNew,
             "New transaction",
@@ -166,14 +184,9 @@ pub fn commands_for(context: CommandContext) -> Vec<CommandDescriptor> {
             PreviousMonth,
             "Previous month",
             "budget month back",
-            CategoriesWorkspace,
+            BudgetOpen,
         ),
-        (
-            NextMonth,
-            "Next month",
-            "budget month forward",
-            CategoriesWorkspace,
-        ),
+        (NextMonth, "Next month", "budget month forward", BudgetOpen),
         (
             Import,
             "Import transactions",

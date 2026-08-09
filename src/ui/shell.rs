@@ -120,6 +120,8 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
         state.inspector_width = right.response.rect.width();
     }
     egui::CentralPanel::default().show(ctx, |ui| match state.navigation.workspace {
+        Workspace::Overview => super::workspaces::overview::show(ui, state),
+        Workspace::Budget => super::workspaces::budget::show(ui, state, actions),
         Workspace::Categories => super::workspaces::categories::show(ui, state, actions),
         Workspace::Reports => super::workspaces::reports::show(ui, state, actions),
         Workspace::AllTransactions => super::workspaces::all_accounts::show(ui, state, actions),
@@ -188,6 +190,8 @@ fn show_palette(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionC
         database_available: state.active_budget.is_some(),
         account_register: matches!(state.navigation.workspace, Workspace::Account(_)),
         categories_workspace: state.navigation.workspace == Workspace::Categories,
+        budget_workspace: state.navigation.workspace == Workspace::Budget,
+        overview_workspace: state.navigation.workspace == Workspace::Overview,
         mutations_disabled: state.mutations_disabled,
         has_selection: false,
         editing: false,
