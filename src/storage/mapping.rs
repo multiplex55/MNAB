@@ -4,6 +4,91 @@ use crate::domain::*;
 use time::{Date, format_description::well_known::Iso8601};
 use uuid::Uuid;
 
+/// Converts a legacy merchant row into the generalized representation without changing its
+/// exact/contains/prefix behavior. Regex survives only as an isolated non-authorable condition.
+pub fn legacy_transaction_rule(
+    row: &MerchantRuleRow,
+) -> Result<TransactionRule, crate::error::RepositoryError> {
+    let id = row
+        .id
+        .parse()
+        .map(TransactionRuleId::from_uuid)
+        .map_err(projection_error)?;
+    let account = row
+        .account_id
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(projection_error)?;
+    let payee = row
+        .payee_id
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(projection_error)?;
+    let category = row
+        .category_id
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(projection_error)?;
+    let merchant = match row.match_type.as_str() {
+        "exact" => RuleCondition::Merchant {
+            value: normalize_merchant(&row.pattern),
+            match_type: TextMatch::Exact,
+        },
+        "contains" => RuleCondition::Merchant {
+            value: normalize_merchant(&row.pattern),
+            match_type: TextMatch::Contains,
+        },
+        "prefix" => RuleCondition::Merchant {
+            value: normalize_merchant(&row.pattern),
+            match_type: TextMatch::Prefix,
+        },
+        "regex" => RuleCondition::LegacyMerchantRegex {
+            pattern: row.pattern.clone(),
+        },
+        other => {
+            return Err(projection_error(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown merchant match type {other}"),
+            )));
+        }
+    };
+    let mut conditions = vec![merchant];
+    if let Some(account) = account {
+        conditions.push(RuleCondition::Account(account));
+    }
+    let mut actions = Vec::new();
+    if let Some(payee_id) = payee {
+        actions.push(RuleAction::SetPayee {
+            payee_id,
+            display_name_snapshot: String::new(),
+        });
+    }
+    if let Some(category_id) = category {
+        actions.push(RuleAction::SetCategory { category_id });
+    }
+    Ok(TransactionRule {
+        id,
+        name: format!("Merchant: {}", row.pattern),
+        description: "Migrated merchant rule".into(),
+        enabled: row.enabled != 0,
+        priority: i32::try_from(row.priority).unwrap_or(if row.priority < 0 {
+            i32::MIN
+        } else {
+            i32::MAX
+        }),
+        origin: MerchantRuleOrigin::Explicit,
+        conditions,
+        actions,
+        confidence: MerchantConfidence::High,
+        usage_count: 0,
+        match_count: 0,
+        last_used_date: None,
+    })
+}
+
 fn projection_error(
     error: impl std::error::Error + Send + Sync + 'static,
 ) -> crate::error::RepositoryError {

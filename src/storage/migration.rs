@@ -5,10 +5,11 @@ use std::{
 };
 use thiserror::Error;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 1;
+pub const LATEST_SCHEMA_VERSION: i64 = 2;
 pub const SCHEMA_FAMILY_KEY: &str = "schema_family";
 pub const SCHEMA_FAMILY: &str = "account_centric_v1";
 const ACCOUNT_CENTRIC_SCHEMA_SQL: &str = include_str!("migrations/0001_account_centric_schema.sql");
+const TRANSACTION_RULE_SQL: &str = include_str!("migrations/0002_transaction_rules.sql");
 
 struct ReleasedMigration {
     version: i64,
@@ -17,12 +18,20 @@ struct ReleasedMigration {
     sql: &'static str,
 }
 
-const RELEASED_MIGRATIONS: &[ReleasedMigration] = &[ReleasedMigration {
-    version: 1,
-    identifier: "0001_account_centric_schema",
-    checksum: "0001-account-centric-schema-v1",
-    sql: ACCOUNT_CENTRIC_SCHEMA_SQL,
-}];
+const RELEASED_MIGRATIONS: &[ReleasedMigration] = &[
+    ReleasedMigration {
+        version: 1,
+        identifier: "0001_account_centric_schema",
+        checksum: "0001-account-centric-schema-v1",
+        sql: ACCOUNT_CENTRIC_SCHEMA_SQL,
+    },
+    ReleasedMigration {
+        version: 2,
+        identifier: "0002_transaction_rules",
+        checksum: "0002-transaction-rules-v1",
+        sql: TRANSACTION_RULE_SQL,
+    },
+];
 
 #[derive(Debug, Error)]
 pub enum MigrationError {

@@ -38,5 +38,6 @@ ids!(
     ImportBatchId,
     TargetId,
     ScheduledTransactionId,
-    ScheduledOccurrenceId
+    ScheduledOccurrenceId,
+    TransactionRuleId
 );
