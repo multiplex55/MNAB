@@ -218,9 +218,17 @@ pub struct RegisterRow {
     pub approval_state: String,
     pub transfer_id: Option<String>,
     pub split_count: u32,
+    pub splits: Vec<RegisterSplitLine>,
     pub import_batch_id: Option<String>,
     pub import_source: Option<String>,
     pub review_state: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegisterSplitLine {
+    pub category_id: String,
+    pub amount: Money,
+    pub memo: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1008,6 +1016,7 @@ impl<'a> QueryStore<'a> {
                     approval_state: r.get(13)?,
                     transfer_id: r.get(14)?,
                     split_count: r.get::<_, i64>(15)? as u32,
+                    splits: vec![],
                     import_batch_id: r.get(16)?,
                     import_source: r.get(17)?,
                     review_state: r.get(18)?,
@@ -1018,6 +1027,23 @@ impl<'a> QueryStore<'a> {
             .map_err(repo)?;
         let has_more = rows.len() > limit;
         rows.truncate(limit);
+        for row in &mut rows {
+            if row.split_count == 0 {
+                continue;
+            }
+            let mut statement = self.connection.prepare("SELECT category_id,amount,memo FROM subtransactions WHERE transaction_id=?1 ORDER BY sort_order").map_err(repo)?;
+            row.splits = statement
+                .query_map([&row.transaction_id], |r| {
+                    Ok(RegisterSplitLine {
+                        category_id: r.get(0)?,
+                        amount: Money::from_minor_units(r.get(1)?),
+                        memo: r.get(2)?,
+                    })
+                })
+                .map_err(repo)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(repo)?;
+        }
         let next_cursor = has_more
             .then(|| rows.last())
             .flatten()

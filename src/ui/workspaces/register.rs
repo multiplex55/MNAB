@@ -212,11 +212,10 @@ fn show_page_table(
     columns.clear();
 }
 
-/// Builds an editor from the register projection. Split rows deliberately return `None`:
-/// callers must fetch the complete aggregate before allowing it to be overwritten.
+/// Builds an editor from the register projection, including its complete ordered split aggregate.
 #[must_use]
 pub fn editor_from_row(row: &crate::app::view_model::RegisterRowView) -> Option<TransactionEditor> {
-    if row.split_count != 0 {
+    if row.split_count as usize != row.splits.len() {
         return None;
     }
     Some(TransactionEditor {
@@ -250,8 +249,27 @@ pub fn editor_from_row(row: &crate::app::view_model::RegisterRowView) -> Option<
         }),
         approved: row.approved,
         reconciled: row.reconciled,
+        splits: row
+            .splits
+            .iter()
+            .map(|split| SplitLineForm {
+                category_id: Some(split.category_id),
+                amount: Money::from_minor_units(split.amount_cents).to_string(),
+                memo: split.memo.clone().unwrap_or_default(),
+            })
+            .collect(),
         ..Default::default()
     })
+}
+
+/// Whether the inline editor can be committed without losing information.
+/// Split arithmetic deliberately goes through `TransactionEditor::remaining`, so the UI and the
+/// eventual command validation use the same integer-minor-unit model.
+#[must_use]
+pub fn transaction_commit_available(editor: &TransactionEditor) -> bool {
+    (!editor.reconciled || editor.protected_edit_confirmed)
+        && editor.remaining() == Ok(Money::ZERO)
+        && editor.validate().is_ok()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -640,7 +658,6 @@ pub fn load_state(
     empty_action: &str,
     commands: &mut ActionCollector,
 ) {
-    show_inline_editor(ui, state, commands);
     let query = &state.register_query;
     if query.refresh_active && query.last_successful.is_none() {
         ui.spinner();
@@ -669,7 +686,11 @@ pub fn load_state(
                 ui.small("Refreshing…");
             }
             show_page_table(ui, state, page, commands);
-            if page.has_more {
+            let has_more = page.has_more;
+            // The editor follows the register row area rather than appearing as a detached form
+            // above it. Split lines therefore expand downward beneath their parent register row.
+            show_inline_editor(ui, state, commands);
+            if has_more {
                 ui.small("Scroll near the end to load more…");
             }
         }
@@ -695,6 +716,16 @@ fn show_inline_editor(ui: &mut egui::Ui, state: &mut AppState, commands: &mut Ac
         } else {
             "New transaction (not saved)"
         });
+        if editor.draft.reconciled && !editor.draft.protected_edit_confirmed {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "Warning: editing this reconciled transaction may invalidate the completed reconciliation.",
+            );
+            ui.label("Review the change carefully; the account may need to be reconciled again.");
+            if ui.button("Edit Anyway").clicked() {
+                editor.draft.protected_edit_confirmed = true;
+            }
+        }
         ui.horizontal(|ui| {
             ui.label("Date");
             ui.text_edit_singleline(&mut editor.draft.date);
@@ -739,13 +770,44 @@ fn show_inline_editor(ui: &mut egui::Ui, state: &mut AppState, commands: &mut Ac
                     );
                 });
             ui.checkbox(&mut editor.draft.approved, "Approved");
-            if ui.button("Save").clicked() {
+            let can_commit = transaction_commit_available(&editor.draft);
+            if ui.add_enabled(can_commit, egui::Button::new("Save")).clicked() {
                 commands.push(crate::app::command::AppCommand::Commit);
             }
             if ui.button("Cancel").clicked() {
                 commands.push(crate::app::command::AppCommand::Cancel);
             }
         });
+        ui.separator();
+        ui.strong("Split lines");
+        let mut remove = None;
+        for (index, split) in editor.draft.splits.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("{}.", index + 1));
+                ui.label("Category");
+                ui.label(split.category_id.map_or("Choose a category".into(), |id| id.to_string()));
+                ui.label("Amount");
+                ui.text_edit_singleline(&mut split.amount);
+                ui.label("Memo");
+                ui.text_edit_singleline(&mut split.memo);
+                if ui.small_button("Remove").clicked() { remove = Some(index); }
+            });
+        }
+        if let Some(index) = remove { editor.draft.splits.remove(index); }
+        if ui.button("Add split line").clicked() {
+            editor.draft.splits.push(SplitLineForm::default());
+        }
+        match editor.draft.remaining() {
+            Ok(remaining) => {
+                let balanced = remaining == Money::ZERO;
+                ui.colored_label(
+                    if balanced { egui::Color32::GREEN } else { ui.visuals().error_fg_color },
+                    format!("Remaining: {}", format_minor_units(remaining.minor_units())),
+                );
+                if !balanced { ui.small("Split amounts must total the transaction exactly before Save is enabled."); }
+            }
+            Err(error) => { ui.colored_label(ui.visuals().error_fg_color, format!("Split error: {error:?}")); }
+        }
         if editor.metadata.commit_state == crate::app::state::CommitState::Failed {
             for error in &editor.metadata.validation_errors {
                 ui.colored_label(
@@ -759,7 +821,57 @@ fn show_inline_editor(ui: &mut egui::Ui, state: &mut AppState, commands: &mut Ac
 
 #[cfg(test)]
 mod tests {
+    use super::{EditorError, SplitLineForm, TransactionEditor, transaction_commit_available};
+    use crate::domain::{CategoryId, Clearance, Money};
     use crate::storage::worker::Generation;
+
+    fn split_editor(parent: &str, amounts: &[&str]) -> TransactionEditor {
+        TransactionEditor {
+            date: "2026-08-09".into(),
+            outflow: parent.into(),
+            clearance: Some(Clearance::Uncleared),
+            splits: amounts
+                .iter()
+                .map(|amount| SplitLineForm {
+                    category_id: Some(CategoryId::new()),
+                    amount: (*amount).into(),
+                    memo: String::new(),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn balanced_split_is_committable_and_has_zero_remaining() {
+        let editor = split_editor("10.00", &["-4.25", "-5.75"]);
+        assert_eq!(editor.remaining(), Ok(Money::ZERO));
+        assert!(transaction_commit_available(&editor));
+    }
+
+    #[test]
+    fn unbalanced_and_rounding_sensitive_splits_block_commit() {
+        let unbalanced = split_editor("10.00", &["-4.25", "-5.74"]);
+        assert_eq!(unbalanced.remaining().unwrap().minor_units(), -1);
+        assert_eq!(unbalanced.validate(), Err(EditorError::SplitTotalMismatch));
+        assert!(!transaction_commit_available(&unbalanced));
+
+        let exact_cents = split_editor("0.30", &["-0.10", "-0.20"]);
+        assert_eq!(exact_cents.remaining(), Ok(Money::ZERO));
+        assert!(transaction_commit_available(&exact_cents));
+    }
+
+    #[test]
+    fn reconciled_editor_requires_explicit_protected_edit_confirmation() {
+        let mut editor = split_editor("1.00", &["-0.40", "-0.60"]);
+        editor.reconciled = true;
+        editor.clearance = Some(Clearance::Reconciled);
+        assert_eq!(editor.validate(), Err(EditorError::ReconciledProtectedEdit));
+        assert!(!transaction_commit_available(&editor));
+        editor.protected_edit_confirmed = true;
+        assert!(transaction_commit_available(&editor));
+        assert_eq!(editor.clearance, Some(Clearance::Reconciled));
+    }
 
     #[test]
     fn loading_error_empty_and_populated_transitions_are_distinct() {
