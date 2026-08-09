@@ -1257,6 +1257,46 @@ impl ApplicationRuntime {
                         });
                 }
             }
+            RegisterAction::SetClearance { id, clearance } => {
+                self.view.register_selection.select_only(id);
+                self.view.selected_transaction = Some(id);
+                self.dispatch(ApplicationAction::Financial(FinancialCommand::Transaction(
+                    TransactionCommand::Batch(crate::app::command::TransactionBatchCommand {
+                        selection: crate::app::command::TransactionBatchSelection::Explicit(
+                            std::iter::once(id).collect(),
+                        ),
+                        action: crate::app::command::TransactionBatchAction::SetClearance(
+                            clearance,
+                        ),
+                    }),
+                )));
+            }
+            RegisterAction::Approve(id) => {
+                self.view.register_selection.select_only(id);
+                self.view.selected_transaction = Some(id);
+                self.dispatch(ApplicationAction::Financial(FinancialCommand::Transaction(
+                    TransactionCommand::Batch(crate::app::command::TransactionBatchCommand {
+                        selection: crate::app::command::TransactionBatchSelection::Explicit(
+                            std::iter::once(id).collect(),
+                        ),
+                        action: crate::app::command::TransactionBatchAction::SetApproval(
+                            crate::domain::Approval::Approved,
+                        ),
+                    }),
+                )));
+            }
+            RegisterAction::Delete(id) => {
+                self.view.register_selection.select_only(id);
+                self.view.selected_transaction = Some(id);
+                self.dispatch(ApplicationAction::Financial(FinancialCommand::Transaction(
+                    TransactionCommand::Batch(crate::app::command::TransactionBatchCommand {
+                        selection: crate::app::command::TransactionBatchSelection::Explicit(
+                            std::iter::once(id).collect(),
+                        ),
+                        action: crate::app::command::TransactionBatchAction::Delete,
+                    }),
+                )));
+            }
         }
     }
 
@@ -1861,7 +1901,23 @@ impl ApplicationRuntime {
                 let _ = self.view.report_query.view.accept(id, generation, value);
             }
             Ok(crate::storage::worker::TypedResult::RegisterPage(value)) => {
-                let _ = self.view.register_query.accept(id, generation, value);
+                if self.view.register_query.accept(id, generation, value) {
+                    let valid = self
+                        .view
+                        .register_query
+                        .last_successful
+                        .as_ref()
+                        .map(|page| page.rows.iter().map(|row| row.transaction_id).collect())
+                        .unwrap_or_default();
+                    self.view.register_selection.retain_valid_ids(&valid);
+                    if self
+                        .view
+                        .selected_transaction
+                        .is_some_and(|selected| !valid.contains(&selected))
+                    {
+                        self.view.selected_transaction = None;
+                    }
+                }
             }
             Err(error) => {
                 let message = safe.map_or_else(

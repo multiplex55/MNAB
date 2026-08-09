@@ -70,17 +70,8 @@ impl AccountDialogForm {
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, commands: &mut ActionCollector) {
     ui.heading("All Transactions");
     ui.small("Filter by account/group, date, payee, category, amount, approval, clearance, import source, transfer, uncategorized, or reconciliation state.");
-    crate::ui::workspaces::register::show_register_header(
-        ui,
-        crate::ui::workspaces::register::ALL_TRANSACTION_COLUMNS,
-    );
-    crate::ui::workspaces::register::load_state(
-        ui,
-        state,
-        "No transactions yet",
-        "Add a transaction or import a statement to get started.",
-        commands,
-    );
+    crate::ui::register::toolbar::show(ui, state, commands, true);
+    crate::ui::workspaces::register::load_state(ui, state, "No transactions yet", commands);
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

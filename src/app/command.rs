@@ -288,6 +288,12 @@ pub enum RegisterAction {
     },
     ToggleCurrent,
     BeginEdit(TransactionId),
+    SetClearance {
+        id: TransactionId,
+        clearance: crate::domain::Clearance,
+    },
+    Approve(TransactionId),
+    Delete(TransactionId),
 }
 
 /// Typed report intents. A retry always carries the original immutable request.
