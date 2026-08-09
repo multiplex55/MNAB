@@ -111,6 +111,8 @@ pub struct TransactionEditorState {
     pub protected_edit_confirmed: bool,
     pub closed_account_confirmed: bool,
     pub errors: TransactionEditorErrors,
+    /// Field which should receive keyboard focus on the next frame.
+    pub focus_field: TransactionEditorField,
     pub metadata: EditorMetadata,
 }
 impl TransactionEditorState {
@@ -133,6 +135,11 @@ impl TransactionEditorState {
             protected_edit_confirmed: false,
             closed_account_confirmed: false,
             errors: TransactionEditorErrors::default(),
+            focus_field: if account_id.is_some() {
+                TransactionEditorField::Payee
+            } else {
+                TransactionEditorField::Account
+            },
             metadata,
         }
     }

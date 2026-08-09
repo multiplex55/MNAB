@@ -615,6 +615,9 @@ fn show_inline_editor(ui: &mut egui::Ui, state: &mut AppState, commands: &mut Ac
         _ => return,
     };
     ui.group(|ui| {
+        if editor.metadata.commit_state == crate::app::state::CommitState::Submitting {
+            ui.disable();
+        }
         ui.strong(if editor.transaction_id.is_some() {
             "Edit transaction"
         } else {
@@ -631,6 +634,32 @@ fn show_inline_editor(ui: &mut egui::Ui, state: &mut AppState, commands: &mut Ac
             }
         }
         ui.horizontal(|ui| {
+            if state.navigation.workspace
+                == crate::app::navigation::Workspace::AllTransactions
+            {
+                ui.label("Account");
+                let account = state
+                    .accounts
+                    .iter()
+                    .find(|account| Some(account.id) == editor.account_id)
+                    .map_or("Choose an account", |account| account.name.as_str());
+                let response = egui::ComboBox::from_id_salt("transaction-account")
+                    .selected_text(account)
+                    .show_ui(ui, |ui| {
+                        for account in &state.accounts {
+                            ui.selectable_value(
+                                &mut editor.account_id,
+                                Some(account.id),
+                                &account.name,
+                            );
+                        }
+                    });
+                if editor.focus_field
+                    == crate::app::transaction_editor::TransactionEditorField::Account
+                {
+                    response.response.request_focus();
+                }
+            }
             ui.label("Date");
             ui.text_edit_singleline(&mut editor.date_text);
             ui.label("Payee");

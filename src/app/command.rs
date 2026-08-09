@@ -904,6 +904,14 @@ pub fn command_availability(
         EditAccount | CloseAccount | ReconcileAccount if !ctx.selected_account => {
             CommandAvailability::disabled(command, "Select an active account first")
         }
+        AddTransaction
+            if !matches!(
+                ctx.workspace,
+                CommandWorkspace::AccountRegister | CommandWorkspace::AllTransactions
+            ) =>
+        {
+            CommandAvailability::disabled(command, "Open a transaction register first")
+        }
         EditTransaction | DeleteTransaction if !ctx.selected_transaction => {
             CommandAvailability::disabled(command, "Select a transaction first")
         }
