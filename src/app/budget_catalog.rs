@@ -32,14 +32,6 @@ use crate::{
 
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArchiveState {
-    #[default]
-    Active,
-    Archived,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileExistence {
@@ -69,7 +61,6 @@ pub struct BudgetCatalogEntry {
     pub display_name: String,
     pub database_path: PathBuf,
     pub schema_version: i64,
-    pub archive_state: ArchiveState,
     pub last_successful_open: Option<OffsetDateTime>,
     pub last_validation: Option<ValidationResult>,
     pub file_existence: FileExistence,
@@ -86,8 +77,6 @@ pub enum CatalogError {
     FutureSchema { found: i64, supported: i64 },
     #[error("budget name must not be empty")]
     EmptyName,
-    #[error("exact budget name confirmation did not match")]
-    ConfirmationMismatch,
     #[error("budget was not found in the catalog")]
     NotFound,
     #[error("filesystem operation failed: {0}")]
@@ -110,19 +99,6 @@ impl BudgetCatalog {
     pub fn entries(&self) -> &[BudgetCatalogEntry] {
         &self.entries
     }
-    pub fn confirm_name(&self, id: BudgetId, confirmation: &str) -> Result<(), CatalogError> {
-        let entry = self
-            .entries
-            .iter()
-            .find(|e| e.budget_id == id)
-            .ok_or(CatalogError::NotFound)?;
-        if confirmation == entry.display_name {
-            Ok(())
-        } else {
-            Err(CatalogError::ConfirmationMismatch)
-        }
-    }
-
     /// Refreshes filesystem facts for the fixed database only.
     pub fn refresh(&mut self, paths: &PortablePaths) -> Result<(), CatalogError> {
         self.entries.clear();
@@ -138,43 +114,12 @@ impl BudgetCatalog {
             display_name: info.name,
             database_path: fs::canonicalize(path)?,
             schema_version: info.version,
-            archive_state: ArchiveState::Active,
             last_successful_open: None,
             last_validation: None,
             file_existence: FileExistence::Present,
             recognition: DatabaseRecognition::Mnab,
         });
         Ok(())
-    }
-
-    /// Most recently opened active budgets first; unavailable rows remain visible.
-    #[must_use]
-    pub fn recent(&self) -> Vec<&BudgetCatalogEntry> {
-        let mut result: Vec<_> = self
-            .entries
-            .iter()
-            .filter(|e| e.archive_state == ArchiveState::Active)
-            .collect();
-        result.sort_by(|a, b| {
-            b.last_successful_open
-                .cmp(&a.last_successful_open)
-                .then_with(|| a.display_name.cmp(&b.display_name))
-        });
-        result
-    }
-
-    pub fn set_archived(&mut self, id: BudgetId, archived: bool) -> Result<(), CatalogError> {
-        self.entry_mut(id)?.archive_state = if archived {
-            ArchiveState::Archived
-        } else {
-            ArchiveState::Active
-        };
-        Ok(())
-    }
-    pub fn remove_from_recents(&mut self, id: BudgetId) -> bool {
-        let before = self.entries.len();
-        self.entries.retain(|e| e.budget_id != id);
-        before != self.entries.len()
     }
 
     pub fn rename(
@@ -234,24 +179,21 @@ impl BudgetCatalog {
     }
 
     #[allow(clippy::unused_self)] // Preparation is intentionally invoked through the catalog.
-    pub fn prepare_open(
+    pub fn prepare_fixed(
         &self,
         paths: &PortablePaths,
-        selected: &Path,
         repaint: impl Fn() + Send + 'static,
     ) -> Result<PreparedBudget, CatalogError> {
-        self.prepare_open_checked(paths, selected, false, repaint)
+        self.prepare_fixed_checked(paths, false, repaint)
     }
 
     #[allow(clippy::unused_self)] // Kept as a catalog operation for one lifecycle API.
-    pub fn prepare_open_checked(
+    pub fn prepare_fixed_checked(
         &self,
         paths: &PortablePaths,
-        selected: &Path,
         thorough: bool,
         repaint: impl Fn() + Send + 'static,
     ) -> Result<PreparedBudget, CatalogError> {
-        let _ = selected;
         let path = fixed_database(paths);
         let path = fs::canonicalize(&path).map_err(|_| CatalogError::UnmanagedPath)?; // 1: fixed path
         let info = inspect(&path)?
@@ -302,37 +244,6 @@ impl BudgetCatalog {
         }
     }
 
-    pub fn delete(
-        &mut self,
-        paths: &PortablePaths,
-        id: BudgetId,
-        confirmation: &str,
-    ) -> Result<DeletionResult, CatalogError> {
-        self.confirm_name(id, confirmation)?;
-        let path = fixed_database(paths);
-        let path = fs::canonicalize(&path).map_err(|_| CatalogError::UnmanagedPath)?;
-        let targets = [
-            path.clone(),
-            PathBuf::from(format!("{}-wal", path.display())),
-            PathBuf::from(format!("{}-shm", path.display())),
-        ];
-        let mut result = DeletionResult::default();
-        for target in targets {
-            match fs::remove_file(&target) {
-                Ok(()) => result.removed.push(target),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => result.failed.push(RemovalFailure {
-                    path: target,
-                    error: e.to_string(),
-                }),
-            }
-        }
-        if result.failed.is_empty() {
-            self.remove_from_recents(id);
-        }
-        Ok(result)
-    }
-
     /// Resolves an Explorer target from catalog identity rather than accepting an
     /// arbitrary path from the UI.
     pub fn reveal(&self, paths: &PortablePaths, id: BudgetId) -> Result<(), CatalogError> {
@@ -376,16 +287,6 @@ impl BudgetCatalog {
 pub struct PreparedBudget {
     pub session: BudgetSession,
     pub worker: StorageWorker,
-}
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct DeletionResult {
-    pub removed: Vec<PathBuf>,
-    pub failed: Vec<RemovalFailure>,
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RemovalFailure {
-    pub path: PathBuf,
-    pub error: String,
 }
 struct Inspection {
     id: BudgetId,

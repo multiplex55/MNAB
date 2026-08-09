@@ -55,47 +55,6 @@ struct ShutdownSteps {
 }
 
 impl ApplicationRuntime {
-    /// Deletion is non-financial lifecycle work and is intentionally never recorded
-    /// in command history. The active worker is closed (and checkpoints WAL) first.
-    pub fn delete_budget(
-        &mut self,
-        catalog: &mut crate::app::budget_catalog::BudgetCatalog,
-        id: crate::domain::BudgetId,
-        confirmation: &str,
-    ) -> Result<crate::app::budget_catalog::DeletionResult, crate::app::budget_catalog::CatalogError>
-    {
-        catalog.confirm_name(id, confirmation)?;
-        let is_active = self.session.as_ref().is_some_and(|s| s.budget_id == id);
-        if is_active {
-            self.close_session();
-        }
-        let paths = self
-            .paths
-            .as_ref()
-            .ok_or(crate::app::budget_catalog::CatalogError::UnmanagedPath)?;
-        catalog.delete(paths, id, confirmation)
-    }
-
-    /// Prepares every part of a replacement before touching the current session.
-    /// Catalog and settings timestamps are updated only after the commit point.
-    pub fn open_budget(
-        &mut self,
-        catalog: &mut crate::app::budget_catalog::BudgetCatalog,
-        selected: &std::path::Path,
-        repaint: impl Fn() + Send + 'static,
-    ) -> Result<(), crate::app::budget_catalog::CatalogError> {
-        let paths = self
-            .paths
-            .as_ref()
-            .ok_or(crate::app::budget_catalog::CatalogError::UnmanagedPath)?;
-        let prepared = catalog.prepare_open(paths, selected, repaint)?;
-        self.commit_session(prepared.session, prepared.worker);
-        let committed = self.session.as_ref().expect("session was just committed");
-        catalog.record_successful_open(committed);
-        let _ = committed;
-        Ok(())
-    }
-
     pub fn rename_budget(
         &mut self,
         catalog: &mut crate::app::budget_catalog::BudgetCatalog,
@@ -116,14 +75,6 @@ impl ApplicationRuntime {
         Ok(())
     }
 
-    pub fn archive_budget(
-        &mut self,
-        catalog: &mut crate::app::budget_catalog::BudgetCatalog,
-        id: crate::domain::BudgetId,
-        archived: bool,
-    ) -> Result<(), crate::app::budget_catalog::CatalogError> {
-        catalog.set_archived(id, archived)
-    }
     pub fn new(
         paths: Option<PortablePaths>,
         settings: Option<SettingsSession>,
@@ -178,16 +129,15 @@ impl ApplicationRuntime {
         if !startup.fixed_database_exists {
             self.database_lifecycle = DatabaseLifecycle::FirstRunRequired;
             self.view.open_dialog(
-                crate::app::state::Dialog::CreateBudget,
+                crate::app::state::Dialog::Onboarding,
                 egui::Id::new("startup"),
                 egui::Id::new("toolbar"),
             );
             return;
         }
         self.database_lifecycle = DatabaseLifecycle::OpeningDatabase;
-        let result = crate::app::budget_catalog::BudgetCatalog::default().prepare_open_checked(
+        let result = crate::app::budget_catalog::BudgetCatalog::default().prepare_fixed_checked(
             &paths,
-            &paths.database,
             startup.marker_was_absent,
             || {},
         );
@@ -795,9 +745,7 @@ impl ApplicationRuntime {
         if let ApplicationAction::Budget(intent) = action {
             use crate::app::{command::BudgetAction, state::Dialog};
             let dialog = match intent {
-                BudgetAction::ShowCreate => Some(Dialog::CreateBudget),
-                BudgetAction::ShowOpen => Some(Dialog::OpenBudget),
-                BudgetAction::ShowRecents => Some(Dialog::RecentBudgets),
+                BudgetAction::ShowMaintenance => Some(Dialog::BudgetMaintenance),
                 _ => None,
             };
             if let Some(dialog) = dialog {
@@ -1085,7 +1033,9 @@ impl ApplicationRuntime {
             // Budget widgets own their draft/preview state. These semantic intents exist so the
             // shared availability policy remains the sole source of enablement and explanations.
             AutoAssign | MoveMoney => return,
-            CreateBudget if self.database_lifecycle == DatabaseLifecycle::FirstRunRequired => {
+            CompleteOnboarding
+                if self.database_lifecycle == DatabaseLifecycle::FirstRunRequired =>
+            {
                 let magnitude = match self.view.onboarding.parsed_opening_magnitude() {
                     Ok(value) => value,
                     Err(error) => {
@@ -1262,7 +1212,7 @@ impl ApplicationRuntime {
                 self.request_exit();
                 return;
             }
-            CreateBudget => "The fixed database is created during account onboarding",
+            CompleteOnboarding => "Onboarding is available only when the fixed database is absent",
             ContextualNew => "Select an account before creating a transaction",
             Import => "Select an account before importing transactions",
             Undo | Redo => unreachable!("history commands handled above"),
@@ -1292,10 +1242,10 @@ impl ApplicationRuntime {
                 }
                 return;
             }
-            PreviousMonth | NextMonth => "Open Budget to change its month",
+            PreviousMonth | NextMonth => "Visit the Budget workspace to change its month",
             Backup if self.database_lifecycle == DatabaseLifecycle::Ready => {
                 self.view.open_dialog(
-                    Dialog::RecentBudgets,
+                    Dialog::BudgetMaintenance,
                     egui::Id::new("backup-command"),
                     egui::Id::new("toolbar"),
                 );
@@ -2217,7 +2167,7 @@ mod tests {
         std::fs::write(&invalid, b"not sqlite").unwrap();
         assert!(
             BudgetCatalog::default()
-                .prepare_open(&paths, &invalid, || {})
+                .prepare_fixed(&paths, || {})
                 .is_err()
         );
         runtime

@@ -185,12 +185,9 @@ pub struct AccountSummary {
 }
 #[derive(Clone, Debug)]
 pub enum Dialog {
-    ConfirmDelete,
-    CreateBudget,
-    OpenBudget,
-    RecentBudgets,
+    Onboarding,
+    BudgetMaintenance,
     RenameBudget,
-    ArchiveBudget,
     RepairBudget,
     RecoveryChoice,
     Reconcile(AccountId),
