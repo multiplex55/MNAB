@@ -1046,7 +1046,11 @@ impl<'a> QueryStore<'a> {
         month: &str,
     ) -> Result<BudgetMonthView, RepositoryError> {
         use crate::calculation::budget_month::{
-            BudgetMonthInput, CategoryInput, FundingStatus, Overspending, calculate_chronological,
+            BudgetMonthInput, CategoryInput, CreditCardAccountInput, FundingStatus, Overspending,
+            calculate_chronological,
+        };
+        use crate::calculation::credit_card::{
+            CardActivity, CreditCardInput, PriorCardState, SpendingCategoryInput,
         };
         use std::collections::HashMap;
 
@@ -1104,6 +1108,12 @@ impl<'a> QueryStore<'a> {
             .map_err(repo)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(repo)?;
+
+        let card_mappings = self.connection.prepare(
+            "SELECT p.account_id,p.category_id FROM credit_card_payment_categories p WHERE p.budget_id=?1 ORDER BY p.account_id",
+        ).map_err(repo)?
+            .query_map([&budget_key], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(repo)?
+            .collect::<Result<Vec<_>, _>>().map_err(repo)?;
 
         let earliest: Option<String> = self.connection.query_row(
             "SELECT MIN(m) FROM (SELECT substr(transaction_date,1,7) m FROM transactions WHERE budget_id=?1 AND archived=0 AND COALESCE(voided,0)=0 UNION ALL SELECT budget_month FROM budget_assignments WHERE budget_id=?1)",
@@ -1179,6 +1189,101 @@ impl<'a> QueryStore<'a> {
                     }
                 })
                 .collect::<Vec<_>>();
+            let mut credit_cards = Vec::with_capacity(card_mappings.len());
+            for (account, payment_category) in &card_mappings {
+                let account_id = account
+                    .parse()
+                    .map_err(|_| category_error("invalid card account id"))?;
+                let payment_category_id = payment_category
+                    .parse()
+                    .map_err(|_| category_error("invalid payment category id"))?;
+                let mut remaining = category_inputs
+                    .iter()
+                    .map(|category| (category.id, category.assigned.max(Money::ZERO)))
+                    .collect::<HashMap<_, _>>();
+                let mut events = Vec::new();
+                let mut statement = self.connection.prepare(
+                    "WITH lines AS (SELECT t.id,t.created_at,t.category_id,t.amount,t.transfer_id,0 sort_order FROM transactions t WHERE t.account_id=?1 AND substr(t.transaction_date,1,7)=?2 AND t.archived=0 AND COALESCE(t.voided,0)=0 AND NOT EXISTS(SELECT 1 FROM transaction_splits s WHERE s.transaction_id=t.id) UNION ALL SELECT t.id,t.created_at,s.category_id,s.amount,t.transfer_id,s.sort_order FROM transactions t JOIN transaction_splits s ON s.transaction_id=t.id WHERE t.account_id=?1 AND substr(t.transaction_date,1,7)=?2 AND t.archived=0 AND COALESCE(t.voided,0)=0) SELECT category_id,amount,transfer_id FROM lines ORDER BY created_at,id,sort_order",
+                ).map_err(repo)?;
+                let rows = statement
+                    .query_map((account, &key), |r| {
+                        Ok((
+                            r.get::<_, Option<String>>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                        ))
+                    })
+                    .map_err(repo)?;
+                for row in rows {
+                    let (category, amount, transfer) = row.map_err(repo)?;
+                    if transfer.is_some() && category.is_none() && amount > 0 {
+                        events.push(CardActivity::Payment {
+                            amount: Money::from_minor_units(amount),
+                        });
+                    } else if transfer.is_none() && category.is_none() && amount > 0 {
+                        events.push(CardActivity::Credit {
+                            amount: Money::from_minor_units(amount),
+                            category_id: None,
+                        });
+                    } else if let Some(category) = category {
+                        let category_id = category
+                            .parse()
+                            .map_err(|_| category_error("invalid card category id"))?;
+                        if amount < 0 {
+                            let magnitude = Money::from_minor_units(amount)
+                                .checked_neg()
+                                .map_err(|_| category_error("card amount overflow"))?;
+                            let available = remaining.entry(category_id).or_default();
+                            let funded = (*available).min(magnitude).max(Money::ZERO);
+                            *available = available
+                                .checked_sub(magnitude)
+                                .map_err(|_| category_error("card amount overflow"))?;
+                            events.push(CardActivity::Purchase {
+                                category_id,
+                                amount: magnitude,
+                                funded,
+                            });
+                        } else if amount > 0 {
+                            let magnitude = Money::from_minor_units(amount);
+                            *remaining.entry(category_id).or_default() = remaining
+                                .get(&category_id)
+                                .copied()
+                                .unwrap_or_default()
+                                .checked_add(magnitude)
+                                .map_err(|_| category_error("card amount overflow"))?;
+                            events.push(CardActivity::Refund {
+                                category_id,
+                                amount: magnitude,
+                                funded_reversal: magnitude,
+                            });
+                        }
+                    }
+                }
+                let payment_assignment = Money::from_minor_units(
+                    assignments.get(payment_category).copied().unwrap_or(0),
+                );
+                credit_cards.push(CreditCardAccountInput {
+                    account_id,
+                    payment_category_id,
+                    calculation: CreditCardInput {
+                        prior: PriorCardState {
+                            card_balance: Money::ZERO,
+                            payment_available: Money::ZERO,
+                            refundable_funded: Money::ZERO,
+                        },
+                        categories: category_inputs
+                            .iter()
+                            .filter(|category| category.id != payment_category_id)
+                            .map(|category| SpendingCategoryInput {
+                                category_id: category.id,
+                                available: category.assigned.max(Money::ZERO),
+                            })
+                            .collect(),
+                        payment_assignment,
+                        activity: events,
+                    },
+                });
+            }
             inputs.push(BudgetMonthInput {
                 month: cursor,
                 categories: category_inputs,
@@ -1194,6 +1299,7 @@ impl<'a> QueryStore<'a> {
                 positive_rollover: Money::ZERO,
                 prior_cash_overspending: Money::ZERO,
                 future_assignments: Money::ZERO,
+                credit_cards,
             });
             if cursor == selected {
                 break;
@@ -1211,6 +1317,22 @@ impl<'a> QueryStore<'a> {
         let result = projection
             .last()
             .ok_or_else(|| category_error("missing budget projection"))?;
+        let cash_overspending_cents = result
+            .categories
+            .iter()
+            .map(|category| match category.overspending {
+                Overspending::Cash(value) => value.minor_units(),
+                _ => 0,
+            })
+            .sum();
+        let credit_card_overspending_cents = result
+            .categories
+            .iter()
+            .map(|category| match category.overspending {
+                Overspending::CreditCard(value) => value.minor_units(),
+                _ => 0,
+            })
+            .sum();
         let rows = categories.iter().zip(&result.categories).map(|(fact, calculated)| {
             let underfunded = match calculated.funding { FundingStatus::Underfunded(v) => v.minor_units(), FundingStatus::NoTarget | FundingStatus::Funded => 0 };
             let overspending = match calculated.overspending { Overspending::Cash(v) | Overspending::CreditCard(v) => v.minor_units(), Overspending::None => 0 };
@@ -1224,7 +1346,7 @@ impl<'a> QueryStore<'a> {
                 |r| r.get::<_, u64>(0),
             )
             .unwrap_or(0);
-        Ok(BudgetMonthView { version: ViewVersion { generation: 0, revision }, month: selected, calculation_revision: revision, ready_to_assign_cents: result.ready_to_assign.minor_units(), assigned_cents: rows.iter().map(|r| r.assigned_cents).sum(), activity_cents: rows.iter().map(|r| r.activity_cents).sum(), available_cents: rows.iter().map(|r| r.available_cents).sum(), overspending_cents: rows.iter().map(|r| r.overspending_cents).sum(), rows, inspector: vec!["Ready to Assign, activity, availability, overspending, underfunding, and rollover are reconstructed from canonical ledger facts.".into()] })
+        Ok(BudgetMonthView { version: ViewVersion { generation: 0, revision }, month: selected, calculation_revision: revision, ready_to_assign_cents: result.ready_to_assign.minor_units(), assigned_cents: rows.iter().map(|r| r.assigned_cents).sum(), activity_cents: rows.iter().map(|r| r.activity_cents).sum(), available_cents: rows.iter().map(|r| r.available_cents).sum(), overspending_cents: rows.iter().map(|r| r.overspending_cents).sum(), cash_overspending_cents, credit_card_overspending_cents, rows, inspector: vec!["Ready to Assign, activity, availability, overspending, underfunding, and rollover are reconstructed from canonical ledger facts.".into()] })
     }
 }
 

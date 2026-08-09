@@ -129,6 +129,10 @@ pub struct BudgetMonthView {
     pub activity_cents: i64,
     pub available_cents: i64,
     pub overspending_cents: i64,
+    /// Cash overspending is removed from the following month's Ready to Assign.
+    pub cash_overspending_cents: i64,
+    /// Credit-card overspending becomes card debt and never rolls as cash overspending.
+    pub credit_card_overspending_cents: i64,
     pub rows: Vec<CategoryRowView>,
     pub inspector: Vec<String>,
 }
