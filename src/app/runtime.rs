@@ -275,6 +275,17 @@ impl ApplicationRuntime {
         self.view.redo_label = self.history.redo_label().map(str::to_owned);
         &mut self.view
     }
+    /// Immutable application snapshot for black-box journeys and non-egui hosts.
+    #[must_use]
+    pub const fn view(&self) -> &AppState {
+        &self.view
+    }
+
+    /// Whether the active, committed session still owns its storage worker.
+    #[must_use]
+    pub const fn worker_available(&self) -> bool {
+        self.worker.is_some()
+    }
     pub fn presentation(
         &self,
     ) -> (
