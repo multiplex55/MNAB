@@ -134,20 +134,9 @@ pub fn show(
                             r.response.request_focus();
                         }
                     }
-                    let date = ui.add(
-                        egui::TextEdit::singleline(&mut editor.date_text)
-                            .hint_text("MM/DD/YYYY")
-                            .desired_width(100.0),
-                    );
+                    let date = crate::ui::widgets::date_picker(ui, &mut editor.date_text);
                     if date.lost_focus() {
                         editor.normalize_date_on_blur();
-                    }
-                    if ui
-                        .small_button("📅")
-                        .on_hover_text("Open calendar")
-                        .clicked()
-                    {
-                        date.request_focus();
                     }
                     let payee = editor
                         .payee_id
