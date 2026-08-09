@@ -1090,7 +1090,12 @@ impl<'a> QueryStore<'a> {
         let revision = self.connection.query_row(
             "SELECT COALESCE(MAX(rev),0) FROM (SELECT MAX(strftime('%s',modified_at)) rev FROM budget_assignments WHERE budget_id=?1 UNION ALL SELECT MAX(strftime('%s',modified_at)) FROM transactions WHERE budget_id=?1 UNION ALL SELECT MAX(sort_order) FROM categories WHERE budget_id=?1)",
             [budget.to_string()], |r| r.get::<_, Option<u64>>(0)).map_err(repo)?.unwrap_or(0);
-        Ok(BudgetMonthView { version: ViewVersion { generation: 0, revision }, month: parsed_month, calculation_revision: revision, ready_to_assign_cents: -assigned, assigned_cents: assigned, activity_cents: activity_total, available_cents: available, overspending_cents: rows.iter().map(|r| r.overspending_cents).sum(), rows, inspector: vec!["Ready to Assign is calculated from persisted cents; targets never move money without a confirmed assignment command.".into()] })
+        // Positive uncategorized cash-account inflows fund the budget. Debt and tracking opening
+        // balances never reduce Ready to Assign merely because their ledger sign is negative.
+        let cash_inflows = self.connection.query_row(
+            "SELECT COALESCE(SUM(CASE WHEN t.amount>0 THEN t.amount ELSE 0 END),0) FROM transactions t JOIN accounts a ON a.id=t.account_id WHERE t.budget_id=?1 AND substr(t.transaction_date,1,7)<=?2 AND t.category_id IS NULL AND t.archived=0 AND COALESCE(t.voided,0)=0 AND a.account_type IN ('checking','savings','cash')",
+            (budget.to_string(), month), |r| r.get::<_, i64>(0)).map_err(repo)?;
+        Ok(BudgetMonthView { version: ViewVersion { generation: 0, revision }, month: parsed_month, calculation_revision: revision, ready_to_assign_cents: cash_inflows - assigned, assigned_cents: assigned, activity_cents: activity_total, available_cents: available, overspending_cents: rows.iter().map(|r| r.overspending_cents).sum(), rows, inspector: vec!["Ready to Assign is calculated from persisted cents; targets never move money without a confirmed assignment command.".into()] })
     }
 }
 

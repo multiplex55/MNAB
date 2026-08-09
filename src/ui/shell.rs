@@ -132,15 +132,16 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
     show_budget_dialog(ctx, state, actions);
 }
 
-fn show_budget_dialog(ctx: &egui::Context, state: &mut AppState, _actions: &mut ActionCollector) {
+fn show_budget_dialog(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionCollector) {
     let Some(dialog) = state.dialog.as_ref().map(|dialog| dialog.dialog.clone()) else {
         return;
     };
+    if matches!(dialog, crate::app::state::Dialog::CreateBudget) {
+        show_onboarding_wizard(ctx, state, actions);
+        return;
+    }
     let (title, guidance) = match dialog {
-        crate::app::state::Dialog::CreateBudget => (
-            "First-run setup",
-            "1. Name your budget  →  2. Add your first account (name, type, current balance, balance date, group, optional note)  →  3. Choose any starter categories, including none  →  4. Review and create. Amounts are dollars; debt balances are entered as a positive amount owed. Setup is committed atomically.",
-        ),
+        crate::app::state::Dialog::CreateBudget => unreachable!(),
         crate::app::state::Dialog::OpenBudget => (
             "Database maintenance",
             "MNAB opens mnab-data/mnab.sqlite3 automatically; file picker workflows are retired.",
@@ -179,6 +180,50 @@ fn show_budget_dialog(ctx: &egui::Context, state: &mut AppState, _actions: &mut 
         if ui.button("Cancel").clicked() {
             state.dialog = None;
         }
+    });
+}
+
+fn show_onboarding_wizard(
+    ctx: &egui::Context,
+    state: &mut AppState,
+    actions: &mut ActionCollector,
+) {
+    egui::Modal::new(egui::Id::new("onboarding-wizard")).show(ctx, |ui| {
+        let wizard = &mut state.onboarding;
+        ui.heading(format!("Set up your budget — {} of 4", wizard.step));
+        match wizard.step {
+            1 => { ui.label("Budget identity"); ui.text_edit_singleline(&mut wizard.budget_name); }
+            2 => {
+                ui.label("First account");
+                ui.label("Account name"); ui.text_edit_singleline(&mut wizard.account.name);
+                egui::ComboBox::from_label("Account type").selected_text(format!("{:?}", wizard.account.account_type)).show_ui(ui, |ui| {
+                    for kind in [crate::domain::AccountType::Checking, crate::domain::AccountType::Savings, crate::domain::AccountType::CreditCard, crate::domain::AccountType::Loan] { ui.selectable_value(&mut wizard.account.account_type, kind, format!("{kind:?}")); }
+                });
+                ui.label("Current balance"); ui.text_edit_singleline(&mut wizard.account.current_balance);
+                if let Some(help) = wizard.debt_help() { ui.small(help); }
+                ui.label("Balance date (YYYY-MM-DD)"); ui.text_edit_singleline(&mut wizard.account.balance_date);
+                ui.label("Account group"); ui.text_edit_singleline(&mut wizard.account.group);
+                ui.label("Optional note"); ui.text_edit_singleline(&mut wizard.account.note);
+                ui.small("The account fields use the same positive-magnitude contract as AccountDialogForm.");
+            }
+            3 => {
+                ui.label("Starter categories (all optional)");
+                for name in crate::ui::onboarding::STARTER_CATEGORIES { let mut selected = wizard.selected_categories.contains(*name); if ui.checkbox(&mut selected, *name).changed() { if selected { wizard.selected_categories.insert((*name).into()); } else { wizard.selected_categories.remove(*name); } } }
+            }
+            _ => {
+                ui.label("Review"); ui.label(format!("Budget: {}", wizard.budget_name));
+                ui.label(format!("First account: {} ({:?})", wizard.account.name, wizard.account.account_type));
+                match wizard.signed_opening_preview() { Ok(value) => { ui.label(format!("Opening ledger effect: {value}")); }, Err(error) => { ui.colored_label(egui::Color32::RED, error); } }
+                ui.label(format!("Starter categories: {}", wizard.selected_categories.len()));
+            }
+        }
+        ui.horizontal(|ui| {
+            if wizard.step > 1 && ui.button("Back").clicked() { wizard.step -= 1; }
+            if wizard.step < 4 {
+                if ui.button("Next").clicked() { wizard.step += 1; }
+            } else if ui.button("Create budget").clicked() { actions.push(crate::app::command::AppCommand::CreateBudget); }
+            if ui.button("Cancel").clicked() { state.dialog = None; }
+        });
     });
 }
 
