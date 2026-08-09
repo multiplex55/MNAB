@@ -623,7 +623,7 @@ pub enum CommandWorkspace {
 }
 
 /// Snapshot of UI and lifecycle state needed to evaluate semantic commands.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommandAvailabilityContext {
     pub database_available: bool,
     pub workspace: CommandWorkspace,
@@ -643,6 +643,53 @@ pub struct CommandAvailabilityContext {
     pub register_focused: bool,
     pub import_active: bool,
     pub reconciliation_active: bool,
+    /// At least one category is selected in the budget grid.
+    pub budget_selection: bool,
+    /// The selected categories produce at least one Auto-Assign change.
+    pub auto_assign_selection: bool,
+    /// The active editor has passed its synchronous validation.
+    pub editor_valid: bool,
+    /// A storage worker can accept requests.
+    pub worker_available: bool,
+}
+
+impl Default for CommandAvailabilityContext {
+    fn default() -> Self {
+        Self {
+            database_available: false,
+            workspace: CommandWorkspace::None,
+            has_selection: false,
+            editing: false,
+            dialog_open: false,
+            text_editor_owns_shortcuts: false,
+            lifecycle_busy: false,
+            read_only: false,
+            mutation_locked: false,
+            can_undo: false,
+            can_redo: false,
+            selected_account: false,
+            selected_transaction: false,
+            selected_reconciled_transaction: false,
+            register_focused: false,
+            import_active: false,
+            reconciliation_active: false,
+            budget_selection: false,
+            auto_assign_selection: false,
+            editor_valid: true,
+            worker_available: true,
+        }
+    }
+}
+
+/// Canonical presentation and execution contract consumed by every action surface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActionDescriptor {
+    pub action: AppCommand,
+    pub title: &'static str,
+    pub shortcut: Option<&'static str>,
+    pub visible: bool,
+    pub enabled: bool,
+    pub disabled_reason: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -826,6 +873,9 @@ pub fn command_availability(
     if mutating && ctx.mutation_locked {
         return CommandAvailability::disabled(command, "Another operation must finish first");
     }
+    if mutating && !ctx.worker_available {
+        return CommandAvailability::disabled(command, "The storage worker is unavailable");
+    }
     match command {
         ContextualNew | Import if ctx.workspace != CommandWorkspace::AccountRegister => {
             CommandAvailability::disabled(command, "Open an account register first")
@@ -843,6 +893,10 @@ pub fn command_availability(
         Commit if !ctx.editing => {
             CommandAvailability::disabled(command, "Start editing before committing")
         }
+        Commit if !ctx.editor_valid => CommandAvailability::disabled(
+            command,
+            "Resolve the editor validation errors before saving",
+        ),
         EditAccount | CloseAccount | ReconcileAccount if !ctx.selected_account => {
             CommandAvailability::disabled(command, "Select an active account first")
         }
@@ -876,6 +930,16 @@ pub fn command_availability(
         AutoAssign | MoveMoney if ctx.workspace != CommandWorkspace::Budget => {
             CommandAvailability::disabled(command, "Open Budget to plan money")
         }
+        AutoAssign if !ctx.budget_selection => {
+            CommandAvailability::disabled(command, "Select at least one budget category first")
+        }
+        AutoAssign if !ctx.auto_assign_selection => CommandAvailability::disabled(
+            command,
+            "The Auto-Assign selection has no changes to apply",
+        ),
+        MoveMoney if !ctx.budget_selection => {
+            CommandAvailability::disabled(command, "Select at least one budget category first")
+        }
         CancelOperation if !ctx.mutation_locked && !ctx.lifecycle_busy => {
             CommandAvailability::disabled(command, "No cancellable operation is running")
         }
@@ -883,6 +947,68 @@ pub fn command_availability(
             CommandAvailability::disabled(command, "No failed operation is selected")
         }
         _ => CommandAvailability::enabled(command),
+    }
+}
+
+/// Builds the single descriptor used by buttons, menus, shortcuts, cards, and the palette.
+#[must_use]
+pub fn action_descriptor(ctx: CommandAvailabilityContext, action: AppCommand) -> ActionDescriptor {
+    use AppCommand::*;
+    let title = match action {
+        ContextualNew => "New",
+        CompleteOnboarding => "Finish setup",
+        AddAccount => "New account",
+        EditAccount => "Edit account",
+        CloseAccount => "Close account",
+        AddAccountGroup => "New account group",
+        RenameAccountGroup => "Rename account group",
+        DeleteAccountGroup => "Delete account group",
+        MoveAccountGroup => "Move account group",
+        AddTransaction => "New transaction",
+        EditTransaction => "Edit transaction",
+        DeleteTransaction => "Delete transaction",
+        CreateTransfer => "New transfer",
+        ReconcileAccount => "Reconcile account",
+        Import => "Import transactions",
+        FocusSearch => "Find",
+        Undo => "Undo",
+        Redo => "Redo",
+        Commit => "Commit edit",
+        Cancel => "Cancel",
+        Edit => "Edit selected item",
+        Delete => "Delete selected item",
+        MoveUp => "Move up",
+        MoveDown => "Move down",
+        NextField => "Next field",
+        PreviousField => "Previous field",
+        ToggleSelection => "Toggle selection",
+        SelectAllTransactions => "Select all transactions",
+        ResetRegisterColumns => "Reset register columns",
+        Rename => "Rename",
+        NavigateOverview => "Open overview",
+        NavigateBudget => "View budget",
+        NavigateCategories => "Manage categories",
+        NavigateReports => "Open reports",
+        NavigateAllTransactions => "Manage accounts",
+        AutoAssign => "Auto-Assign",
+        MoveMoney => "Move Money",
+        PreviousMonth => "Previous month",
+        NextMonth => "Next month",
+        Settings => "Open settings",
+        Backup => "Create backup",
+        ToggleInspector => "Toggle inspector",
+        RetryOperation => "Retry operation",
+        CancelOperation => "Cancel operation",
+        Exit => "Exit",
+    };
+    let availability = command_availability(ctx, action);
+    ActionDescriptor {
+        action,
+        title,
+        shortcut: crate::app::palette::shortcut(action),
+        visible: true,
+        enabled: availability.enabled,
+        disabled_reason: availability.disabled_reason,
     }
 }
 
@@ -916,6 +1042,59 @@ mod availability_tests {
             Some(
                 "Reconciled transactions cannot be changed in bulk; deselect them or edit them individually."
             )
+        );
+    }
+
+    #[test]
+    fn every_visible_enabled_application_action_has_a_runtime_contract() {
+        let context = CommandAvailabilityContext {
+            database_available: true,
+            workspace: CommandWorkspace::AccountRegister,
+            selected_account: true,
+            selected_transaction: true,
+            has_selection: true,
+            can_undo: true,
+            can_redo: true,
+            budget_selection: true,
+            auto_assign_selection: true,
+            ..Default::default()
+        };
+        for action in MAJOR_WORKFLOW_COMMANDS {
+            let descriptor = action_descriptor(context, *action);
+            assert_eq!(descriptor.action, *action);
+            assert!(!descriptor.title.is_empty());
+            assert!(descriptor.visible);
+            if descriptor.enabled {
+                assert!(descriptor.disabled_reason.is_none(), "{action:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn required_disabled_reasons_are_explicit() {
+        let no_worker = command_availability(
+            CommandAvailabilityContext {
+                database_available: true,
+                worker_available: false,
+                ..Default::default()
+            },
+            AppCommand::AddAccount,
+        );
+        assert_eq!(
+            no_worker.disabled_reason,
+            Some("The storage worker is unavailable")
+        );
+        let no_budget_selection = command_availability(
+            CommandAvailabilityContext {
+                database_available: true,
+                workspace: CommandWorkspace::Budget,
+                ..Default::default()
+            },
+            AppCommand::AutoAssign,
+        );
+        assert_eq!(
+            no_budget_selection.disabled_reason,
+            Some("Select at least one budget category first")
         );
     }
 }

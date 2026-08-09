@@ -362,6 +362,27 @@ pub struct Notification {
     pub detail: String,
     pub persistent: bool,
 }
+impl Notification {
+    #[must_use]
+    pub fn success(title: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            kind: NotificationKind::Information,
+            title: title.into(),
+            detail: detail.into(),
+            persistent: false,
+        }
+    }
+
+    #[must_use]
+    pub fn actionable_error(title: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            kind: NotificationKind::Error,
+            title: title.into(),
+            detail: detail.into(),
+            persistent: true,
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NotificationKind {
     Information,
@@ -511,6 +532,17 @@ impl Default for AppState {
     }
 }
 impl AppState {
+    /// Transient notices may be dismissed by the shell; persistent failures require an explicit
+    /// user dismissal so retry/details remain reachable.
+    pub fn dismiss_notification(&mut self, index: usize) -> bool {
+        if index < self.notifications.len() {
+            self.notifications.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
     /// One shared snapshot for toolbar, workspace, overview, and palette action gating.
     #[must_use]
     pub fn action_context(&self) -> crate::app::command::CommandAvailabilityContext {
@@ -536,6 +568,25 @@ impl AppState {
             can_redo: self.can_redo,
             selected_account: self.selected_account.is_some(),
             selected_transaction: self.selected_transaction.is_some(),
+            selected_reconciled_transaction: self
+                .register_query
+                .last_successful
+                .as_ref()
+                .is_some_and(|page| {
+                    page.rows.iter().any(|row| {
+                        self.register_selection.contains(row.transaction_id) && row.reconciled
+                    })
+                }),
+            budget_selection: !self.budget_ui.selected_categories.is_empty(),
+            auto_assign_selection: self
+                .budget_ui
+                .auto_preview
+                .as_ref()
+                .is_some_and(|preview| !preview.changes.is_empty()),
+            editor_valid: self
+                .editor
+                .metadata()
+                .is_none_or(|metadata| metadata.validation_errors.is_empty()),
             ..Default::default()
         }
     }
@@ -656,6 +707,30 @@ impl AppState {
         {
             self.latest_by_purpose.remove(&purpose);
         }
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[test]
+    fn success_is_visible_and_transient_while_errors_are_actionable_and_persistent() {
+        let mut state = AppState::default();
+        state
+            .notifications
+            .push(Notification::success("Saved", "Transaction saved"));
+        state
+            .notifications
+            .push(Notification::actionable_error("Import failed", "Try again"));
+        assert!(!state.notifications[0].persistent);
+        assert!(state.notifications[1].persistent);
+        assert!(state.dismiss_notification(0));
+        assert_eq!(state.notifications.len(), 1);
+        assert_eq!(state.notifications[0].kind, NotificationKind::Error);
+        assert!(state.notifications[0].persistent);
+        assert!(state.dismiss_notification(0));
+        assert!(state.notifications.is_empty());
     }
 }
 

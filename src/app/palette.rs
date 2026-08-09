@@ -1,7 +1,5 @@
 //! Deterministic command-palette matching, context gating, and focus lifecycle.
-use super::command::{
-    AppCommand, CommandAvailabilityContext, CommandWorkspace, command_availability,
-};
+use super::command::{AppCommand, CommandAvailabilityContext, CommandWorkspace};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequiredContext {
@@ -85,19 +83,8 @@ fn availability_context(context: CommandContext) -> CommandAvailabilityContext {
         register_focused: context.register_focused,
         import_active: context.import_active,
         reconciliation_active: context.reconciliation_active,
+        ..Default::default()
     }
-}
-
-fn available(
-    _required: RequiredContext,
-    context: CommandContext,
-    command: AppCommand,
-) -> (bool, Option<String>) {
-    let availability = command_availability(availability_context(context), command);
-    (
-        availability.enabled,
-        availability.disabled_reason.map(str::to_owned),
-    )
 }
 
 /// User-facing palette entries for major implemented workflows.
@@ -236,16 +223,16 @@ pub fn commands_for(context: CommandContext) -> Vec<CommandDescriptor> {
         ),
     ]
     .into_iter()
-    .map(|(command, title, keys, required_context)| {
-        let (enabled, disabled_explanation) = available(required_context, context, command);
+    .map(|(command, _title, keys, required_context)| {
+        let shared = crate::app::command::action_descriptor(availability_context(context), command);
         CommandDescriptor {
             command,
-            title: title.into(),
+            title: shared.title.into(),
             keywords: keys.split(' ').map(str::to_owned).collect(),
-            shortcut: shortcut(command).map(str::to_owned),
+            shortcut: shared.shortcut.map(str::to_owned),
             required_context,
-            enabled,
-            disabled_explanation,
+            enabled: shared.enabled,
+            disabled_explanation: shared.disabled_reason.map(str::to_owned),
         }
     })
     .collect()
