@@ -432,6 +432,11 @@ pub struct AppState {
     pub inspector_width: f32,
     pub accounts: Vec<AccountSummary>,
     pub account_groups: Vec<crate::domain::AccountGroup>,
+    pub account_tree: ViewQueryState<Vec<crate::storage::query_store::AccountTreeGroup>>,
+    pub budget_month: ViewQueryState<crate::app::view_model::BudgetMonthView>,
+    pub budget_month_cache: crate::app::view_model::BudgetMonthCache,
+    pub budget_ui: crate::ui::budget_view::BudgetUiState,
+    pub inbox_summary: ViewQueryState<crate::app::view_model::InboxSummaryView>,
     pub register_query: RegisterQueryState,
     pub category_catalog: ViewQueryState<crate::app::view_model::CategoryCatalogView>,
     pub category_detail: ViewQueryState<crate::app::view_model::CategoryDetailView>,
@@ -479,6 +484,11 @@ impl Default for AppState {
             inspector_width: 280.0,
             accounts: vec![],
             account_groups: vec![],
+            account_tree: ViewQueryState::default(),
+            budget_month: ViewQueryState::default(),
+            budget_month_cache: Default::default(),
+            budget_ui: Default::default(),
+            inbox_summary: ViewQueryState::default(),
             register_query: RegisterQueryState::default(),
             category_catalog: ViewQueryState::default(),
             category_detail: ViewQueryState::default(),
@@ -552,6 +562,11 @@ impl AppState {
         self.report_query = ReportQueryState::default();
         self.accounts.clear();
         self.account_groups.clear();
+        self.account_tree = ViewQueryState::default();
+        self.budget_month = ViewQueryState::default();
+        self.budget_month_cache = Default::default();
+        self.budget_ui = Default::default();
+        self.inbox_summary = ViewQueryState::default();
         self.operations.clear();
         self.latest_by_purpose.clear();
         self.purpose_by_request.clear();
