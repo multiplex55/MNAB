@@ -148,11 +148,7 @@ pub struct InMemoryRepositories {
 }
 impl MerchantRuleRepository for InMemoryRepositories {
     fn put_merchant_rule(&mut self, value: &MerchantRule) -> Result<(), RepositoryError> {
-        if let Some(existing) = self.merchant_rules.iter_mut().find(|r| {
-            r.normalized_merchant == value.normalized_merchant
-                && r.account_id == value.account_id
-                && r.origin == value.origin
-        }) {
+        if let Some(existing) = self.merchant_rules.iter_mut().find(|r| r.id == value.id) {
             *existing = value.clone();
         } else {
             self.merchant_rules.push(value.clone());
@@ -160,7 +156,18 @@ impl MerchantRuleRepository for InMemoryRepositories {
         Ok(())
     }
     fn merchant_rules(&mut self) -> Result<Vec<MerchantRule>, RepositoryError> {
-        Ok(self.merchant_rules.clone())
+        let mut rules = self.merchant_rules.clone();
+        rules.sort_by_key(|r| {
+            (
+                std::cmp::Reverse(r.enabled),
+                std::cmp::Reverse(r.origin),
+                std::cmp::Reverse(r.priority),
+                std::cmp::Reverse(r.account_scope().is_some()),
+                std::cmp::Reverse(r.conditions.len()),
+                r.id,
+            )
+        });
+        Ok(rules)
     }
 }
 impl BudgetRepository for InMemoryRepositories {

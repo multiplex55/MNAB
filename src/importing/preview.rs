@@ -30,27 +30,50 @@ impl ImportProposal {
         self.duplicate_state != CandidateClassification::ExactDuplicate
             && self.decision != ReviewDecision::Ignore
     }
-    /// Applies only a high-confidence exact-normalized match. The review row
-    /// intentionally remains pending/unapproved and can still be overridden.
+    /// Runs after duplicate classification and before staging. The immutable `source`
+    /// remains available for review/audit and a match never accepts or approves the row.
     pub fn apply_merchant_rule(
         &mut self,
         book: &crate::service::merchant_rule_service::MerchantRuleBook,
         account: AccountId,
-    ) -> bool {
+    ) -> Result<bool, crate::service::merchant_rule_service::RuleEvaluationError> {
         let merchant = self
             .proposed_payee
             .as_deref()
             .or(self.source.payee.as_deref())
             .unwrap_or("");
-        let Some(rule) = book.match_high_confidence(merchant, account) else {
-            return false;
+        let context = crate::service::merchant_rule_service::ImportRuleContext {
+            merchant,
+            account_id: account,
+            account_group_id: None,
+            amount_minor_units: self.source.amount.minor_units(),
+            memo: self
+                .proposed_memo
+                .as_deref()
+                .or(self.source.memo.as_deref()),
+            import_source: match self.source.location {
+                super::source::SourceLocation::CsvRow(_) => "csv",
+                super::source::SourceLocation::OfxTransaction { .. } => "ofx",
+            },
         };
-        self.proposed_category = Some(rule.category_id.to_string());
+        let proposal = book.evaluate(&context)?;
+        if proposal.matched_rule_ids.is_empty() {
+            return Ok(false);
+        }
+        if let Some((_, snapshot)) = proposal.payee {
+            self.proposed_payee = Some(snapshot);
+        }
+        if let Some(category) = proposal.category {
+            self.proposed_category = Some(category.to_string());
+        }
+        if let Some(memo) = proposal.memo {
+            self.proposed_memo = Some(memo);
+        }
         self.selected_destination_account = Some(account);
         self.auto_categorized = true;
-        self.matched_merchant_rule = Some(rule.normalized_merchant.clone());
+        self.matched_merchant_rule = proposal.matched_rule_ids.first().map(ToString::to_string);
         self.decision = ReviewDecision::Pending;
-        true
+        Ok(true)
     }
 }
 

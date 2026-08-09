@@ -1,12 +1,14 @@
-use super::{AccountId, CategoryId};
+use super::{AccountGroupId, AccountId, CategoryId, PayeeId, TransactionRuleId};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, Ord, PartialOrd)]
 #[serde(rename_all = "snake_case")]
 pub enum MerchantRuleOrigin {
-    Explicit,
     Learned,
+    Explicit,
 }
+
+pub type TransactionRuleOrigin = MerchantRuleOrigin;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -15,20 +17,105 @@ pub enum MerchantConfidence {
     High,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct MerchantRule {
-    pub normalized_merchant: String,
-    pub account_id: Option<AccountId>,
-    pub category_id: CategoryId,
-    pub origin: MerchantRuleOrigin,
-    pub confidence: MerchantConfidence,
-    pub usage_count: u32,
-    pub last_matched_date: Option<time::Date>,
-    pub enabled: bool,
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextMatch {
+    Exact,
+    Contains,
+    Prefix,
 }
 
-/// Deliberately conservative merchant identity. This is exact matching after
-/// normalization, not fuzzy matching or a user-provided regular expression.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransactionDirection {
+    Inflow,
+    Outflow,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RuleCondition {
+    Merchant {
+        value: String,
+        match_type: TextMatch,
+    },
+    /// Read-only compatibility for persisted legacy rules. Authoring APIs must not create this.
+    LegacyMerchantRegex {
+        pattern: String,
+    },
+    Account(AccountId),
+    AccountGroup(AccountGroupId),
+    Direction(TransactionDirection),
+    AmountExact(i64),
+    AmountRange {
+        minimum: i64,
+        maximum: i64,
+    },
+    Memo {
+        value: String,
+        match_type: TextMatch,
+    },
+    ImportSource(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RuleAction {
+    SetPayee {
+        payee_id: PayeeId,
+        display_name_snapshot: String,
+    },
+    SetCategory {
+        category_id: CategoryId,
+    },
+    SetMemo {
+        memo: String,
+    },
+    PrefixMemo {
+        prefix: String,
+    },
+    SuffixMemo {
+        suffix: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TransactionRule {
+    pub id: TransactionRuleId,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub priority: i32,
+    pub origin: TransactionRuleOrigin,
+    pub conditions: Vec<RuleCondition>,
+    pub actions: Vec<RuleAction>,
+    pub confidence: MerchantConfidence,
+    /// Accepted learning observations, not speculative matches.
+    pub usage_count: u32,
+    pub match_count: u64,
+    pub last_used_date: Option<time::Date>,
+}
+
+pub type MerchantRule = TransactionRule;
+
+impl TransactionRule {
+    #[must_use]
+    pub fn account_scope(&self) -> Option<AccountId> {
+        self.conditions.iter().find_map(|c| match c {
+            RuleCondition::Account(id) => Some(*id),
+            _ => None,
+        })
+    }
+    #[must_use]
+    pub fn normalized_merchant(&self) -> Option<&str> {
+        self.conditions.iter().find_map(|c| match c {
+            RuleCondition::Merchant { value, .. } => Some(value.as_str()),
+            _ => None,
+        })
+    }
+}
+
+/// Deliberately conservative merchant identity.
 #[must_use]
 pub fn normalize_merchant(value: &str) -> String {
     let mut words: Vec<String> = value
@@ -49,7 +136,7 @@ pub fn normalize_merchant(value: &str) -> String {
 fn is_transaction_suffix(word: &str) -> bool {
     let token = word.trim_matches(|c: char| c.is_ascii_punctuation());
     let digits = token.strip_prefix('#').unwrap_or(token);
-    ((token.starts_with('#') || (digits.len() >= 4))
+    ((token.starts_with('#') || digits.len() >= 4)
         && !digits.is_empty()
         && digits.chars().all(|c| c.is_ascii_digit()))
         || (["txn", "trans", "transaction", "ref"]

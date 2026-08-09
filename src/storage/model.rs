@@ -77,7 +77,7 @@ primitive_row!(PayeeRow {
     archived: i64,
     hidden: i64
 });
-primitive_row!(MerchantRuleRow { id: String, budget_id: String, pattern: String, match_type: String, payee_id: Option<String>, category_id: Option<String>, priority: i64, enabled: i64 });
+primitive_row!(MerchantRuleRow { id: String, budget_id: String, account_id: Option<String>, pattern: String, match_type: String, payee_id: Option<String>, category_id: Option<String>, priority: i64, enabled: i64 });
 primitive_row!(TransactionSplitRow { id: String, budget_id: String, transaction_id: String, category_id: String, memo: Option<String>, amount: i64, sort_order: i64 });
 primitive_row!(TransferRow {
     id: String,
