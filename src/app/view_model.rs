@@ -416,6 +416,8 @@ pub struct ReportView {
     pub title: String,
     pub points: Vec<ReportPointView>,
     pub total_cents: i64,
+    /// CSV is derived from the same immutable aggregate on the worker and is never re-queried.
+    pub csv: String,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InboxSummaryView {

@@ -301,6 +301,7 @@ pub fn report_view(
     generation: crate::storage::worker::Generation,
 ) -> crate::app::view_model::ReportView {
     use crate::app::view_model::{ReportPointView, ReportView};
+    let csv = crate::domain::export_csv(&result).unwrap_or_default();
     let (revision, title, points, total) = match result {
         ReportResult::IncomeExpense(v) => (
             v.source.revision,
@@ -356,6 +357,7 @@ pub fn report_view(
         title: title.into(),
         points,
         total_cents: total,
+        csv,
     }
 }
 

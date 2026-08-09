@@ -25,6 +25,11 @@ impl From<AppCommand> for ApplicationAction {
         }
     }
 }
+impl From<crate::app::command::ReportAction> for ApplicationAction {
+    fn from(value: crate::app::command::ReportAction) -> Self {
+        Self::Report(value)
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DispatchError {
