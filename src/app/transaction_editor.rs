@@ -34,10 +34,46 @@ pub enum TransactionEditorField {
     Date,
     Payee,
     Category,
+    Memo,
     Outflow,
     Inflow,
     Split(usize),
     Form,
+}
+
+/// Deterministic keyboard order used by Tab and Shift+Tab in the register editor.
+pub const TRANSACTION_FIELD_ORDER: &[TransactionEditorField] = &[
+    TransactionEditorField::Account,
+    TransactionEditorField::Date,
+    TransactionEditorField::Payee,
+    TransactionEditorField::Category,
+    TransactionEditorField::Memo,
+    TransactionEditorField::Outflow,
+    TransactionEditorField::Inflow,
+    TransactionEditorField::Form,
+];
+
+#[must_use]
+pub fn traverse_field(
+    current: TransactionEditorField,
+    backwards: bool,
+    include_account: bool,
+) -> TransactionEditorField {
+    let fields: Vec<_> = TRANSACTION_FIELD_ORDER
+        .iter()
+        .copied()
+        .filter(|field| include_account || *field != TransactionEditorField::Account)
+        .collect();
+    let position = fields
+        .iter()
+        .position(|field| *field == current)
+        .unwrap_or(0);
+    let next = if backwards {
+        position.checked_sub(1).unwrap_or(fields.len() - 1)
+    } else {
+        (position + 1) % fields.len()
+    };
+    fields[next]
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -146,6 +182,43 @@ impl TransactionEditorState {
     pub fn cancel_protected_confirmations(&mut self) {
         self.protected_edit_confirmed = false;
         self.closed_account_confirmed = false;
+    }
+    pub fn move_focus(&mut self, backwards: bool) {
+        self.focus_field = traverse_field(self.focus_field, backwards, self.account_id.is_none());
+    }
+
+    /// Blur is the only point at which valid keyboard input is rewritten.
+    pub fn normalize_date_on_blur(&mut self) -> bool {
+        let Ok(date) = parse_transaction_date(&self.date_text) else {
+            return false;
+        };
+        self.date_text = date
+            .0
+            .format(time::macros::format_description!("[month]/[day]/[year]"))
+            .expect("fixed date format");
+        true
+    }
+
+    pub fn normalize_amount_on_blur(&mut self, outflow: bool) -> bool {
+        let text = if outflow {
+            &mut self.outflow_text
+        } else {
+            &mut self.inflow_text
+        };
+        let Ok(amount) = parse_currency_field(text) else {
+            return false;
+        };
+        *text = if text.trim().is_empty() {
+            String::new()
+        } else {
+            amount.to_string()
+        };
+        true
+    }
+
+    #[must_use]
+    pub fn mutations_enabled(&self) -> bool {
+        self.metadata.commit_state != crate::app::state::CommitState::Submitting
     }
     pub fn remaining(&self) -> Result<Money, TransactionEditorErrors> {
         let (_, amount, lines) = self.validate_parts(false)?;
@@ -506,5 +579,33 @@ mod tests {
         assert!(e.build_transaction(BudgetId::new()).is_ok());
         e.cancel_protected_confirmations();
         assert!(!e.protected_edit_confirmed && !e.closed_account_confirmed);
+    }
+    #[test]
+    fn blur_normalizes_only_valid_date_and_amount_text() {
+        let mut e = editor();
+        e.date_text = "2026-08-09".into();
+        assert!(e.normalize_date_on_blur());
+        assert_eq!(e.date_text, "08/09/2026");
+        e.date_text = "not a date".into();
+        assert!(!e.normalize_date_on_blur());
+        assert_eq!(e.date_text, "not a date");
+        e.outflow_text = "1,234.5".into();
+        assert!(e.normalize_amount_on_blur(true));
+        assert_eq!(e.outflow_text, "$1,234.50");
+        e.outflow_text = "bad".into();
+        assert!(!e.normalize_amount_on_blur(true));
+        assert_eq!(e.outflow_text, "bad");
+    }
+    #[test]
+    fn focus_order_and_submission_lock_are_deterministic() {
+        let mut e = editor();
+        e.focus_field = TransactionEditorField::Payee;
+        e.move_focus(false);
+        assert_eq!(e.focus_field, TransactionEditorField::Category);
+        e.move_focus(true);
+        assert_eq!(e.focus_field, TransactionEditorField::Payee);
+        assert!(e.mutations_enabled());
+        e.metadata.begin_submission(7);
+        assert!(!e.mutations_enabled());
     }
 }

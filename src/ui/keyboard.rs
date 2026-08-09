@@ -76,6 +76,8 @@ pub struct Scope {
     pub modal: bool,
     pub text_editor: bool,
     pub command_enabled: bool,
+    /// A picker owns Enter/Escape/Up/Down and prevents a second form command in this frame.
+    pub popup: bool,
 }
 
 /// Canonical, non-configurable global bindings. Preferences are validated against
@@ -112,6 +114,9 @@ pub fn map(stroke: KeyStroke, scope: Scope) -> Option<AppCommand> {
     if stroke.repeat && !matches!(stroke.key, K::ArrowLeft | K::ArrowRight) {
         return None;
     }
+    if scope.popup && matches!(stroke.key, K::Enter | K::Escape | K::ArrowUp | K::ArrowDown) {
+        return None;
+    }
     if scope.modal {
         return match stroke.key {
             K::Escape => Some(C::Cancel),
@@ -125,6 +130,7 @@ pub fn map(stroke: KeyStroke, scope: Scope) -> Option<AppCommand> {
             (K::F, true, false) => Some(C::FocusSearch),
             (K::Escape, _, _) => Some(C::Cancel),
             (K::Enter, false, _) => Some(C::Commit),
+            (K::Enter, true, _) => Some(C::Commit),
             (K::Z, true, false) => Some(C::Undo),
             (K::Z, true, true) => Some(C::Redo),
             _ => None,
@@ -140,6 +146,7 @@ pub fn map(stroke: KeyStroke, scope: Scope) -> Option<AppCommand> {
         (K::Z, true, false, false) => C::Undo,
         (K::Z, true, true, false) => C::Redo,
         (K::Enter, false, _, _) => C::Commit,
+        (K::Enter, true, _, false) => C::Commit,
         (K::Escape, false, _, _) => C::Cancel,
         (K::E, true, false, false) => C::Edit,
         (K::Delete, false, _, _) => C::Delete,
@@ -259,7 +266,8 @@ mod tests {
                 Scope {
                     modal: true,
                     text_editor: true,
-                    command_enabled: true
+                    command_enabled: true,
+                    popup: false,
                 }
             ),
             Some(AppCommand::Cancel)
@@ -288,6 +296,7 @@ mod tests {
             modal: true,
             command_enabled: true,
             text_editor: false,
+            popup: false,
         };
         assert_eq!(
             map(key(Key::Escape, false, false), s),
@@ -305,6 +314,7 @@ mod tests {
             text_editor: true,
             command_enabled: true,
             modal: false,
+            popup: false,
         };
         assert_eq!(map(key(Key::Delete, false, false), s), None);
         assert_eq!(map(key(Key::A, true, false), s), None);
@@ -320,5 +330,26 @@ mod tests {
         );
         assert_eq!(map(key(Key::N, true, false), s), None);
         assert_eq!(map(key(Key::Z, true, false), s), Some(AppCommand::Undo));
+    }
+    #[test]
+    fn popup_precedence_consumes_accept_escape_and_navigation() {
+        let scope = Scope {
+            popup: true,
+            command_enabled: true,
+            ..Scope::default()
+        };
+        for key_value in [Key::Enter, Key::Escape, Key::ArrowUp, Key::ArrowDown] {
+            assert_eq!(map(key(key_value, false, false), scope), None);
+        }
+        assert_eq!(
+            map(
+                key(Key::Enter, true, false),
+                Scope {
+                    command_enabled: true,
+                    ..Scope::default()
+                }
+            ),
+            Some(AppCommand::Commit)
+        );
     }
 }

@@ -57,6 +57,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
             modal,
             text_editor: editor,
             command_enabled: true,
+            popup: false,
         },
         &mut keyboard_commands,
     );

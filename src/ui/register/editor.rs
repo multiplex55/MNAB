@@ -87,8 +87,18 @@ pub fn show(
         .map(|c| {
             c.groups
                 .iter()
-                .flat_map(|g| &g.categories)
-                .map(|c| (c.id, c.name.clone()))
+                .flat_map(|group| {
+                    group
+                        .categories
+                        .iter()
+                        .filter(|category| {
+                            !category.hidden
+                                && !category.archived
+                                && !category.protected
+                                && !category.credit_card_payment
+                        })
+                        .map(|category| (category.id, category.name.clone(), group.name.clone()))
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -96,10 +106,11 @@ pub fn show(
         EditorState::CreatingTransaction(e) | EditorState::EditingTransaction(e) => e,
         _ => return,
     };
+    let enabled = editor.mutations_enabled();
     let identity = super::editor_row_identity(editor.transaction_id);
     let response = ui
         .push_id(identity, |ui| {
-            ui.group(|ui| {
+            ui.add_enabled_ui(enabled, |ui| {
                 ui.horizontal(|ui| {
                     if scope == super::RegisterScope::AllTransactions {
                         let name = accounts
@@ -123,7 +134,21 @@ pub fn show(
                             r.response.request_focus();
                         }
                     }
-                    ui.text_edit_singleline(&mut editor.date_text);
+                    let date = ui.add(
+                        egui::TextEdit::singleline(&mut editor.date_text)
+                            .hint_text("MM/DD/YYYY")
+                            .desired_width(100.0),
+                    );
+                    if date.lost_focus() {
+                        editor.normalize_date_on_blur();
+                    }
+                    if ui
+                        .small_button("📅")
+                        .on_hover_text("Open calendar")
+                        .clicked()
+                    {
+                        date.request_focus();
+                    }
                     let payee = editor
                         .payee_id
                         .and_then(|id| payee_names.iter().find(|p| p.0 == Some(id)))
@@ -149,13 +174,33 @@ pub fn show(
                     egui::ComboBox::from_id_salt("category")
                         .selected_text(category)
                         .show_ui(ui, |ui| {
-                            for (id, name) in &category_names {
-                                ui.selectable_value(&mut editor.category_id, Some(*id), name);
+                            let mut shown_group: Option<&str> = None;
+                            for (id, name, group) in &category_names {
+                                if shown_group != Some(group) {
+                                    ui.strong(group);
+                                    shown_group = Some(group);
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.add_space(12.0);
+                                    ui.selectable_value(&mut editor.category_id, Some(*id), name);
+                                });
                             }
                         });
                     ui.text_edit_singleline(&mut editor.memo);
-                    ui.text_edit_singleline(&mut editor.outflow_text);
-                    ui.text_edit_singleline(&mut editor.inflow_text);
+                    let outflow = ui.add(
+                        egui::TextEdit::singleline(&mut editor.outflow_text)
+                            .horizontal_align(egui::Align::RIGHT),
+                    );
+                    if outflow.lost_focus() {
+                        editor.normalize_amount_on_blur(true);
+                    }
+                    let inflow = ui.add(
+                        egui::TextEdit::singleline(&mut editor.inflow_text)
+                            .horizontal_align(egui::Align::RIGHT),
+                    );
+                    if inflow.lost_focus() {
+                        editor.normalize_amount_on_blur(false);
+                    }
                     egui::ComboBox::from_id_salt("clearance")
                         .selected_text(format!("{:?}", editor.clearance))
                         .show_ui(ui, |ui| {
@@ -167,11 +212,27 @@ pub fn show(
                             ui.selectable_value(
                                 &mut editor.clearance,
                                 Clearance::Cleared,
-                                "Cleared",
+                                "✓ Cleared",
                             );
+                            if editor.reconciled {
+                                ui.label("🔒 Reconciled")
+                                    .on_hover_text("Reconciled; use protected edit to change");
+                            }
                         });
-                    ui.checkbox(&mut editor.approved, "");
+                    let approval_label = if editor.approved {
+                        "Approved"
+                    } else {
+                        "Needs Approval"
+                    };
+                    ui.checkbox(&mut editor.approved, approval_label)
+                        .on_hover_text(approval_label);
                 });
+                if let Some(error) = &editor.errors.date {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+                if let Some(error) = &editor.errors.amount {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
                 for (i, split) in editor.splits.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
                         ui.label(format!("Split {}", i + 1));
@@ -198,7 +259,13 @@ pub fn show(
                         commands.push(crate::app::command::AppCommand::Cancel);
                     }
                 });
-            })
+            });
+            if !enabled {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Saving…");
+                });
+            }
         })
         .response;
     if editor.transaction_id.is_none() {

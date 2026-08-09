@@ -1348,6 +1348,16 @@ impl ApplicationRuntime {
             self.view.navigation.workspace,
             Workspace::Account(_) | Workspace::AllTransactions
         );
+        if matches!(intent, NextField | PreviousField) {
+            if let EditorState::CreatingTransaction(editor)
+            | EditorState::EditingTransaction(editor) = &mut self.view.editor
+            {
+                if editor.mutations_enabled() {
+                    editor.move_focus(intent == PreviousField);
+                }
+                return;
+            }
+        }
         if register_open && !self.view.editor.is_active() {
             match intent {
                 MoveUp | MoveDown => {
