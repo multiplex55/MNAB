@@ -419,6 +419,9 @@ pub struct AppState {
     pub selected_month: BudgetMonth,
     pub report_query: ReportQueryState,
     pub dialog: Option<DialogState>,
+    /// Risky data action retained only while its confirmation preview is visible.
+    pub pending_data_action: Option<crate::app::command::DataAction>,
+    pub maintenance_budget_name: String,
     pub notifications: Vec<Notification>,
     pub operations: BTreeMap<RequestId, BackgroundOperation>,
     latest_by_purpose: BTreeMap<RequestPurpose, RequestId>,
@@ -472,6 +475,8 @@ impl Default for AppState {
                 .expect("current calendar month is valid"),
             report_query: ReportQueryState::default(),
             dialog: None,
+            pending_data_action: None,
+            maintenance_budget_name: String::new(),
             notifications: vec![],
             operations: BTreeMap::new(),
             latest_by_purpose: BTreeMap::new(),

@@ -742,19 +742,8 @@ impl ApplicationRuntime {
             self.dispatch_ui(intent);
             return;
         }
-        if let ApplicationAction::Budget(intent) = action {
-            use crate::app::{command::BudgetAction, state::Dialog};
-            let dialog = match intent {
-                BudgetAction::ShowMaintenance => Some(Dialog::BudgetMaintenance),
-                _ => None,
-            };
-            if let Some(dialog) = dialog {
-                self.view.open_dialog(
-                    dialog,
-                    egui::Id::new("budget-menu"),
-                    egui::Id::new("toolbar"),
-                );
-            }
+        if let ApplicationAction::Data(intent) = action {
+            self.dispatch_data(intent);
             return;
         }
         if let ApplicationAction::Category(intent) = action {
@@ -829,6 +818,156 @@ impl ApplicationRuntime {
         }
         self.pending_commands.insert(id, command);
         self.submit_runtime_command(id);
+    }
+
+    fn dispatch_data(&mut self, intent: crate::app::command::DataAction) {
+        use crate::app::{budget_catalog, command::DataAction, state::Dialog};
+        let Some(paths) = self.paths.clone() else {
+            return;
+        };
+        if self.database_lifecycle != DatabaseLifecycle::Ready {
+            return;
+        }
+        match intent {
+            risky @ (DataAction::RestoreBackup {
+                confirmed: false, ..
+            }
+            | DataAction::Repair {
+                confirmed: false, ..
+            }) => {
+                let dialog = if matches!(risky, DataAction::RestoreBackup { .. }) {
+                    Dialog::RecoveryChoice
+                } else {
+                    Dialog::RepairBudget
+                };
+                self.view.pending_data_action = Some(risky);
+                self.view.open_dialog(
+                    dialog,
+                    egui::Id::new("data-confirmation"),
+                    egui::Id::new("data-menu"),
+                );
+            }
+            DataAction::CreateBackup => self.report_data_result(
+                "Backup created",
+                budget_catalog::backup_fixed(
+                    &paths,
+                    crate::service::backup_service::BackupReason::Manual,
+                )
+                .map(|a| format!("Validated backup: {}", a.database.display()))
+                .map_err(|e| e.to_string()),
+            ),
+            DataAction::Validate => self.report_data_result(
+                "Validation results",
+                budget_catalog::validate_fixed(&paths, true)
+                    .map(|findings| {
+                        if findings.is_empty() {
+                            "Complete diagnostics passed with no findings.".into()
+                        } else {
+                            findings
+                                .iter()
+                                .map(|f| format!("{:?}: {}", f.severity, f.summary))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        }
+                    })
+                    .map_err(|e| e.to_string()),
+            ),
+            DataAction::RevealDataDirectory => self.report_data_result(
+                "Data directory",
+                budget_catalog::reveal_in_explorer(&paths.data)
+                    .map(|()| paths.data.display().to_string())
+                    .map_err(|e| e.to_string()),
+            ),
+            DataAction::RevealBackupDirectory => self.report_data_result(
+                "Backup directory",
+                budget_catalog::reveal_in_explorer(&paths.backups)
+                    .map(|()| paths.backups.display().to_string())
+                    .map_err(|e| e.to_string()),
+            ),
+            DataAction::RenameBudget { name } => {
+                let result = self
+                    .session
+                    .as_ref()
+                    .map(|s| s.budget_id)
+                    .ok_or(budget_catalog::CatalogError::NotFound)
+                    .and_then(|id| {
+                        let mut catalog = budget_catalog::BudgetCatalog::default();
+                        catalog.refresh(&paths)?;
+                        self.rename_budget(&mut catalog, id, &name)
+                    });
+                self.report_data_result(
+                    "Budget name updated",
+                    result
+                        .map(|()| format!("Budget is now named {}.", name.trim()))
+                        .map_err(|e| e.to_string()),
+                );
+            }
+            DataAction::RestoreBackup {
+                metadata_path,
+                confirmed: true,
+            } => {
+                if let Some(mut worker) = self.worker.take() {
+                    let _ = worker.shutdown();
+                }
+                let result = budget_catalog::restore_fixed(&paths, &metadata_path)
+                    .map(|a| {
+                        format!(
+                            "Restored and completely validated backup from {}.",
+                            a.database.display()
+                        )
+                    })
+                    .map_err(|e| e.to_string());
+                self.reopen_after_data_operation(&paths);
+                self.report_data_result("Restore results", result);
+            }
+            DataAction::Repair {
+                request,
+                confirmed: true,
+            } => {
+                if let Some(mut worker) = self.worker.take() {
+                    let _ = worker.shutdown();
+                }
+                let result = (|| {
+                    let mut catalog = budget_catalog::BudgetCatalog::default();
+                    catalog.refresh(&paths)?;
+                    let id = self
+                        .session
+                        .as_ref()
+                        .ok_or(budget_catalog::CatalogError::NotFound)?
+                        .budget_id;
+                    catalog.repair(&paths, id, request).map(|r| {
+                        format!(
+                            "Repair completed and validation passed. Safety backup: {}",
+                            r.backup.display()
+                        )
+                    })
+                })()
+                .map_err(|e| e.to_string());
+                self.reopen_after_data_operation(&paths);
+                self.report_data_result("Repair results", result);
+            }
+        }
+        self.view.pending_data_action = None;
+        self.view.dialog = None;
+    }
+
+    fn reopen_after_data_operation(&mut self, paths: &PortablePaths) {
+        if let Ok(worker) = StorageWorker::start(&paths.database, || {}) {
+            self.worker = Some(worker);
+        }
+    }
+
+    fn report_data_result(&mut self, title: &str, result: Result<String, String>) {
+        let (kind, detail) = match result {
+            Ok(detail) => (NotificationKind::Information, detail),
+            Err(detail) => (NotificationKind::Error, detail),
+        };
+        self.view.notifications.push(Notification {
+            kind,
+            title: title.into(),
+            detail,
+            persistent: true,
+        });
     }
 
     fn dispatch_register(&mut self, action: crate::app::command::RegisterAction) {

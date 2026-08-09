@@ -267,7 +267,7 @@ pub enum ApplicationAction {
     Ui(AppCommand),
     /// Non-financial budget lifecycle intent. These actions are deliberately
     /// distinct from worker commands and never enter undo/redo history.
-    Budget(BudgetAction),
+    Data(DataAction),
     Financial(FinancialCommand),
     Category(CategoryAction),
     Report(ReportAction),
@@ -299,17 +299,21 @@ pub enum ReportAction {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BudgetAction {
-    ShowMaintenance,
-    Rename {
-        budget_id: crate::domain::BudgetId,
-        name: String,
+pub enum DataAction {
+    CreateBackup,
+    RestoreBackup {
+        metadata_path: PathBuf,
+        confirmed: bool,
     },
-    Reveal(crate::domain::BudgetId),
-    Validate(crate::domain::BudgetId),
+    Validate,
     Repair {
-        budget_id: crate::domain::BudgetId,
         request: crate::storage::repair::RepairRequest,
+        confirmed: bool,
+    },
+    RevealDataDirectory,
+    RevealBackupDirectory,
+    RenameBudget {
+        name: String,
     },
 }
 

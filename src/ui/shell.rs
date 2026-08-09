@@ -94,19 +94,44 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
                 state.navigation.workspace = Workspace::Inbox;
             }
             ui.menu_button("Data", |ui| {
-                use crate::app::command::{ApplicationAction, BudgetAction};
+                use crate::app::command::{ApplicationAction, DataAction};
                 if ui.button("Budget settings…").clicked() {
-                    actions.push(ApplicationAction::Budget(BudgetAction::ShowMaintenance));
+                    state.maintenance_budget_name.clone_from(&state.budget_name);
+                    state.open_dialog(
+                        crate::app::state::Dialog::BudgetMaintenance,
+                        egui::Id::new("data-menu"),
+                        egui::Id::new("toolbar"),
+                    );
                     ui.close();
                 }
                 ui.separator();
                 ui.label("Maintenance");
+                if ui.button("Create validated backup").clicked() {
+                    actions.push(ApplicationAction::Data(DataAction::CreateBackup));
+                    ui.close();
+                }
+                if ui.button("Restore from backup…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("MNAB backup metadata", &["json"])
+                        .pick_file()
+                    {
+                        actions.push(ApplicationAction::Data(DataAction::RestoreBackup {
+                            metadata_path: path,
+                            confirmed: false,
+                        }));
+                    }
+                    ui.close();
+                }
+                if ui.button("Validate database").clicked() {
+                    actions.push(ApplicationAction::Data(DataAction::Validate));
+                    ui.close();
+                }
                 if ui.button("Reveal data folder…").clicked() {
-                    actions.push(ApplicationAction::Budget(BudgetAction::ShowMaintenance));
+                    actions.push(ApplicationAction::Data(DataAction::RevealDataDirectory));
                     ui.close();
                 }
                 if ui.button("Reveal backup folder…").clicked() {
-                    actions.push(ApplicationAction::Budget(BudgetAction::ShowMaintenance));
+                    actions.push(ApplicationAction::Data(DataAction::RevealBackupDirectory));
                     ui.close();
                 }
             });
@@ -273,7 +298,35 @@ fn show_budget_dialog(ctx: &egui::Context, state: &mut AppState, actions: &mut A
     egui::Modal::new(egui::Id::new("budget-lifecycle-dialog")).show(ctx, |ui| {
         ui.heading(title);
         ui.label(guidance);
+        if matches!(dialog, crate::app::state::Dialog::BudgetMaintenance) {
+            ui.separator();
+            ui.label("Budget name");
+            ui.text_edit_singleline(&mut state.maintenance_budget_name);
+            if ui.button("Save name").clicked() {
+                actions.push(crate::app::command::ApplicationAction::Data(crate::app::command::DataAction::RenameBudget { name: state.maintenance_budget_name.clone() }));
+            }
+            ui.separator();
+            ui.label("Repair preview: rebuild SQLite indexes on a private copy, validate it, create a safety backup, then replace the fixed database.");
+            if ui.button("Review index repair…").clicked() {
+                actions.push(crate::app::command::ApplicationAction::Data(crate::app::command::DataAction::Repair { request: crate::storage::repair::RepairRequest::Reindex, confirmed: false }));
+            }
+        }
+        if matches!(dialog, crate::app::state::Dialog::RepairBudget | crate::app::state::Dialog::RecoveryChoice) {
+            ui.separator();
+            ui.colored_label(egui::Color32::YELLOW, "This operation replaces mnab-data/mnab.sqlite3. A validated safety backup is created first; no reset or deletion is available.");
+            if ui.button("Confirm operation").clicked()
+                && let Some(action) = state.pending_data_action.take()
+            {
+                let confirmed = match action {
+                    crate::app::command::DataAction::RestoreBackup { metadata_path, .. } => crate::app::command::DataAction::RestoreBackup { metadata_path, confirmed: true },
+                    crate::app::command::DataAction::Repair { request, .. } => crate::app::command::DataAction::Repair { request, confirmed: true },
+                    other => other,
+                };
+                actions.push(crate::app::command::ApplicationAction::Data(confirmed));
+            }
+        }
         if ui.button("Cancel").clicked() {
+            state.pending_data_action = None;
             state.dialog = None;
         }
     });
