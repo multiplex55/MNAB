@@ -709,6 +709,10 @@ impl ApplicationRuntime {
             self.dispatch_report(intent);
             return;
         }
+        if let ApplicationAction::Register(intent) = action {
+            self.dispatch_register(intent);
+            return;
+        }
         if self.generation.budget == 0 {
             return;
         }
@@ -771,6 +775,84 @@ impl ApplicationRuntime {
         self.submit_runtime_command(id);
     }
 
+    fn dispatch_register(&mut self, action: crate::app::command::RegisterAction) {
+        use crate::app::command::RegisterAction;
+        let ids = self
+            .view
+            .register_query
+            .last_successful
+            .as_ref()
+            .map(|p| p.rows.iter().map(|r| r.transaction_id).collect::<Vec<_>>())
+            .unwrap_or_default();
+        match action {
+            RegisterAction::Click { id, ctrl, shift } => {
+                if shift {
+                    self.view.register_selection.select_range(id, &ids);
+                } else if ctrl {
+                    self.view
+                        .register_selection
+                        .toggle(id, crate::app::register::AllMatchingClick::ToggleExclusion);
+                } else {
+                    self.view.register_selection.select_only(id);
+                }
+                self.view.selected_transaction = self.view.register_selection.cursor();
+            }
+            RegisterAction::Move { delta, extend } => {
+                let has_more = self
+                    .view
+                    .register_query
+                    .last_successful
+                    .as_ref()
+                    .is_some_and(|p| p.has_more);
+                let _ = self
+                    .view
+                    .register_selection
+                    .move_cursor(&ids, delta, extend, has_more);
+                self.view.selected_transaction = self.view.register_selection.cursor();
+            }
+            RegisterAction::ToggleCurrent => {
+                if let Some(id) = self.view.register_selection.cursor() {
+                    self.view
+                        .register_selection
+                        .toggle(id, crate::app::register::AllMatchingClick::ToggleExclusion);
+                    self.view.selected_transaction = Some(id);
+                }
+            }
+            RegisterAction::BeginEdit(id) => {
+                self.view.selected_transaction = Some(id);
+                let row = self
+                    .view
+                    .register_query
+                    .last_successful
+                    .as_ref()
+                    .and_then(|p| p.rows.iter().find(|r| r.transaction_id == id));
+                if let Some(draft) = row.and_then(crate::ui::workspaces::register::editor_from_row)
+                {
+                    self.view.editor = crate::app::state::EditorState::EditingTransaction(
+                        crate::app::state::InlineTransactionEditorState {
+                            transaction_id: Some(id),
+                            draft,
+                            metadata: crate::app::state::EditorMetadata::new(egui::Id::new(
+                                "register",
+                            )),
+                        },
+                    );
+                } else {
+                    self.view
+                        .notifications
+                        .push(crate::app::state::Notification {
+                            kind: crate::app::state::NotificationKind::Information,
+                            title: "Loading transaction details".into(),
+                            detail:
+                                "The complete transaction and splits are required before editing."
+                                    .into(),
+                            persistent: false,
+                        });
+                }
+            }
+        }
+    }
+
     /// Exhaustive UI router: adding an `AppCommand` makes this match fail to compile until routed.
     fn dispatch_ui(&mut self, intent: AppCommand) {
         use crate::app::{
@@ -797,6 +879,59 @@ impl ApplicationRuntime {
                 }
             }
             return;
+        }
+        let register_open = matches!(
+            self.view.navigation.workspace,
+            Workspace::Account(_) | Workspace::AllTransactions
+        );
+        if register_open && !self.view.editor.is_active() {
+            match intent {
+                MoveUp | MoveDown => {
+                    self.dispatch_register(crate::app::command::RegisterAction::Move {
+                        delta: if intent == MoveUp { -1 } else { 1 },
+                        extend: false,
+                    });
+                    return;
+                }
+                ToggleSelection => {
+                    self.dispatch_register(crate::app::command::RegisterAction::ToggleCurrent);
+                    return;
+                }
+                Edit | EditTransaction | Commit => {
+                    if let Some(id) = self
+                        .view
+                        .register_selection
+                        .cursor()
+                        .or(self.view.selected_transaction)
+                    {
+                        self.dispatch_register(crate::app::command::RegisterAction::BeginEdit(id));
+                        return;
+                    }
+                }
+                Delete | DeleteTransaction => {
+                    let selected = match &self.view.register_selection {
+                        crate::app::register::TransactionSelection::Explicit { ids, .. } => {
+                            crate::app::command::TransactionBatchSelection::Explicit(ids.clone())
+                        }
+                        crate::app::register::TransactionSelection::AllMatching {
+                            query,
+                            exclusions,
+                            ..
+                        } => crate::app::command::TransactionBatchSelection::AllMatching {
+                            query: query.clone(),
+                            exclusions: exclusions.clone(),
+                        },
+                    };
+                    self.dispatch(ApplicationAction::Financial(FinancialCommand::Transaction(
+                        TransactionCommand::Batch(crate::app::command::TransactionBatchCommand {
+                            selection: selected,
+                            action: crate::app::command::TransactionBatchAction::Delete,
+                        }),
+                    )));
+                    return;
+                }
+                _ => {}
+            }
         }
         let disabled = match intent {
             ResetRegisterColumns => {
@@ -1378,6 +1513,23 @@ impl ApplicationRuntime {
         self.view.complete_request(id);
         match result {
             Ok(crate::storage::worker::TypedResult::Mutation(m)) => {
+                if self
+                    .view
+                    .editor
+                    .metadata()
+                    .is_some_and(|metadata| metadata.pending_command_id == Some(cid))
+                {
+                    if let Some(transaction_id) = m.affected_entity_ids.iter().find_map(|id| {
+                        if let crate::storage::protocol::AffectedEntityId::Transaction(id) = id {
+                            Some(*id)
+                        } else {
+                            None
+                        }
+                    }) {
+                        self.view.register_selection.select_only(transaction_id);
+                        self.view.selected_transaction = Some(transaction_id);
+                    }
+                }
                 c.transition(CommandStatus::Committed)
                     .expect("running commits");
                 self.terminal_sequence += 1;

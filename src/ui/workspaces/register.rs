@@ -77,7 +77,12 @@ fn format_minor_units(cents: i64) -> String {
     format!("{sign}${}.{:02}", magnitude / 100, magnitude % 100)
 }
 
-fn show_page_table(ui: &mut egui::Ui, page: &crate::app::view_model::RegisterPageView) {
+fn show_page_table(
+    ui: &mut egui::Ui,
+    state: &AppState,
+    page: &crate::app::view_model::RegisterPageView,
+    commands: &mut ActionCollector,
+) {
     use egui_extras::{Column, TableBuilder};
     let all = matches!(
         page.scope,
@@ -113,6 +118,7 @@ fn show_page_table(ui: &mut egui::Ui, page: &crate::app::view_model::RegisterPag
         .body(|body| {
             body.rows(24.0, page.rows.len(), |mut row| {
                 let model = &page.rows[row.index()];
+                row.set_selected(state.register_selection.contains(model.transaction_id));
                 let markers = [
                     model.reconciled.then_some("Reconciled"),
                     model.is_transfer.then_some("Transfer"),
@@ -185,9 +191,67 @@ fn show_page_table(ui: &mut egui::Ui, page: &crate::app::view_model::RegisterPag
                         }
                     });
                 }
+                let response = row.response();
+                if response.clicked() {
+                    let modifiers = response.ctx.input(|i| i.modifiers);
+                    commands.push(crate::app::command::ApplicationAction::Register(
+                        crate::app::command::RegisterAction::Click {
+                            id: model.transaction_id,
+                            ctrl: modifiers.command || modifiers.ctrl,
+                            shift: modifiers.shift,
+                        },
+                    ));
+                }
+                if response.double_clicked() {
+                    commands.push(crate::app::command::ApplicationAction::Register(
+                        crate::app::command::RegisterAction::BeginEdit(model.transaction_id),
+                    ));
+                }
             });
         });
     columns.clear();
+}
+
+/// Builds an editor from the register projection. Split rows deliberately return `None`:
+/// callers must fetch the complete aggregate before allowing it to be overwritten.
+#[must_use]
+pub fn editor_from_row(row: &crate::app::view_model::RegisterRowView) -> Option<TransactionEditor> {
+    if row.split_count != 0 {
+        return None;
+    }
+    Some(TransactionEditor {
+        account_id: Some(row.account_id),
+        date: row.date.to_string(),
+        payee_id: row.payee_id,
+        category_id: row.category_id,
+        memo: row.memo.clone().unwrap_or_default(),
+        outflow: (row.outflow_cents != 0)
+            .then(|| {
+                format!(
+                    "{}.{:02}",
+                    row.outflow_cents / 100,
+                    row.outflow_cents.unsigned_abs() % 100
+                )
+            })
+            .unwrap_or_default(),
+        inflow: (row.inflow_cents != 0)
+            .then(|| {
+                format!(
+                    "{}.{:02}",
+                    row.inflow_cents / 100,
+                    row.inflow_cents.unsigned_abs() % 100
+                )
+            })
+            .unwrap_or_default(),
+        clearance: Some(match row.cleared_state.to_ascii_lowercase().as_str() {
+            "cleared" => Clearance::Cleared,
+            "reconciled" => Clearance::Reconciled,
+            _ => Clearance::Uncleared,
+        }),
+        approved: row.approved,
+        reconciled: row.reconciled,
+        ..Default::default()
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -521,7 +585,7 @@ impl TransferEditor {
 
 pub fn show(
     ui: &mut egui::Ui,
-    _state: &AppState,
+    _state: &mut AppState,
     account_id: AccountId,
     _commands: &mut ActionCollector,
 ) {
@@ -571,11 +635,12 @@ pub fn show(
 
 pub fn load_state(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &mut AppState,
     empty_title: &str,
     empty_action: &str,
     commands: &mut ActionCollector,
 ) {
+    show_inline_editor(ui, state, commands);
     let query = &state.register_query;
     if query.refresh_active && query.last_successful.is_none() {
         ui.spinner();
@@ -592,7 +657,7 @@ pub fn load_state(
         }
         if let Some(page) = &query.last_successful {
             ui.small("Showing the last successfully loaded data.");
-            show_page_table(ui, page);
+            show_page_table(ui, state, page, commands);
         }
         return;
     }
@@ -603,7 +668,7 @@ pub fn load_state(
                 ui.spinner();
                 ui.small("Refreshing…");
             }
-            show_page_table(ui, page);
+            show_page_table(ui, state, page, commands);
             if page.has_more {
                 ui.small("Scroll near the end to load more…");
             }
@@ -616,6 +681,80 @@ pub fn load_state(
             }
         }
     }
+}
+
+fn show_inline_editor(ui: &mut egui::Ui, state: &mut AppState, commands: &mut ActionCollector) {
+    let editor = match &mut state.editor {
+        crate::app::state::EditorState::CreatingTransaction(editor)
+        | crate::app::state::EditorState::EditingTransaction(editor) => editor,
+        _ => return,
+    };
+    ui.group(|ui| {
+        ui.strong(if editor.transaction_id.is_some() {
+            "Edit transaction"
+        } else {
+            "New transaction (not saved)"
+        });
+        ui.horizontal(|ui| {
+            ui.label("Date");
+            ui.text_edit_singleline(&mut editor.draft.date);
+            ui.label("Payee");
+            ui.label(
+                editor
+                    .draft
+                    .payee_id
+                    .map_or("—".into(), |id| id.to_string()),
+            );
+            ui.label("Category");
+            ui.label(
+                editor
+                    .draft
+                    .category_id
+                    .map_or("—".into(), |id| id.to_string()),
+            );
+            ui.label("Memo");
+            ui.text_edit_singleline(&mut editor.draft.memo);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Outflow");
+            ui.text_edit_singleline(&mut editor.draft.outflow);
+            ui.label("Inflow");
+            ui.text_edit_singleline(&mut editor.draft.inflow);
+            ui.label("Cleared");
+            egui::ComboBox::from_id_salt("inline-clearance")
+                .selected_text(format!(
+                    "{:?}",
+                    editor.draft.clearance.unwrap_or(Clearance::Uncleared)
+                ))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut editor.draft.clearance,
+                        Some(Clearance::Uncleared),
+                        "Uncleared",
+                    );
+                    ui.selectable_value(
+                        &mut editor.draft.clearance,
+                        Some(Clearance::Cleared),
+                        "Cleared",
+                    );
+                });
+            ui.checkbox(&mut editor.draft.approved, "Approved");
+            if ui.button("Save").clicked() {
+                commands.push(crate::app::command::AppCommand::Commit);
+            }
+            if ui.button("Cancel").clicked() {
+                commands.push(crate::app::command::AppCommand::Cancel);
+            }
+        });
+        if editor.metadata.commit_state == crate::app::state::CommitState::Failed {
+            for error in &editor.metadata.validation_errors {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("{error} (fix and retry)"),
+                );
+            }
+        }
+    });
 }
 
 #[cfg(test)]

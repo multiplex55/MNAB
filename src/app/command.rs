@@ -249,6 +249,23 @@ pub enum ApplicationAction {
     Financial(FinancialCommand),
     Category(CategoryAction),
     Report(ReportAction),
+    Register(RegisterAction),
+}
+
+/// Register gestures carry stable identities; an index is never allowed to escape the widget.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RegisterAction {
+    Click {
+        id: TransactionId,
+        ctrl: bool,
+        shift: bool,
+    },
+    Move {
+        delta: isize,
+        extend: bool,
+    },
+    ToggleCurrent,
+    BeginEdit(TransactionId),
 }
 
 /// Typed report intents. A retry always carries the original immutable request.
