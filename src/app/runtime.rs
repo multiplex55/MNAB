@@ -671,6 +671,7 @@ impl ApplicationRuntime {
             .account_tree
             .begin(account_id, self.generation, None);
         let month_id = self.allocate_request();
+        self.view.budget_month_request = Some((budget_id, self.view.selected_month));
         self.view
             .budget_month
             .begin(month_id, self.generation, None);
@@ -895,6 +896,7 @@ impl ApplicationRuntime {
             return;
         };
         let id = self.allocate_request();
+        self.view.budget_month_request = Some((budget_id, month));
         self.view.budget_month.begin(id, self.generation, None);
         let request = crate::storage::worker::StorageRequest {
             id,
@@ -1973,7 +1975,18 @@ impl ApplicationRuntime {
                 }
             }
             Ok(crate::storage::worker::TypedResult::BudgetMonth(value)) => {
-                if self.view.budget_month.accept(id, generation, value.clone()) {
+                let current_key = self
+                    .view
+                    .active_budget
+                    .map(|budget_id| (budget_id, self.view.selected_month));
+                let response_matches_key = self.view.budget_month_request == current_key
+                    && self
+                        .view
+                        .budget_month_request
+                        .is_some_and(|(_, requested_month)| requested_month == value.month);
+                if response_matches_key
+                    && self.view.budget_month.accept(id, generation, value.clone())
+                {
                     self.view.budget_month_cache.insert(value);
                 }
             }
@@ -2581,6 +2594,45 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("offline"))
         );
+    }
+
+    #[test]
+    fn response_for_previous_month_is_rejected_even_with_latest_request_identity() {
+        let (_dir, mut runtime) = runtime_with_worker();
+        runtime.view.navigation.workspace = crate::app::navigation::Workspace::Budget;
+        let requested = runtime.view.selected_month.previous().unwrap();
+        runtime.request_budget_month(requested);
+        let id = runtime.view.budget_month.latest_request_id.unwrap();
+        let generation = runtime.generation;
+        let previous_success = runtime.view.budget_month.last_successful.clone();
+        let response = crate::app::view_model::BudgetMonthView {
+            version: crate::app::view_model::ViewVersion {
+                generation: generation.budget,
+                revision: 2,
+            },
+            month: requested,
+            calculation_revision: 2,
+            ready_to_assign_cents: 99,
+            assigned_cents: 0,
+            activity_cents: 0,
+            available_cents: 0,
+            overspending_cents: 0,
+            cash_overspending_cents: 0,
+            credit_card_overspending_cents: 0,
+            rows: vec![],
+            inspector: vec![],
+        };
+
+        // Simulate returning to the current selected month before the old query completes.
+        runtime.handle_view_response(
+            id,
+            generation,
+            Ok(crate::storage::worker::TypedResult::BudgetMonth(response)),
+            None,
+        );
+
+        assert_eq!(runtime.view.budget_month.last_successful, previous_success);
+        assert!(runtime.view.budget_month.refresh_active);
     }
 
     #[test]
