@@ -237,6 +237,32 @@ impl EditorMetadata {
             pending_command_id: None,
         }
     }
+
+    /// Starts a commit attempt unless this editor already owns an attempt.
+    /// Failed attempts are intentionally retryable and keep the same form data.
+    pub fn begin_validation(&mut self) -> bool {
+        if matches!(
+            self.commit_state,
+            CommitState::Validating | CommitState::Submitting
+        ) {
+            return false;
+        }
+        self.commit_state = CommitState::Validating;
+        self.pending_command_id = None;
+        self.validation_errors.clear();
+        true
+    }
+
+    pub fn begin_submission(&mut self, command_id: u64) {
+        self.commit_state = CommitState::Submitting;
+        self.pending_command_id = Some(command_id);
+    }
+
+    pub fn fail(&mut self, error: impl Into<String>) {
+        self.commit_state = CommitState::Failed;
+        self.pending_command_id = None;
+        self.validation_errors = vec![error.into()];
+    }
 }
 #[derive(Clone, Debug)]
 pub struct AccountEditorState {
