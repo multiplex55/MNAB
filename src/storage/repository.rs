@@ -26,6 +26,9 @@ pub trait CategoryRepository {
     fn put_category(&mut self, value: &Category) -> Result<(), RepositoryError>;
     fn category(&mut self, id: CategoryId) -> Result<Option<Category>, RepositoryError>;
     fn category_is_used(&mut self, id: CategoryId) -> Result<bool, RepositoryError>;
+    fn category_is_managed(&mut self, _id: CategoryId) -> Result<bool, RepositoryError> {
+        Ok(false)
+    }
     fn delete_category(&mut self, id: CategoryId) -> Result<(), RepositoryError>;
 }
 pub trait PayeeRepository {

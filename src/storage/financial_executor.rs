@@ -106,6 +106,11 @@ fn apply<R: Repositories>(
         }
         FinancialCommand::Category(CategoryCommand::Update(v)) => {
             validate_name(&v.name)?;
+            if r.category_is_managed(v.id).map_err(repository)? {
+                return Err(safe(
+                    "credit-card payment categories are managed with their account",
+                ));
+            }
             let old = r.category(v.id).map_err(repository)?;
             r.put_category(v).map_err(repository)?;
             (
@@ -119,6 +124,11 @@ fn apply<R: Repositories>(
             )
         }
         FinancialCommand::Category(CategoryCommand::Delete(id)) => {
+            if r.category_is_managed(*id).map_err(repository)? {
+                return Err(safe(
+                    "credit-card payment categories are managed with their account",
+                ));
+            }
             if r.category_is_used(*id).map_err(repository)? {
                 return Err(safe("category is in use"));
             }
@@ -135,6 +145,17 @@ fn apply<R: Repositories>(
                 )),
                 "category",
                 id.to_string(),
+            )
+        }
+        FinancialCommand::Category(CategoryCommand::CreateGroup(v)) => {
+            validate_name(&v.name)?;
+            r.put_group(v).map_err(repository)?;
+            (
+                "Create category group",
+                vec![],
+                None,
+                "category_group",
+                v.id.to_string(),
             )
         }
         FinancialCommand::Assignment(AssignmentCommand::Set(v)) => {
@@ -271,6 +292,18 @@ fn apply<R: Repositories>(
                 )),
                 "payee",
                 id.to_string(),
+            )
+        }
+        FinancialCommand::Target(TargetCommand::Save(target)) => {
+            r.put_target(target).map_err(repository)?;
+            (
+                "Save target",
+                vec![A::Target(target.id)],
+                Some(UndoData::Command(FinancialCommand::Target(
+                    TargetCommand::Delete(target.id),
+                ))),
+                "target",
+                target.id.to_string(),
             )
         }
         FinancialCommand::Target(TargetCommand::Delete(id)) => {

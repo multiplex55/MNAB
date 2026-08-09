@@ -129,6 +129,9 @@ impl CategoryCatalog {
     }
 
     pub fn archive(&mut self, id: CategoryId) -> Result<(), CategoryCommandError> {
+        if self.is_managed_payment_category(id) {
+            return Err(CategoryCommandError::Managed);
+        }
         let category = self
             .categories
             .iter_mut()
@@ -402,6 +405,33 @@ mod tests {
                 .find(|c| c.id == current)
                 .unwrap()
                 .archived
+        );
+    }
+
+    #[test]
+    fn managed_payment_category_rejects_every_destructive_presentation_operation() {
+        let mut catalog = CategoryCatalog::default();
+        let group = catalog.add_group("Card payments").unwrap();
+        let managed = catalog.add_category(group, "Visa").unwrap();
+        catalog
+            .managed_payment_categories
+            .insert(AccountId::new(), managed);
+        assert_eq!(
+            catalog.rename_category(managed, "Other"),
+            Err(CategoryCommandError::Managed)
+        );
+        assert_eq!(
+            catalog.move_category(managed, group, 0),
+            Err(CategoryCommandError::Managed)
+        );
+        assert_eq!(
+            catalog.set_hidden(managed, true),
+            Err(CategoryCommandError::Managed)
+        );
+        assert_eq!(catalog.archive(managed), Err(CategoryCommandError::Managed));
+        assert_eq!(
+            catalog.delete_if_unused(managed),
+            Err(CategoryCommandError::Managed)
         );
     }
 }

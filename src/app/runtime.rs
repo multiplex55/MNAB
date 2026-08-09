@@ -3,10 +3,10 @@ use std::collections::BTreeMap;
 use crate::{
     app::{
         command::{
-            AppCommand, ApplicationAction, CancellationPolicy, CommandEnvelope, CommandHistory,
-            CommandId, CommandStatus, ConfirmationState, DeduplicationKey, FailureSafety,
-            FinancialCommand, HistoryEntry, OperationClass, RetryMetadata, Reversibility,
-            RuntimeCommand, TransactionCommand,
+            AppCommand, ApplicationAction, CancellationPolicy, CategoryAction, CommandEnvelope,
+            CommandHistory, CommandId, CommandStatus, ConfirmationState, DeduplicationKey,
+            FailureSafety, FinancialCommand, HistoryEntry, OperationClass, RetryMetadata,
+            Reversibility, RuntimeCommand, TransactionCommand,
         },
         dispatcher::{ActionCollector, requires_confirmation},
         lifecycle::{DatabaseLifecycle, Lifecycle, LifecycleEffect, LifecycleState},
@@ -437,10 +437,14 @@ impl ApplicationRuntime {
                     user_error,
                     ..
                 } => self.handle_command_response(id, cid, corr, generation, result, user_error),
-                StorageResponse::Completed { id, generation, .. }
-                    if generation == self.generation =>
-                {
-                    self.view.complete_request(id);
+                StorageResponse::Completed {
+                    id,
+                    generation,
+                    result,
+                    user_error,
+                    ..
+                } if generation == self.generation => {
+                    self.handle_view_response(id, generation, result, user_error)
                 }
                 StorageResponse::Completed { id, .. } => {
                     tracing::debug!(request_id = id, "discarded stale worker response");
@@ -492,6 +496,10 @@ impl ApplicationRuntime {
                     egui::Id::new("toolbar"),
                 );
             }
+            return;
+        }
+        if let ApplicationAction::Category(intent) = action {
+            self.dispatch_category(intent);
             return;
         }
         if self.generation.budget == 0 {
@@ -599,6 +607,7 @@ impl ApplicationRuntime {
             }
             NavigateCategories => {
                 self.view.navigation.workspace = Workspace::Categories;
+                self.request_category_catalog(None);
                 return;
             }
             NavigateReports => {
@@ -742,6 +751,162 @@ impl ApplicationRuntime {
             detail: disabled.into(),
             persistent: false,
         });
+    }
+
+    fn dispatch_category(&mut self, intent: CategoryAction) {
+        use crate::app::state::{
+            CategoryEditorMode, CategoryEditorState, EditorMetadata, EditorState,
+        };
+        match intent {
+            CategoryAction::RefreshCatalog => {
+                self.request_category_catalog(self.view.register_focus)
+            }
+            CategoryAction::ToggleArchived(value) => {
+                self.view.show_archived_categories = value;
+                self.request_category_catalog(None);
+            }
+            CategoryAction::Select(id) => {
+                self.view.selected_category = Some(id);
+                self.request_category_detail(id, None);
+            }
+            CategoryAction::NewGroup => {
+                self.view.editor = EditorState::ManagingCategory(CategoryEditorState {
+                    category_id: None,
+                    group_id: None,
+                    name: String::new(),
+                    mode: CategoryEditorMode::Group,
+                    metadata: EditorMetadata::new(egui::Id::new("new-category-group")),
+                })
+            }
+            CategoryAction::NewCategory(group_id) => {
+                self.view.editor = EditorState::ManagingCategory(CategoryEditorState {
+                    category_id: None,
+                    group_id: Some(group_id),
+                    name: String::new(),
+                    mode: CategoryEditorMode::Category,
+                    metadata: EditorMetadata::new(egui::Id::new("new-category")),
+                })
+            }
+            CategoryAction::Edit(id) => {
+                let name = self
+                    .view
+                    .category_detail
+                    .last_successful
+                    .as_ref()
+                    .filter(|v| v.category.id == id)
+                    .map_or_else(String::new, |v| v.category.name.clone());
+                self.view.editor = EditorState::ManagingCategory(CategoryEditorState {
+                    category_id: Some(id),
+                    group_id: None,
+                    name,
+                    mode: CategoryEditorMode::Category,
+                    metadata: EditorMetadata::new(egui::Id::new("category-detail")),
+                });
+            }
+            CategoryAction::BeginGoal(id) => {
+                self.view.editor = EditorState::ManagingCategory(CategoryEditorState {
+                    category_id: Some(id),
+                    group_id: None,
+                    name: String::new(),
+                    mode: CategoryEditorMode::Goal,
+                    metadata: EditorMetadata::new(egui::Id::new("category-goal")),
+                })
+            }
+            CategoryAction::OpenActivity(id) | CategoryAction::OpenTransactions(id) => {
+                if let Some(budget_id) = self.view.active_budget {
+                    self.view.register_query.active_request = Some(
+                        crate::ui::workspaces::categories::canonical_category_filter(budget_id, id),
+                    );
+                    self.view.navigation.workspace =
+                        crate::app::navigation::Workspace::AllTransactions;
+                }
+            }
+            CategoryAction::BeginGoalTransfer(_) => self.dispatch_ui(AppCommand::CreateTransfer),
+        }
+    }
+
+    fn request_category_catalog(&mut self, focus: Option<egui::Id>) {
+        let Some(budget_id) = self.view.active_budget else {
+            return;
+        };
+        let id = self.allocate_request();
+        self.view.category_catalog.begin(id, self.generation, focus);
+        let request = crate::storage::worker::StorageRequest {
+            id,
+            generation: self.generation,
+            operation: crate::storage::worker::WorkerOperation::Category(
+                crate::storage::worker::CategoryViewOperation::Catalog {
+                    budget_id,
+                    show_archived: self.view.show_archived_categories,
+                },
+            ),
+        };
+        if self
+            .worker
+            .as_ref()
+            .is_none_or(|w| w.submit(request).is_err())
+        {
+            let _ = self.view.category_catalog.fail(
+                id,
+                self.generation,
+                "Category catalog could not be requested.",
+            );
+        }
+    }
+    fn request_category_detail(
+        &mut self,
+        category_id: crate::domain::CategoryId,
+        focus: Option<egui::Id>,
+    ) {
+        let id = self.allocate_request();
+        self.view.category_detail.begin(id, self.generation, focus);
+        let today = time::OffsetDateTime::now_utc().date();
+        let request = crate::storage::worker::StorageRequest {
+            id,
+            generation: self.generation,
+            operation: crate::storage::worker::WorkerOperation::Category(
+                crate::storage::worker::CategoryViewOperation::Detail { category_id, today },
+            ),
+        };
+        if self
+            .worker
+            .as_ref()
+            .is_none_or(|w| w.submit(request).is_err())
+        {
+            let _ = self.view.category_detail.fail(
+                id,
+                self.generation,
+                "Category details could not be requested.",
+            );
+        }
+    }
+    fn handle_view_response(
+        &mut self,
+        id: RequestId,
+        generation: Generation,
+        result: Result<crate::storage::worker::TypedResult, crate::storage::worker::WorkerError>,
+        safe: Option<crate::storage::worker::SafeUserError>,
+    ) {
+        match result {
+            Ok(crate::storage::worker::TypedResult::CategoryCatalog(value)) => {
+                let _ = self.view.category_catalog.accept(id, generation, value);
+            }
+            Ok(crate::storage::worker::TypedResult::CategoryDetail(value)) => {
+                let _ = self.view.category_detail.accept(id, generation, value);
+            }
+            Err(error) => {
+                let message = safe.map_or_else(
+                    || format!("Refresh failed: {error}"),
+                    |v| v.rendered_message(),
+                );
+                let _ = self
+                    .view
+                    .category_catalog
+                    .fail(id, generation, message.clone());
+                let _ = self.view.category_detail.fail(id, generation, message);
+            }
+            _ => self.view.complete_request(id),
+        }
     }
     pub fn confirm_command(&mut self, id: u64, token: u64) -> bool {
         let Some(c) = self.pending_commands.get_mut(&id) else {

@@ -134,6 +134,48 @@ pub fn invalidations_for(c: &FinancialCommand) -> ViewInvalidations {
         ]
         .into_iter()
         .collect(),
+        FinancialCommand::Category(command) => {
+            let category = match command {
+                CategoryCommand::Update(v) => Some(v.id),
+                CategoryCommand::Delete(id) => Some(*id),
+                CategoryCommand::ReorderCategory { id, .. } => Some(*id),
+                CategoryCommand::Merge { source, .. } => Some(*source),
+                CategoryCommand::CreateGroup(_) | CategoryCommand::ReorderGroup { .. } => None,
+            };
+            let mut values: ViewInvalidations = [
+                V::CategoryCatalog,
+                V::Reports,
+                V::Targets,
+                V::Inspectors,
+                V::LookupData,
+                V::Search,
+                V::SavedViewDiagnostics,
+                V::AllAccountRegisters,
+            ]
+            .into_iter()
+            .collect();
+            if let Some(id) = category {
+                values.insert(V::CategoryDetail(id));
+            }
+            values
+        }
+        FinancialCommand::Target(command) => {
+            let mut values: ViewInvalidations =
+                [V::Targets, V::Reports, V::Inspectors, V::CategoryCatalog]
+                    .into_iter()
+                    .collect();
+            if let TargetCommand::Save(target) = command {
+                let id = match target.association {
+                    crate::domain::TargetAssociation::Category(id)
+                    | crate::domain::TargetAssociation::CreditCard {
+                        payment_category_id: id,
+                        ..
+                    } => id,
+                };
+                values.insert(V::CategoryDetail(id));
+            }
+            values
+        }
         _ => [
             V::Accounts,
             V::AllAccountRegisters,
@@ -163,6 +205,38 @@ mod tests {
         assert_eq!(
             c.into_actions(),
             vec![ApplicationAction::Ui(AppCommand::Import)]
+        );
+    }
+    #[test]
+    fn category_mutation_invalidates_dependent_projections_not_the_whole_app() {
+        let id = crate::domain::CategoryId::new();
+        let group = crate::domain::CategoryGroupId::new();
+        let values = invalidations_for(&FinancialCommand::Category(CategoryCommand::Update(
+            crate::domain::Category {
+                id,
+                group_id: group,
+                name: "Food".into(),
+                hidden: false,
+                archived: false,
+            },
+        )));
+        for expected in [
+            V::CategoryCatalog,
+            V::CategoryDetail(id),
+            V::Reports,
+            V::Inspectors,
+            V::SavedViewDiagnostics,
+            V::AllTransactions,
+        ] {
+            assert!(
+                values.iter().any(|v| v == &expected),
+                "missing {expected:?}"
+            );
+        }
+        assert!(
+            !values
+                .iter()
+                .any(|v| matches!(v, V::Accounts | V::Inbox | V::Schedules))
         );
     }
 }

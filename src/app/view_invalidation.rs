@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::domain::{AccountId, BudgetMonth, ImportBatchId, TargetId, TransactionId};
+use crate::domain::{AccountId, BudgetMonth, CategoryId, ImportBatchId, TargetId, TransactionId};
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ViewInvalidation {
@@ -13,6 +13,9 @@ pub enum ViewInvalidation {
     Inbox,
     Reports,
     Targets,
+    CategoryCatalog,
+    CategoryDetail(CategoryId),
+    SavedViewDiagnostics,
     Schedules,
     Search,
     Inspectors,

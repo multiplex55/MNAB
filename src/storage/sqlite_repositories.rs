@@ -424,6 +424,15 @@ impl CategoryRepository for SqliteRepositories<'_> {
     fn category_is_used(&mut self, id: CategoryId) -> Result<bool, RepositoryError> {
         self.transaction.query_row("SELECT EXISTS(SELECT 1 FROM transactions WHERE category_id=?1 UNION ALL SELECT 1 FROM subtransactions WHERE category_id=?1 UNION ALL SELECT 1 FROM budget_assignments WHERE category_id=?1)",[id.to_string()],|r|r.get(0)).map_err(repo)
     }
+    fn category_is_managed(&mut self, id: CategoryId) -> Result<bool, RepositoryError> {
+        self.transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM credit_card_payment_categories WHERE category_id=?1)",
+                [id.to_string()],
+                |r| r.get(0),
+            )
+            .map_err(repo)
+    }
     fn delete_category(&mut self, id: CategoryId) -> Result<(), RepositoryError> {
         self.transaction
             .execute("DELETE FROM categories WHERE id=?1", [id.to_string()])

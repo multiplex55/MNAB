@@ -27,6 +27,7 @@ pub enum WorkerOperation {
     View(ViewOperation),
     Register(RegisterPageOperation),
     RegisterView(RegisterViewOperation),
+    Category(CategoryViewOperation),
     Search(GlobalSearchOperation),
     Import(ImportOperation),
     Diagnostics(DiagnosticsOperation),
@@ -57,6 +58,17 @@ pub struct RegisterPageOperation {
 #[derive(Debug)]
 pub struct RegisterViewOperation {
     pub request: crate::storage::protocol::RegisterRequest,
+}
+#[derive(Debug)]
+pub enum CategoryViewOperation {
+    Catalog {
+        budget_id: crate::domain::BudgetId,
+        show_archived: bool,
+    },
+    Detail {
+        category_id: crate::domain::CategoryId,
+        today: time::Date,
+    },
 }
 #[derive(Debug)]
 pub struct GlobalSearchOperation {
@@ -102,6 +114,8 @@ pub enum TypedResult {
     Mutation(crate::storage::protocol::MutationResult),
     Report(crate::app::view_model::ReportView),
     RegisterPage(crate::app::view_model::RegisterPageView),
+    CategoryCatalog(crate::app::view_model::CategoryCatalogView),
+    CategoryDetail(crate::app::view_model::CategoryDetailView),
     SearchResults(crate::app::view_model::SearchResultsView),
     ImportParsed(crate::app::view_model::CommandOutcomeView),
     ImportStatement(Box<crate::importing::ImportedStatement>),
@@ -482,6 +496,21 @@ fn execute_operation(
             crate::storage::mapping::register_page(page, operation.request.clone(), generation)
                 .map(TypedResult::RegisterPage)
                 .map_err(|e| WorkerError::Repository(e.to_string()))
+        }
+        WorkerOperation::Category(operation) => {
+            let store = crate::storage::query_store::QueryStore::new(c);
+            match operation {
+                CategoryViewOperation::Catalog {
+                    budget_id,
+                    show_archived,
+                } => store
+                    .category_catalog(*budget_id, *show_archived)
+                    .map(TypedResult::CategoryCatalog),
+                CategoryViewOperation::Detail { category_id, today } => store
+                    .category_detail(*category_id, *today)
+                    .map(TypedResult::CategoryDetail),
+            }
+            .map_err(|e| WorkerError::Repository(e.to_string()))
         }
         WorkerOperation::Search(search) => {
             let store = crate::storage::query_store::QueryStore::new(c);
