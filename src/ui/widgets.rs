@@ -116,3 +116,29 @@ mod tests {
         assert_eq!(restoration_target(1, 9, |_| false), 9);
     }
 }
+use crate::app::{
+    command::{AppCommand, CommandAvailabilityContext, command_availability},
+    dispatcher::ActionCollector,
+};
+
+/// A semantic action button whose enabled state and explanation always come from the shared
+/// command policy.
+pub fn action_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    command: AppCommand,
+    context: CommandAvailabilityContext,
+    actions: &mut ActionCollector,
+) -> egui::Response {
+    let availability = command_availability(context, command);
+    let response = ui.add_enabled(availability.enabled, egui::Button::new(label));
+    let response = if let Some(reason) = availability.disabled_reason {
+        response.on_disabled_hover_text(reason)
+    } else {
+        response
+    };
+    if response.clicked() {
+        actions.push(command);
+    }
+    response
+}

@@ -1,4 +1,17 @@
 use crate::app::{dispatcher::ActionCollector, navigation::Workspace, state::AppState};
+
+#[must_use]
+pub const fn account_toolbar_actions() -> [(&'static str, crate::app::command::AppCommand); 4] {
+    [
+        ("New", crate::app::command::AppCommand::ContextualNew),
+        ("Import", crate::app::command::AppCommand::Import),
+        ("Transfer", crate::app::command::AppCommand::CreateTransfer),
+        (
+            "Reconcile",
+            crate::app::command::AppCommand::ReconcileAccount,
+        ),
+    ]
+}
 pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionCollector) {
     let palette_pressed = ctx.input(|input| {
         input.events.iter().any(|event| match event {
@@ -53,25 +66,16 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.heading(format!("MNAB — {}", state.budget_name));
-            let selected = state.selected_account.is_some();
-            for (label, command) in [
-                (
-                    "New Transaction",
-                    crate::app::command::AppCommand::AddTransaction,
-                ),
-                ("Transfer", crate::app::command::AppCommand::CreateTransfer),
-                ("Import", crate::app::command::AppCommand::Import),
-                (
-                    "Reconcile",
-                    crate::app::command::AppCommand::ReconcileAccount,
-                ),
-            ] {
-                let response = ui.add_enabled(selected, egui::Button::new(label));
-                response
-                    .clone()
-                    .on_disabled_hover_text("Select an account to use this action");
-                if response.clicked() {
-                    actions.push(command);
+            let account_context = matches!(state.navigation.workspace, Workspace::Account(_));
+            let availability = state.action_context();
+            if account_context {
+                for (label, command) in account_toolbar_actions() {
+                    super::widgets::action_button(ui, label, command, availability, actions);
+                }
+                if let Workspace::Account(id) = state.navigation.workspace
+                    && let Some(account) = state.accounts.iter().find(|account| account.id == id)
+                {
+                    ui.strong(format!("{} · {}", account.name, account.working_balance));
                 }
             }
             let response = ui.add(
@@ -82,6 +86,12 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
             );
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
                 response.request_focus();
+            }
+            if ui
+                .button(format!("Inbox ({})", state.inbox_counts.total))
+                .clicked()
+            {
+                state.navigation.workspace = Workspace::Inbox;
             }
             ui.menu_button("Data", |ui| {
                 use crate::app::command::{ApplicationAction, BudgetAction};
@@ -120,7 +130,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
         state.inspector_width = right.response.rect.width();
     }
     egui::CentralPanel::default().show(ctx, |ui| match state.navigation.workspace {
-        Workspace::Overview => super::workspaces::overview::show(ui, state),
+        Workspace::Overview => super::workspaces::overview::show(ui, state, actions),
         Workspace::Budget => super::workspaces::budget::show(ui, state, actions),
         Workspace::Categories => super::workspaces::categories::show(ui, state, actions),
         Workspace::Reports => super::workspaces::reports::show(ui, state, actions),
@@ -454,5 +464,21 @@ mod tests {
         show(&ctx, &mut s, &mut ActionCollector::default());
         let _ = ctx.end_pass();
         assert_eq!(s.inspector_width, saved);
+    }
+    #[test]
+    fn every_account_toolbar_action_is_reachable() {
+        use crate::app::command::{
+            CommandAvailabilityContext, CommandWorkspace, command_availability,
+        };
+        let context = CommandAvailabilityContext {
+            database_available: true,
+            workspace: CommandWorkspace::AccountRegister,
+            selected_account: true,
+            ..Default::default()
+        };
+        for (label, command) in account_toolbar_actions() {
+            assert!(!label.is_empty());
+            assert!(command_availability(context, command).enabled, "{label}");
+        }
     }
 }

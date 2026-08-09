@@ -1082,6 +1082,9 @@ impl ApplicationRuntime {
                 self.view.navigation.workspace = Workspace::AllTransactions;
                 return;
             }
+            // Budget widgets own their draft/preview state. These semantic intents exist so the
+            // shared availability policy remains the sole source of enablement and explanations.
+            AutoAssign | MoveMoney => return,
             CreateBudget if self.database_lifecycle == DatabaseLifecycle::FirstRunRequired => {
                 let magnitude = match self.view.onboarding.parsed_opening_magnitude() {
                     Ok(value) => value,

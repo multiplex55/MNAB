@@ -50,6 +50,8 @@ pub enum AppCommand {
     NavigateCategories,
     NavigateReports,
     NavigateAllTransactions,
+    AutoAssign,
+    MoveMoney,
     PreviousMonth,
     NextMonth,
     Settings,
@@ -711,6 +713,8 @@ pub const MAJOR_WORKFLOW_COMMANDS: &[AppCommand] = &[
     AppCommand::NavigateCategories,
     AppCommand::NavigateReports,
     AppCommand::NavigateAllTransactions,
+    AppCommand::AutoAssign,
+    AppCommand::MoveMoney,
     AppCommand::PreviousMonth,
     AppCommand::NextMonth,
     AppCommand::Settings,
@@ -794,6 +798,8 @@ pub fn command_availability(
             | NavigateBudget
             | NavigateReports
             | NavigateAllTransactions
+            | AutoAssign
+            | MoveMoney
             | PreviousMonth
             | NextMonth
             | Backup
@@ -875,6 +881,9 @@ pub fn command_availability(
         Redo if !ctx.can_redo => CommandAvailability::disabled(command, "Nothing to redo"),
         PreviousMonth | NextMonth if ctx.workspace != CommandWorkspace::Budget => {
             CommandAvailability::disabled(command, "Open Budget to change its month")
+        }
+        AutoAssign | MoveMoney if ctx.workspace != CommandWorkspace::Budget => {
+            CommandAvailability::disabled(command, "Open Budget to plan money")
         }
         CancelOperation if !ctx.mutation_locked && !ctx.lifecycle_busy => {
             CommandAvailability::disabled(command, "No cancellable operation is running")

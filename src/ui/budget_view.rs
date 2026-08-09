@@ -254,6 +254,7 @@ pub fn show(
     ui: &mut egui::Ui,
     view: &BudgetMonthView,
     state: &mut BudgetUiState,
+    context: crate::app::command::CommandAvailabilityContext,
     actions: &mut ActionCollector,
 ) {
     ui.horizontal(|ui| {
@@ -278,29 +279,49 @@ pub fn show(
         ));
     });
     ui.horizontal(|ui| {
-        egui::ComboBox::from_label("Auto-Assign")
-            .selected_text(format!("{:?}", state.auto_strategy))
-            .show_ui(ui, |ui| {
-                for strategy in [
-                    AutoAssignStrategy::Underfunded,
-                    AutoAssignStrategy::ScheduledThisMonth,
-                    AutoAssignStrategy::AssignedLastMonth,
-                    AutoAssignStrategy::SpentLastMonth,
-                    AutoAssignStrategy::ResetAssigned,
-                    AutoAssignStrategy::ResetAvailable,
-                ] {
-                    ui.selectable_value(
-                        &mut state.auto_strategy,
-                        strategy,
-                        format!("{strategy:?}"),
-                    );
-                }
-            });
-        if ui.button("Preview selected").clicked() {
+        let auto = crate::app::command::command_availability(
+            context,
+            crate::app::command::AppCommand::AutoAssign,
+        );
+        ui.add_enabled_ui(auto.enabled, |ui| {
+            egui::ComboBox::from_label("Auto-Assign")
+                .selected_text(format!("{:?}", state.auto_strategy))
+                .show_ui(ui, |ui| {
+                    for strategy in [
+                        AutoAssignStrategy::Underfunded,
+                        AutoAssignStrategy::ScheduledThisMonth,
+                        AutoAssignStrategy::AssignedLastMonth,
+                        AutoAssignStrategy::SpentLastMonth,
+                        AutoAssignStrategy::ResetAssigned,
+                        AutoAssignStrategy::ResetAvailable,
+                    ] {
+                        ui.selectable_value(
+                            &mut state.auto_strategy,
+                            strategy,
+                            format!("{strategy:?}"),
+                        );
+                    }
+                });
+        });
+        if crate::ui::widgets::action_button(
+            ui,
+            "Preview selected",
+            crate::app::command::AppCommand::AutoAssign,
+            context,
+            actions,
+        )
+        .clicked()
+        {
             let _ = state.propose_auto_assign(view);
         }
-        ui.menu_button("Budget actions", |ui| {
-            ui.label("Select categories, then preview Auto-Assign or Move Money.");
+        let moving = crate::app::command::command_availability(
+            context,
+            crate::app::command::AppCommand::MoveMoney,
+        );
+        ui.add_enabled_ui(moving.enabled, |ui| {
+            ui.menu_button("Move Money", |ui| {
+                ui.label("Select categories, then preview Auto-Assign or Move Money.");
+            });
         });
     });
     if let Some(preview) = state.auto_preview.clone() {

@@ -509,6 +509,34 @@ impl Default for AppState {
     }
 }
 impl AppState {
+    /// One shared snapshot for toolbar, workspace, overview, and palette action gating.
+    #[must_use]
+    pub fn action_context(&self) -> crate::app::command::CommandAvailabilityContext {
+        use crate::app::command::CommandWorkspace;
+        use crate::app::navigation::Workspace;
+        crate::app::command::CommandAvailabilityContext {
+            database_available: self.active_budget.is_some(),
+            workspace: match self.navigation.workspace {
+                Workspace::Overview => CommandWorkspace::Overview,
+                Workspace::Budget => CommandWorkspace::Budget,
+                Workspace::Categories => CommandWorkspace::Categories,
+                Workspace::Reports => CommandWorkspace::Reports,
+                Workspace::AllTransactions => CommandWorkspace::AllTransactions,
+                Workspace::Inbox => CommandWorkspace::Inbox,
+                Workspace::Account(_) => CommandWorkspace::AccountRegister,
+            },
+            has_selection: self.selected_account.is_some() || self.selected_transaction.is_some(),
+            editing: self.editor.is_active(),
+            dialog_open: self.dialog.is_some(),
+            read_only: self.mutations_disabled,
+            mutation_locked: !self.operations.is_empty(),
+            can_undo: self.can_undo,
+            can_redo: self.can_redo,
+            selected_account: self.selected_account.is_some(),
+            selected_transaction: self.selected_transaction.is_some(),
+            ..Default::default()
+        }
+    }
     /// Changes the planning month only while the month-aware Budget workspace is active.
     /// Returns the new month when callers should request its projection.
     pub fn step_budget_month(&mut self, forward: bool) -> Option<BudgetMonth> {
