@@ -109,10 +109,65 @@ pub fn invalidations_for(c: &FinancialCommand) -> ViewInvalidations {
             .into_iter()
             .collect()
         }
+        FinancialCommand::Transaction(TransactionCommand::Save(transaction)) => {
+            let month = crate::domain::BudgetMonth::new(
+                transaction.date.0.year(),
+                u8::from(transaction.date.0.month()),
+            )
+            .expect("transaction date has a valid month");
+            [
+                V::AccountRegister(transaction.account_id),
+                V::Accounts,
+                V::BudgetMonth(month),
+                V::BudgetRolloverFrom(month),
+                V::Reports,
+                V::Targets,
+                V::Inbox,
+                V::Search,
+                V::LookupData,
+                V::Inspectors,
+            ]
+            .into_iter()
+            .collect()
+        }
+        FinancialCommand::Transaction(TransactionCommand::SaveTransfer {
+            source,
+            destination,
+        }) => {
+            let source_month = crate::domain::BudgetMonth::new(
+                source.date.0.year(),
+                u8::from(source.date.0.month()),
+            )
+            .expect("transaction date has a valid month");
+            let destination_month = crate::domain::BudgetMonth::new(
+                destination.date.0.year(),
+                u8::from(destination.date.0.month()),
+            )
+            .expect("transaction date has a valid month");
+            let mut values: ViewInvalidations = [
+                V::AccountRegister(source.account_id),
+                V::AccountRegister(destination.account_id),
+                V::Accounts,
+                V::BudgetMonth(source_month),
+                V::BudgetRolloverFrom(source_month),
+                V::Reports,
+                V::Targets,
+                V::Inbox,
+                V::Search,
+                V::LookupData,
+                V::Inspectors,
+            ]
+            .into_iter()
+            .collect();
+            values.insert(V::BudgetMonth(destination_month));
+            values.insert(V::BudgetRolloverFrom(destination_month));
+            values
+        }
         FinancialCommand::Transaction(TransactionCommand::Delete {
             account_id, month, ..
         }) => [
             V::AccountRegister(*account_id),
+            V::Accounts,
             V::BudgetMonth(*month),
             V::Reports,
             V::Targets,
@@ -121,6 +176,18 @@ pub fn invalidations_for(c: &FinancialCommand) -> ViewInvalidations {
             V::LookupData,
             V::Inspectors,
             V::BudgetRolloverFrom(*month),
+        ]
+        .into_iter()
+        .collect(),
+        FinancialCommand::Transaction(TransactionCommand::Batch(_)) => [
+            V::AllAccountRegisters,
+            V::Accounts,
+            V::Reports,
+            V::Targets,
+            V::Inbox,
+            V::Search,
+            V::LookupData,
+            V::Inspectors,
         ]
         .into_iter()
         .collect(),

@@ -506,6 +506,44 @@ pub struct CommandOutcomeView {
 mod tests {
     use super::*;
     use time::macros::date;
+    fn budget_month_view(month: BudgetMonth) -> BudgetMonthView {
+        BudgetMonthView {
+            version: ViewVersion {
+                generation: 1,
+                revision: 1,
+            },
+            month,
+            calculation_revision: 1,
+            ready_to_assign_cents: 0,
+            assigned_cents: 0,
+            activity_cents: 0,
+            available_cents: 0,
+            overspending_cents: 0,
+            cash_overspending_cents: 0,
+            credit_card_overspending_cents: 0,
+            rows: vec![],
+            inspector: vec![],
+        }
+    }
+
+    #[test]
+    fn budget_rollover_cache_eviction_is_inclusive() {
+        let before = BudgetMonth::new(2026, 2).unwrap();
+        let changed = BudgetMonth::new(2026, 3).unwrap();
+        let after = BudgetMonth::new(2026, 4).unwrap();
+        let version = ViewVersion {
+            generation: 1,
+            revision: 1,
+        };
+        let mut cache = BudgetMonthCache::default();
+        for month in [before, changed, after] {
+            cache.insert(budget_month_view(month));
+        }
+        cache.invalidate_from(changed);
+        assert!(cache.get(before, version).is_some());
+        assert!(cache.get(changed, version).is_none());
+        assert!(cache.get(after, version).is_none());
+    }
     fn row(id: TransactionId, date: Date) -> RegisterRowView {
         RegisterRowView {
             transaction_id: id,

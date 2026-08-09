@@ -724,6 +724,178 @@ impl ApplicationRuntime {
                 }
             }
         }
+        // Mutations are deliberately collected for the whole drain.  Scheduling here, rather
+        // than in `handle_command_response`, means two commands completing in the same frame
+        // cannot issue duplicate reads for the same projection.
+        self.process_invalidations();
+    }
+
+    /// Coalesce successful-mutation invalidations and refresh only projections which are
+    /// currently materialized. Each request goes through the normal correlated `begin` path,
+    /// retaining request/generation identity so an older refresh cannot win a race.
+    pub fn process_invalidations(&mut self) {
+        use crate::app::view_model::RegisterScope;
+        use crate::app::{navigation::Workspace, view_invalidation::ViewInvalidation as V};
+
+        let pending = std::mem::take(&mut self.invalidations);
+        if pending.is_empty() || self.view.active_budget.is_none() {
+            return;
+        }
+
+        let mut account_tree = false;
+        let mut budget_month = false;
+        let mut inbox = false;
+        let mut register = false;
+        let mut report = false;
+        let workspace = self.view.navigation.workspace;
+        for invalidation in pending.iter() {
+            match invalidation {
+                V::Accounts => account_tree = true,
+                V::BudgetMonth(month) => budget_month |= *month == self.view.selected_month,
+                V::BudgetRolloverFrom(month) => {
+                    self.view.budget_month_cache.invalidate_from(*month);
+                    budget_month |= self.view.selected_month >= *month;
+                }
+                V::Inbox => inbox = true,
+                V::Reports => report = true,
+                V::AllAccountRegisters => {
+                    register |= matches!(workspace, Workspace::Account(_));
+                }
+                V::AccountRegister(account) => {
+                    register |=
+                        matches!(workspace, Workspace::Account(active) if active == *account);
+                }
+                V::AllTransactions => register |= workspace == Workspace::AllTransactions,
+                _ => {}
+            }
+        }
+
+        if account_tree {
+            self.request_account_tree();
+        }
+        if budget_month {
+            self.request_budget_month(self.view.selected_month);
+        }
+        if inbox {
+            self.request_inbox_summary();
+        }
+        if register {
+            let expected_scope = match workspace {
+                Workspace::Account(id) => Some(RegisterScope::Account(id)),
+                Workspace::AllTransactions => Some(RegisterScope::AllTransactions),
+                _ => None,
+            };
+            if self
+                .view
+                .register_query
+                .active_request
+                .as_ref()
+                .is_some_and(|request| Some(request.scope) == expected_scope)
+            {
+                self.request_active_register();
+            }
+        }
+        if report && workspace == Workspace::Reports {
+            if let Some(request) = self.view.report_query.current_request.clone() {
+                self.request_report(request);
+            }
+        }
+    }
+
+    fn submit_view_request(&self, request: crate::storage::worker::StorageRequest) -> bool {
+        self.worker
+            .as_ref()
+            .is_some_and(|worker| worker.submit(request).is_ok())
+    }
+
+    fn request_account_tree(&mut self) {
+        let Some(budget_id) = self.view.active_budget else {
+            return;
+        };
+        let id = self.allocate_request();
+        self.view.account_tree.begin(id, self.generation, None);
+        let request = crate::storage::worker::StorageRequest {
+            id,
+            generation: self.generation,
+            operation: crate::storage::worker::WorkerOperation::Account(
+                crate::storage::worker::AccountViewOperation::Tree { budget_id },
+            ),
+        };
+        if !self.submit_view_request(request) {
+            let _ = self.view.account_tree.fail(
+                id,
+                self.generation,
+                "Account balances could not be refreshed.",
+            );
+        }
+    }
+
+    fn request_budget_month(&mut self, month: crate::domain::BudgetMonth) {
+        let Some(budget_id) = self.view.active_budget else {
+            return;
+        };
+        let id = self.allocate_request();
+        self.view.budget_month.begin(id, self.generation, None);
+        let request = crate::storage::worker::StorageRequest {
+            id,
+            generation: self.generation,
+            operation: crate::storage::worker::WorkerOperation::Budget(
+                crate::storage::worker::BudgetViewOperation::Month { budget_id, month },
+            ),
+        };
+        if !self.submit_view_request(request) {
+            let _ = self.view.budget_month.fail(
+                id,
+                self.generation,
+                "Budget month could not be refreshed.",
+            );
+        }
+    }
+
+    fn request_inbox_summary(&mut self) {
+        let Some(budget_id) = self.view.active_budget else {
+            return;
+        };
+        let id = self.allocate_request();
+        self.view.inbox_summary.begin(id, self.generation, None);
+        let request = crate::storage::worker::StorageRequest {
+            id,
+            generation: self.generation,
+            operation: crate::storage::worker::WorkerOperation::Inbox(
+                crate::storage::worker::InboxViewOperation::Summary { budget_id },
+            ),
+        };
+        if !self.submit_view_request(request) {
+            let _ =
+                self.view
+                    .inbox_summary
+                    .fail(id, self.generation, "Inbox could not be refreshed.");
+        }
+    }
+
+    fn request_active_register(&mut self) {
+        let Some(mut request) = self.view.register_query.active_request.clone() else {
+            return;
+        };
+        request.cursor = None;
+        let id = self.allocate_request();
+        self.view
+            .register_query
+            .begin(id, self.generation, request.clone(), false);
+        let submission = crate::storage::worker::StorageRequest {
+            id,
+            generation: self.generation,
+            operation: crate::storage::worker::WorkerOperation::RegisterView(
+                crate::storage::worker::RegisterViewOperation { request },
+            ),
+        };
+        if !self.submit_view_request(submission) {
+            let _ = self.view.register_query.fail(
+                id,
+                self.generation,
+                "Transactions could not be refreshed.",
+            );
+        }
     }
     pub fn dispatch_collected(&mut self, actions: ActionCollector) {
         for action in actions.into_actions() {
@@ -1629,6 +1801,9 @@ impl ApplicationRuntime {
             Ok(crate::storage::worker::TypedResult::Report(value)) => {
                 let _ = self.view.report_query.view.accept(id, generation, value);
             }
+            Ok(crate::storage::worker::TypedResult::RegisterPage(value)) => {
+                let _ = self.view.register_query.accept(id, generation, value);
+            }
             Err(error) => {
                 let message = safe.map_or_else(
                     || format!("Refresh failed: {error}"),
@@ -1812,21 +1987,10 @@ impl ApplicationRuntime {
                         inverse,
                     });
                 }
-                let refresh_report = m.invalidations.iter().any(|value| {
-                    matches!(
-                        value,
-                        crate::app::view_invalidation::ViewInvalidation::Reports
-                    )
-                });
                 self.invalidations.merge(m.invalidations);
                 self.view
                     .notifications
                     .push(Notification::success(success_title, &m.operation_label));
-                if refresh_report {
-                    if let Some(request) = self.view.report_query.current_request.clone() {
-                        self.request_report(request);
-                    }
-                }
             }
             Err(crate::storage::worker::WorkerError::Cancelled) => {
                 let _ = c.transition(CommandStatus::Cancelled);
