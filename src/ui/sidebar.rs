@@ -153,24 +153,33 @@ pub fn account_section(account: &AccountSummary) -> AccountSection {
         AccountSection::OnBudget
     }
 }
+#[must_use]
+pub fn navigation_items(inbox_count: usize) -> Vec<(String, Workspace)> {
+    vec![
+        ("Overview".into(), Workspace::Overview),
+        ("Budget".into(), Workspace::Budget),
+        ("All Transactions".into(), Workspace::AllTransactions),
+        ("Reports".into(), Workspace::Reports),
+        (format!("Inbox ({inbox_count})"), Workspace::Inbox),
+        ("Categories · Structure".into(), Workspace::Categories),
+    ]
+}
+
+fn account_kind(account: &AccountSummary) -> &'static str {
+    if account.tracking {
+        return "TRACKING";
+    }
+    match account.account_type {
+        crate::domain::AccountType::CreditCard => "CREDIT CARD",
+        _ => "CASH",
+    }
+}
+
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollector) {
     ui.heading("MNAB");
     ui.label(&state.budget_name);
-    ui.small(
-        state
-            .database_path
-            .as_ref()
-            .map_or_else(|| "No database".into(), |p| p.display().to_string()),
-    );
     ui.separator();
-    for (label, workspace) in [
-        ("Overview", Workspace::Overview),
-        ("Budget", Workspace::Budget),
-        ("Categories", Workspace::Categories),
-        ("Reports", Workspace::Reports),
-        ("All Transactions", Workspace::AllTransactions),
-        ("Inbox", Workspace::Inbox),
-    ] {
+    for (label, workspace) in navigation_items(state.inbox_counts.total) {
         if ui
             .selectable_label(state.navigation.workspace == workspace, label)
             .clicked()
@@ -178,34 +187,45 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollect
             state.navigation.workspace = workspace;
         }
     }
+    ui.small("Categories manages groups, names, targets, and structure—not a monthly plan.");
     ui.separator();
-    let mut roots: Vec<_> = state
-        .account_groups
-        .iter()
-        .filter(|g| g.parent_group_id.is_none())
-        .map(|g| g.id)
-        .collect();
-    roots.sort_by_key(|id| {
-        state
-            .account_groups
+    for section in ["CASH", "CREDIT CARD", "TRACKING"] {
+        let accounts: Vec<_> = state
+            .accounts
             .iter()
-            .find(|g| g.id == *id)
-            .map(|g| g.sort_order)
-            .unwrap_or(0)
-    });
-    for root in roots {
-        if let Some(id) = group(ui, root, 0, state, actions) {
-            state.selected_account = Some(id);
-            state.navigation.workspace = Workspace::Account(id);
+            .filter(|account| !account.closed && account_kind(account) == section)
+            .collect();
+        if accounts.is_empty() {
+            continue;
+        }
+        let total = accounts
+            .iter()
+            .try_fold(Money::ZERO, |sum, account| {
+                sum.checked_add(account.working_balance)
+            })
+            .unwrap_or(Money::ZERO);
+        ui.horizontal(|ui| {
+            ui.strong(section);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.strong(total.to_string());
+            });
+        });
+        let mut ordered = accounts;
+        ordered.sort_by_key(|account| (!account.favorite, account.name.to_ascii_lowercase()));
+        for account in ordered {
+            if account_row(
+                ui,
+                account,
+                state.navigation.workspace == Workspace::Account(account.id),
+            )
+            .clicked()
+            {
+                state.selected_account = Some(account.id);
+                state.navigation.workspace = Workspace::Account(account.id);
+            }
         }
     }
-    ui.strong("UNGROUPED");
-    for account in state.accounts.iter().filter(|a| a.group_id.is_none()) {
-        if account_row(ui, account, state.selected_account == Some(account.id)).clicked() {
-            state.selected_account = Some(account.id);
-            state.navigation.workspace = Workspace::Account(account.id);
-        }
-    }
+    ui.separator();
     if ui.button("＋ Add Account").clicked() {
         actions.push(AppCommand::AddAccount);
     }
@@ -213,6 +233,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollect
         actions.push(AppCommand::AddAccountGroup);
     }
 }
+
 #[allow(dead_code)]
 fn _money(_: Money) {}
 
@@ -259,5 +280,17 @@ mod tests {
         open.collapsed = false;
         let account_id = account.id;
         assert_eq!(traversal(&[open], &[account]), vec![account_id]);
+    }
+
+    #[test]
+    fn every_sidebar_item_has_a_workspace_destination() {
+        let items = navigation_items(7);
+        assert_eq!(items.len(), 6);
+        assert!(
+            items
+                .iter()
+                .any(|(label, route)| label == "Inbox (7)" && *route == Workspace::Inbox)
+        );
+        assert!(items.iter().all(|(label, _)| !label.is_empty()));
     }
 }

@@ -21,5 +21,6 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollect
         ui.label("Loading Budget month…");
         return;
     };
-    budget_view::show(ui, &view, &mut state.budget_ui, actions);
+    let context = state.action_context();
+    budget_view::show(ui, &view, &mut state.budget_ui, context, actions);
 }
