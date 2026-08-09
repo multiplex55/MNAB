@@ -391,23 +391,19 @@ impl ApplicationRuntime {
     /// The editor deliberately remains mounted until the correlated worker
     /// response succeeds, so validation and storage errors never erase input.
     fn commit_editor(&mut self) {
-        use crate::app::state::{CommitState, EditorState};
-        if self.view.editor.metadata().is_some_and(|m| {
-            matches!(
-                m.commit_state,
-                CommitState::Validating | CommitState::Submitting
-            )
-        }) {
+        use crate::app::state::EditorState;
+        if self
+            .view
+            .editor
+            .metadata_mut()
+            .is_some_and(|metadata| !metadata.begin_validation())
+        {
             return;
         }
         let Some(budget_id) = self.view.active_budget else {
             self.fail_editor("Open a budget before saving.");
             return;
         };
-        if let Some(metadata) = self.view.editor.metadata_mut() {
-            metadata.commit_state = CommitState::Validating;
-            metadata.validation_errors.clear();
-        }
         let command = match &self.view.editor {
             EditorState::CreatingAccount(editor) | EditorState::EditingAccount(editor) => editor
                 .form
@@ -493,8 +489,7 @@ impl ApplicationRuntime {
         };
         let command_id = self.next_command;
         if let Some(metadata) = self.view.editor.metadata_mut() {
-            metadata.commit_state = CommitState::Submitting;
-            metadata.pending_command_id = Some(command_id);
+            metadata.begin_submission(command_id);
         }
         self.dispatch(ApplicationAction::Financial(command));
         if self
@@ -516,9 +511,7 @@ impl ApplicationRuntime {
 
     fn fail_editor(&mut self, error: impl Into<String>) {
         if let Some(metadata) = self.view.editor.metadata_mut() {
-            metadata.commit_state = crate::app::state::CommitState::Failed;
-            metadata.pending_command_id = None;
-            metadata.validation_errors = vec![error.into()];
+            metadata.fail(error);
         }
     }
     pub fn commit_session(&mut self, session: BudgetSession, worker: StorageWorker) {
@@ -1861,8 +1854,59 @@ mod tests {
         assert!(!paths.data.join(".clean-shutdown").exists());
     }
 
+    fn valid_account_editor(runtime: &mut ApplicationRuntime) {
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::AddAccount));
+        let crate::app::state::EditorState::CreatingAccount(editor) = &mut runtime.view.editor
+        else {
+            panic!("account editor should be active");
+        };
+        editor.form.name = "Checking".into();
+        editor.form.account_type = Some(crate::domain::AccountType::Checking);
+        editor.form.opening_magnitude = "0".into();
+        editor.form.opening_date = "2026-08-09".into();
+    }
+
+    fn finish_editor_command(
+        runtime: &mut ApplicationRuntime,
+        result: Result<crate::storage::worker::TypedResult, crate::storage::worker::WorkerError>,
+        user_error: Option<crate::storage::worker::SafeUserError>,
+    ) {
+        let command_id = runtime
+            .view
+            .editor
+            .metadata()
+            .and_then(|metadata| metadata.pending_command_id)
+            .expect("editor should own a command");
+        let command = runtime.pending_commands[&command_id].clone();
+        runtime.handle_command_response(
+            command.worker_request_id.unwrap(),
+            command_id,
+            command.envelope.correlation_id,
+            runtime.generation,
+            result,
+            user_error,
+        );
+    }
+
+    fn successful_mutation(
+        command_id: u64,
+        correlation_id: u64,
+    ) -> crate::storage::worker::TypedResult {
+        crate::storage::worker::TypedResult::Mutation(crate::storage::protocol::MutationResult {
+            command_id,
+            correlation_id,
+            operation_label: "Save account".into(),
+            affected_entity_ids: vec![],
+            undo: None,
+            invalidations: Default::default(),
+            navigation: None,
+            focus_restoration: None,
+            notice: None,
+        })
+    }
+
     #[test]
-    fn save_and_cancel_restore_editor_focus() {
+    fn cancelling_editor_discards_draft_and_restores_focus() {
         let mut runtime = ApplicationRuntime::new(
             None,
             None,
@@ -1879,9 +1923,104 @@ mod tests {
             crate::app::state::EditorState::Idle
         ));
         assert_eq!(runtime.view.register_focus, Some(egui::Id::new("accounts")));
+    }
+
+    #[test]
+    fn validation_failure_retains_input_and_allows_retry_or_cancel() {
+        let (_dir, mut runtime) = runtime_with_worker();
         runtime.dispatch(ApplicationAction::Ui(AppCommand::AddAccount));
         runtime.dispatch(ApplicationAction::Ui(AppCommand::Commit));
+        let crate::app::state::EditorState::CreatingAccount(editor) = &runtime.view.editor else {
+            panic!("invalid editor must remain mounted");
+        };
+        assert_eq!(editor.form.name, "");
+        assert_eq!(
+            editor.metadata.commit_state,
+            crate::app::state::CommitState::Failed
+        );
+        assert!(!editor.metadata.validation_errors.is_empty());
+        assert!(runtime.pending_commands.is_empty());
+
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::Cancel));
+        assert!(matches!(
+            runtime.view.editor,
+            crate::app::state::EditorState::Idle
+        ));
         assert_eq!(runtime.view.register_focus, Some(egui::Id::new("accounts")));
+    }
+
+    #[test]
+    fn commit_submits_once_and_closes_only_after_worker_success() {
+        let (_dir, mut runtime) = runtime_with_worker();
+        valid_account_editor(&mut runtime);
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::Commit));
+        let metadata = runtime.view.editor.metadata().unwrap();
+        assert_eq!(
+            metadata.commit_state,
+            crate::app::state::CommitState::Submitting
+        );
+        let command_id = metadata.pending_command_id.unwrap();
+        let correlation_id = runtime.pending_commands[&command_id]
+            .envelope
+            .correlation_id;
+        assert_eq!(runtime.pending_commands.len(), 1);
+
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::Commit));
+        assert_eq!(
+            runtime.pending_commands.len(),
+            1,
+            "duplicate commit was ignored"
+        );
+        assert!(
+            runtime.view.editor.is_active(),
+            "editor stays open while submitting"
+        );
+
+        finish_editor_command(
+            &mut runtime,
+            Ok(successful_mutation(command_id, correlation_id)),
+            None,
+        );
+        assert!(matches!(
+            runtime.view.editor,
+            crate::app::state::EditorState::Idle
+        ));
+        assert_eq!(runtime.view.register_focus, Some(egui::Id::new("accounts")));
+    }
+
+    #[test]
+    fn worker_failure_retains_draft_and_permits_retry() {
+        let (_dir, mut runtime) = runtime_with_worker();
+        valid_account_editor(&mut runtime);
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::Commit));
+        finish_editor_command(
+            &mut runtime,
+            Err(crate::storage::worker::WorkerError::Repository(
+                "disk full".into(),
+            )),
+            Some(crate::storage::worker::SafeUserError::new(
+                "storage",
+                "Saving failed without changing data. Free disk space and retry.",
+            )),
+        );
+        let crate::app::state::EditorState::CreatingAccount(editor) = &runtime.view.editor else {
+            panic!("failed editor must remain mounted");
+        };
+        assert_eq!(editor.form.name, "Checking");
+        assert_eq!(
+            editor.metadata.commit_state,
+            crate::app::state::CommitState::Failed
+        );
+        assert!(editor.metadata.pending_command_id.is_none());
+        assert!(editor.metadata.validation_errors[0].contains("retry"));
+
+        let before = runtime.pending_commands.len();
+        runtime.dispatch(ApplicationAction::Ui(AppCommand::Commit));
+        assert_eq!(
+            runtime.view.editor.metadata().unwrap().commit_state,
+            crate::app::state::CommitState::Submitting
+        );
+        assert!(runtime.pending_commands.len() > before);
     }
 
     #[test]
