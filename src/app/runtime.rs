@@ -269,8 +269,9 @@ impl ApplicationRuntime {
             }
             crate::app::startup::StartupDestination::AccountOnboarding => {
                 self.view.editor = crate::app::state::EditorState::CreatingAccount(
-                    crate::app::state::AccountDraft {
-                        name: String::new(),
+                    crate::app::state::AccountEditorState {
+                        account_id: None,
+                        form: Default::default(),
                         metadata: crate::app::state::EditorMetadata::new(egui::Id::new(
                             "account-onboarding",
                         )),
@@ -379,11 +380,146 @@ impl ApplicationRuntime {
             .insert(crate::app::view_invalidation::ViewInvalidation::AccountRegister(account));
     }
 
-    fn finish_editor(&mut self) {
+    fn cancel_editor(&mut self) {
         if let Some(focus) = self.view.editor.metadata().map(|m| m.restore_focus) {
             self.view.register_focus = Some(focus);
         }
         self.view.editor = crate::app::state::EditorState::Idle;
+    }
+
+    /// Validate the complete workflow model and turn it into a domain command.
+    /// The editor deliberately remains mounted until the correlated worker
+    /// response succeeds, so validation and storage errors never erase input.
+    fn commit_editor(&mut self) {
+        use crate::app::state::{CommitState, EditorState};
+        if self.view.editor.metadata().is_some_and(|m| {
+            matches!(
+                m.commit_state,
+                CommitState::Validating | CommitState::Submitting
+            )
+        }) {
+            return;
+        }
+        let Some(budget_id) = self.view.active_budget else {
+            self.fail_editor("Open a budget before saving.");
+            return;
+        };
+        if let Some(metadata) = self.view.editor.metadata_mut() {
+            metadata.commit_state = CommitState::Validating;
+            metadata.validation_errors.clear();
+        }
+        let command = match &self.view.editor {
+            EditorState::CreatingAccount(editor) | EditorState::EditingAccount(editor) => editor
+                .form
+                .validate()
+                .map(|(name, account_type, _, _)| {
+                    let mut account = crate::domain::Account::new(budget_id, name, account_type);
+                    if let Some(id) = editor.account_id {
+                        account.id = id;
+                    }
+                    FinancialCommand::Account(if editor.account_id.is_some() {
+                        crate::app::command::AccountCommand::Update(account)
+                    } else {
+                        crate::app::command::AccountCommand::Create(account)
+                    })
+                })
+                .map_err(str::to_owned),
+            EditorState::CreatingTransaction(editor) | EditorState::EditingTransaction(editor) => {
+                editor
+                    .draft
+                    .validate()
+                    .map_err(|e| format!("{e:?}"))
+                    .and_then(|(date, amount, splits)| {
+                        let account_id = editor
+                            .draft
+                            .account_id
+                            .ok_or_else(|| "Choose an account.".to_owned())?;
+                        let body = if splits.is_empty() {
+                            editor.draft.category_id.map_or(
+                                crate::domain::TransactionBody::OpeningBalance {
+                                    category_id: None,
+                                },
+                                crate::domain::TransactionBody::categorized,
+                            )
+                        } else {
+                            crate::domain::TransactionBody::split(amount, splits)
+                                .map_err(|e| e.to_string())?
+                        };
+                        Ok(FinancialCommand::Transaction(TransactionCommand::Save(
+                            crate::domain::Transaction {
+                                id: editor
+                                    .transaction_id
+                                    .unwrap_or_else(crate::domain::TransactionId::new),
+                                budget_id,
+                                account_id,
+                                date,
+                                payee_id: editor.draft.payee_id,
+                                amount,
+                                memo: (!editor.draft.memo.trim().is_empty())
+                                    .then(|| editor.draft.memo.trim().to_owned()),
+                                clearance: editor
+                                    .draft
+                                    .clearance
+                                    .unwrap_or(crate::domain::Clearance::Uncleared),
+                                approval: if editor.draft.approved {
+                                    crate::domain::Approval::Approved
+                                } else {
+                                    crate::domain::Approval::Unapproved
+                                },
+                                body,
+                                archived: false,
+                                voided: false,
+                            },
+                        )))
+                    })
+            }
+            // These workflows now own their complete forms, but their domain
+            // command needs additional preview/session identities before it can
+            // be submitted. Keep the form recoverable and explain the remedy.
+            EditorState::CreatingTransfer(editor) => editor
+                .draft
+                .validate()
+                .map(|_| ())
+                .map_err(|e| format!("{e:?}"))
+                .and_then(|_| Err("Transfer preview must be completed before saving.".to_owned())),
+            _ => Err("Complete the required workflow details before saving.".to_owned()),
+        };
+        let command = match command {
+            Ok(command) => command,
+            Err(error) => {
+                self.fail_editor(error);
+                return;
+            }
+        };
+        let command_id = self.next_command;
+        if let Some(metadata) = self.view.editor.metadata_mut() {
+            metadata.commit_state = CommitState::Submitting;
+            metadata.pending_command_id = Some(command_id);
+        }
+        self.dispatch(ApplicationAction::Financial(command));
+        if self
+            .pending_commands
+            .get(&command_id)
+            .is_none_or(|c| c.status == CommandStatus::Failed)
+        {
+            let message = self
+                .pending_commands
+                .get(&command_id)
+                .and_then(|c| c.safe_failure.as_ref())
+                .map_or_else(
+                    || "The operation could not be submitted. You may retry.".to_owned(),
+                    |e| format!("{e:?}"),
+                );
+            self.fail_editor(message);
+        }
+    }
+
+    fn fail_editor(&mut self, error: impl Into<String>) {
+        if let Some(metadata) = self.view.editor.metadata_mut() {
+            metadata.commit_state = crate::app::state::CommitState::Failed;
+            metadata.pending_command_id = None;
+            metadata.validation_errors = vec![error.into()];
+        }
     }
     pub fn commit_session(&mut self, session: BudgetSession, worker: StorageWorker) {
         // Callers fully initialize the candidate before committing it. Thus the
@@ -580,8 +716,9 @@ impl ApplicationRuntime {
         use crate::app::{
             navigation::Workspace,
             state::{
-                AccountDraft, Dialog, EditorMetadata, EditorState, GroupEditorState, ImportState,
-                ReconciliationState, TransactionDraft, TransferDraft,
+                AccountEditorState, Dialog, EditorMetadata, EditorState, GroupEditorState,
+                ImportEditorState, InlineTransactionEditorState, ReconciliationEditorState,
+                TransferEditorState,
             },
         };
         use AppCommand::*;
@@ -651,20 +788,19 @@ impl ApplicationRuntime {
                 return;
             }
             AddAccount => {
-                self.view.editor = EditorState::CreatingAccount(AccountDraft {
-                    name: String::new(),
+                self.view.editor = EditorState::CreatingAccount(AccountEditorState {
+                    account_id: None,
+                    form: Default::default(),
                     metadata: EditorMetadata::new(egui::Id::new("accounts")),
                 });
                 return;
             }
             EditAccount if let Some(id) = self.view.selected_account => {
-                self.view.editor = EditorState::EditingAccount(
-                    id,
-                    AccountDraft {
-                        name: String::new(),
-                        metadata: EditorMetadata::new(egui::Id::new("account-summary")),
-                    },
-                );
+                self.view.editor = EditorState::EditingAccount(AccountEditorState {
+                    account_id: Some(id),
+                    form: Default::default(),
+                    metadata: EditorMetadata::new(egui::Id::new("account-summary")),
+                });
                 return;
             }
             AddAccountGroup => {
@@ -675,55 +811,72 @@ impl ApplicationRuntime {
                 return;
             }
             AddTransaction if self.view.selected_account.is_some() => {
-                self.view.editor = EditorState::CreatingTransaction(TransactionDraft {
-                    memo: String::new(),
+                self.view.editor = EditorState::CreatingTransaction(InlineTransactionEditorState {
+                    transaction_id: None,
+                    draft: crate::ui::workspaces::register::TransactionEditor {
+                        account_id: self.view.selected_account,
+                        ..Default::default()
+                    },
                     metadata: EditorMetadata::new(egui::Id::new("register")),
                 });
                 return;
             }
             EditTransaction if let Some(id) = self.view.selected_transaction => {
-                self.view.editor = EditorState::EditingTransaction(
-                    id,
-                    TransactionDraft {
-                        memo: String::new(),
-                        metadata: EditorMetadata::new(egui::Id::new("register")),
+                self.view.editor = EditorState::EditingTransaction(InlineTransactionEditorState {
+                    transaction_id: Some(id),
+                    draft: crate::ui::workspaces::register::TransactionEditor {
+                        account_id: self.view.selected_account,
+                        ..Default::default()
                     },
-                );
+                    metadata: EditorMetadata::new(egui::Id::new("register")),
+                });
                 return;
             }
             CreateTransfer if self.view.selected_account.is_some() => {
-                self.view.editor = EditorState::CreatingTransfer(TransferDraft {
-                    memo: String::new(),
+                self.view.editor = EditorState::CreatingTransfer(TransferEditorState {
+                    draft: crate::ui::workspaces::register::TransferEditor {
+                        from_account: self.view.selected_account,
+                        ..Default::default()
+                    },
                     metadata: EditorMetadata::new(egui::Id::new("register")),
                 });
                 return;
             }
             ReconcileAccount if self.view.selected_account.is_some() => {
-                self.view.editor = EditorState::Reconciling(ReconciliationState {
+                self.view.editor = EditorState::Reconciling(ReconciliationEditorState {
+                    account_id: self.view.selected_account,
+                    statement_balance: String::new(),
+                    statement_date: String::new(),
                     metadata: EditorMetadata::new(egui::Id::new("register")),
                 });
                 return;
             }
             Import if self.view.selected_account.is_some() => {
-                self.view.editor = EditorState::Importing(ImportState {
-                    source: String::new(),
+                self.view.editor = EditorState::Importing(ImportEditorState {
+                    account_id: self.view.selected_account,
+                    source: std::path::PathBuf::new(),
+                    batch_id: None,
                     metadata: EditorMetadata::new(egui::Id::new("register")),
                 });
                 return;
             }
             ContextualNew if self.view.selected_account.is_some() => {
-                self.view.editor = EditorState::CreatingTransaction(TransactionDraft {
-                    memo: String::new(),
+                self.view.editor = EditorState::CreatingTransaction(InlineTransactionEditorState {
+                    transaction_id: None,
+                    draft: crate::ui::workspaces::register::TransactionEditor {
+                        account_id: self.view.selected_account,
+                        ..Default::default()
+                    },
                     metadata: EditorMetadata::new(egui::Id::new("register")),
                 });
                 return;
             }
             Commit if self.view.editor.is_active() => {
-                self.finish_editor();
+                self.commit_editor();
                 return;
             }
             Cancel if self.view.editor.is_active() => {
-                self.finish_editor();
+                self.cancel_editor();
                 return;
             }
             Cancel if self.view.dialog.is_some() => {
@@ -1170,7 +1323,31 @@ impl ApplicationRuntime {
                 &mut self.terminal_sequence,
             ),
         }
+        let editor_owns_response = self
+            .view
+            .editor
+            .metadata()
+            .is_some_and(|metadata| metadata.pending_command_id == Some(cid));
+        let (editor_result, editor_error) =
+            self.pending_commands
+                .get(&cid)
+                .map_or((None, None), |command| {
+                    (
+                        editor_owns_response.then_some(command.status),
+                        command
+                            .safe_failure
+                            .as_ref()
+                            .map(|error| format!("{error:?}")),
+                    )
+                });
         self.prune_commands();
+        match editor_result {
+            Some(CommandStatus::Committed) => self.cancel_editor(),
+            Some(CommandStatus::Failed) => self.fail_editor(editor_error.unwrap_or_else(|| {
+                "The operation failed without changing your data. You may retry.".into()
+            })),
+            _ => {}
+        }
     }
     pub fn cancel_command(&mut self, id: u64) -> bool {
         let Some(c) = self.pending_commands.get_mut(&id) else {
