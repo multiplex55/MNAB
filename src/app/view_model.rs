@@ -10,7 +10,8 @@ use time::Date;
 
 use crate::domain::{
     AccountId, BudgetId, BudgetMonth, CategoryGroupId, CategoryId, ImportBatchId, PayeeId,
-    ReconciliationId, ScheduledOccurrenceId, ScheduledTransactionId, TargetId, TransactionId,
+    ReconciliationId, ScheduledOccurrenceId, ScheduledTransactionId, Target, TargetId,
+    TransactionId,
 };
 
 /// A financial value calculated on the storage thread and ready to render.  `text` is deliberately
@@ -175,6 +176,48 @@ pub struct CategoryRowView {
     pub hidden: bool,
     pub archived: bool,
     pub inspector: String,
+}
+
+/// Month-independent category management projection.  This deliberately does not reuse
+/// `CategoryRowView`: accounting values belong to a budget month while catalog metadata does not.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CategoryCatalogView {
+    pub groups: Vec<CategoryGroupView>,
+    pub show_archived: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CategoryGroupView {
+    pub id: CategoryGroupId,
+    pub name: String,
+    pub position: i64,
+    pub hidden: bool,
+    pub categories: Vec<CategoryCatalogItemView>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CategoryCatalogItemView {
+    pub id: CategoryId,
+    pub group_id: CategoryGroupId,
+    pub name: String,
+    pub position: i64,
+    pub hidden: bool,
+    pub archived: bool,
+    pub protected: bool,
+    pub credit_card_payment: bool,
+    pub in_use: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CategoryDetailView {
+    pub category: CategoryCatalogItemView,
+    pub group_name: String,
+    pub target: Option<Target>,
+    pub current_cents: i64,
+    pub target_cents: Option<i64>,
+    pub remaining_cents: Option<i64>,
+    pub due_date: Option<Date>,
+    pub recent_transaction_count: u64,
 }
 
 /// The identity of a register.  This is the only register scope used by the

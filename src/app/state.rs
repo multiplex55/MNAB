@@ -4,8 +4,8 @@ use crate::{
         navigation::Navigation,
     },
     domain::{
-        AccountGroupId, AccountId, BudgetId, BudgetMonth, CategoryId, ImportBatchId, Money,
-        TransactionId, TransferId,
+        AccountGroupId, AccountId, BudgetId, BudgetMonth, CategoryGroupId, CategoryId,
+        ImportBatchId, Money, TransactionId, TransferId,
     },
     storage::worker::{Generation, RequestId},
 };
@@ -241,7 +241,16 @@ pub struct ReconciliationState {
 #[derive(Clone, Debug)]
 pub struct CategoryEditorState {
     pub category_id: Option<CategoryId>,
+    pub group_id: Option<CategoryGroupId>,
+    pub name: String,
+    pub mode: CategoryEditorMode,
     pub metadata: EditorMetadata,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CategoryEditorMode {
+    Group,
+    Category,
+    Goal,
 }
 #[derive(Clone, Debug)]
 pub struct GroupEditorState {
@@ -354,6 +363,10 @@ pub struct AppState {
     pub accounts: Vec<AccountSummary>,
     pub account_groups: Vec<crate::domain::AccountGroup>,
     pub register_query: RegisterQueryState,
+    pub category_catalog: ViewQueryState<crate::app::view_model::CategoryCatalogView>,
+    pub category_detail: ViewQueryState<crate::app::view_model::CategoryDetailView>,
+    pub selected_category: Option<CategoryId>,
+    pub show_archived_categories: bool,
     pub search: String,
     pub search_id: Id,
     pub palette: crate::app::palette::PaletteState,
@@ -393,6 +406,10 @@ impl Default for AppState {
             accounts: vec![],
             account_groups: vec![],
             register_query: RegisterQueryState::default(),
+            category_catalog: ViewQueryState::default(),
+            category_detail: ViewQueryState::default(),
+            selected_category: None,
+            show_archived_categories: false,
             search: String::new(),
             search_id: Id::new("global-search"),
             palette: crate::app::palette::PaletteState::default(),

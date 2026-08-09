@@ -18,9 +18,187 @@ use crate::{
 };
 use rusqlite::{Connection, params_from_iter, types::Value};
 use std::{collections::BTreeMap, str::FromStr};
+use time::Date;
 use time::OffsetDateTime;
 
 pub const MAX_REGISTER_PAGE_SIZE: usize = 200;
+
+impl QueryStore<'_> {
+    pub fn category_catalog(
+        &self,
+        budget_id: BudgetId,
+        show_archived: bool,
+    ) -> Result<crate::app::view_model::CategoryCatalogView, RepositoryError> {
+        use crate::app::view_model::{
+            CategoryCatalogItemView, CategoryCatalogView, CategoryGroupView,
+        };
+        let mut statement = self.connection.prepare(
+            "SELECT g.id,g.name,g.sort_order,g.hidden,c.id,c.name,c.sort_order,c.hidden,c.archived,\
+             EXISTS(SELECT 1 FROM credit_card_payment_categories p WHERE p.category_id=c.id),\
+             EXISTS(SELECT 1 FROM transactions t WHERE t.category_id=c.id UNION ALL SELECT 1 FROM transaction_splits s WHERE s.category_id=c.id UNION ALL SELECT 1 FROM budget_assignments a WHERE a.category_id=c.id UNION ALL SELECT 1 FROM targets x WHERE x.category_id=c.id)\
+             FROM category_groups g LEFT JOIN categories c ON c.group_id=g.id\
+             WHERE g.budget_id=?1 AND (?2 OR COALESCE(c.archived,0)=0) ORDER BY g.sort_order,g.id,c.sort_order,c.id"
+        ).map_err(|e| repo(e))?;
+        let mut groups = Vec::<CategoryGroupView>::new();
+        let rows = statement
+            .query_map((budget_id.to_string(), show_archived), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, bool>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<i64>>(6)?,
+                    r.get::<_, Option<bool>>(7)?,
+                    r.get::<_, Option<bool>>(8)?,
+                    r.get::<_, Option<bool>>(9)?,
+                    r.get::<_, Option<bool>>(10)?,
+                ))
+            })
+            .map_err(|e| repo(e))?;
+        for row in rows {
+            let (gid, gname, position, hidden, cid, cname, cpos, chidden, archived, payment, used) =
+                row.map_err(|e| repo(e))?;
+            let gid = gid
+                .parse()
+                .map_err(|_| category_error("invalid category group id"))?;
+            if groups.last().is_none_or(|g| g.id != gid) {
+                groups.push(CategoryGroupView {
+                    id: gid,
+                    name: gname,
+                    position,
+                    hidden,
+                    categories: vec![],
+                });
+            }
+            if let Some(cid) = cid {
+                groups.last_mut().expect("group inserted").categories.push(
+                    CategoryCatalogItemView {
+                        id: cid
+                            .parse()
+                            .map_err(|_| category_error("invalid category id"))?,
+                        group_id: gid,
+                        name: cname.unwrap_or_default(),
+                        position: cpos.unwrap_or_default(),
+                        hidden: chidden.unwrap_or(false),
+                        archived: archived.unwrap_or(false),
+                        protected: payment.unwrap_or(false),
+                        credit_card_payment: payment.unwrap_or(false),
+                        in_use: used.unwrap_or(false),
+                    },
+                );
+            }
+        }
+        Ok(CategoryCatalogView {
+            groups,
+            show_archived,
+        })
+    }
+
+    pub fn category_detail(
+        &self,
+        category_id: crate::domain::CategoryId,
+        today: Date,
+    ) -> Result<crate::app::view_model::CategoryDetailView, RepositoryError> {
+        use crate::domain::{Money, Target, TargetAssociation, TargetKind, TargetRecurrence};
+        use rusqlite::OptionalExtension;
+        let row = self.connection.query_row("SELECT c.group_id,c.name,c.sort_order,c.hidden,c.archived,g.name,EXISTS(SELECT 1 FROM credit_card_payment_categories p WHERE p.category_id=c.id),EXISTS(SELECT 1 FROM transactions t WHERE t.category_id=c.id),COALESCE((SELECT SUM(amount) FROM budget_assignments WHERE category_id=c.id),0), (SELECT count(*) FROM transactions WHERE category_id=c.id) FROM categories c JOIN category_groups g ON g.id=c.group_id WHERE c.id=?1", [category_id.to_string()], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,bool>(3)?,r.get::<_,bool>(4)?,r.get::<_,String>(5)?,r.get::<_,bool>(6)?,r.get::<_,bool>(7)?,r.get::<_,i64>(8)?,r.get::<_,u64>(9)?))).optional().map_err(|e| repo(e))?.ok_or_else(||category_error("category not found"))?;
+        let target_row: Option<(String,String,Option<i64>,Option<String>,String,Option<String>)> = self.connection.query_row("SELECT id,target_type,amount,due_date,recurrence,account_id FROM targets WHERE category_id=?1 ORDER BY modified_at DESC LIMIT 1",[category_id.to_string()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(|e|repo(e))?;
+        let target = target_row
+            .map(
+                |(id, kind, amount, due, recurrence, account)| -> Result<Target, RepositoryError> {
+                    let due = due
+                        .map(|v| {
+                            Date::parse(&v, &time::format_description::well_known::Iso8601::DATE)
+                                .map_err(|_| category_error("invalid target date"))
+                        })
+                        .transpose()?;
+                    let amount = amount.map(Money::from_minor_units);
+                    let kind = match kind.as_str() {
+                        "balance_amount" => TargetKind::BalanceAmount {
+                            amount: amount.unwrap(),
+                        },
+                        "balance_by_date" => TargetKind::BalanceByDate {
+                            amount: amount.unwrap(),
+                            due: due.unwrap(),
+                        },
+                        "fixed_monthly_savings" => TargetKind::FixedMonthlySavings {
+                            amount: amount.unwrap(),
+                        },
+                        "refill_to_amount" => TargetKind::RefillToAmount {
+                            amount: amount.unwrap(),
+                        },
+                        "upcoming_expense" => TargetKind::UpcomingExpense {
+                            amount: amount.unwrap(),
+                            due: due.unwrap(),
+                            recurrence: match recurrence.as_str() {
+                                "monthly" => TargetRecurrence::Monthly,
+                                "yearly" => TargetRecurrence::Yearly,
+                                _ => TargetRecurrence::None,
+                            },
+                        },
+                        "credit_card_payoff_by_date" => {
+                            TargetKind::CreditCardPayoffByDate { due: due.unwrap() }
+                        }
+                        _ => return Err(category_error("invalid target type")),
+                    };
+                    let association = if let Some(account) = account {
+                        TargetAssociation::CreditCard {
+                            account_id: account
+                                .parse()
+                                .map_err(|_| category_error("invalid account id"))?,
+                            payment_category_id: category_id,
+                        }
+                    } else {
+                        TargetAssociation::Category(category_id)
+                    };
+                    Ok(Target {
+                        id: id
+                            .parse()
+                            .map_err(|_| category_error("invalid target id"))?,
+                        association,
+                        kind,
+                    })
+                },
+            )
+            .transpose()?;
+        let current = Money::from_minor_units(row.8);
+        let recommendation = target
+            .as_ref()
+            .and_then(|t| t.recommend(today, current, None).ok());
+        let target_cents = recommendation
+            .as_ref()
+            .map(|v| v.target_amount.minor_units());
+        let remaining_cents = recommendation
+            .as_ref()
+            .map(|v| v.remaining_amount.minor_units());
+        let due_date = recommendation.and_then(|v| v.due_date);
+        Ok(crate::app::view_model::CategoryDetailView {
+            category: crate::app::view_model::CategoryCatalogItemView {
+                id: category_id,
+                group_id: row
+                    .0
+                    .parse()
+                    .map_err(|_| category_error("invalid group id"))?,
+                name: row.1,
+                position: row.2,
+                hidden: row.3,
+                archived: row.4,
+                protected: row.6,
+                credit_card_payment: row.6,
+                in_use: row.7,
+            },
+            group_name: row.5,
+            target,
+            target_cents,
+            current_cents: current.minor_units(),
+            remaining_cents,
+            due_date,
+            recent_transaction_count: row.9,
+        })
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegisterRow {
@@ -1221,6 +1399,12 @@ fn repo<E: std::error::Error + Send + Sync + 'static>(source: E) -> RepositoryEr
     RepositoryError::Failed {
         source: Box::new(source),
     }
+}
+fn category_error(message: &'static str) -> RepositoryError {
+    repo(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message,
+    ))
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use crate::{
     app::inbox::InboxItemId,
     domain::{
         Account, AccountId, BudgetAssignment, BudgetMonth, Category, CategoryId, ImportBatchId,
-        Payee, PayeeId, ReconciliationId, ScheduledTransactionId, TargetId, Transaction,
+        Payee, PayeeId, ReconciliationId, ScheduledTransactionId, Target, TargetId, Transaction,
         TransactionId,
     },
     storage::worker::{RequestId, SafeUserError},
@@ -83,6 +83,20 @@ pub enum AccountCommand {
 pub enum CategoryCommand {
     Update(Category),
     Delete(CategoryId),
+    CreateGroup(crate::domain::CategoryGroup),
+    ReorderGroup {
+        id: crate::domain::CategoryGroupId,
+        before: Option<crate::domain::CategoryGroupId>,
+    },
+    ReorderCategory {
+        id: CategoryId,
+        group_id: crate::domain::CategoryGroupId,
+        before: Option<CategoryId>,
+    },
+    Merge {
+        source: CategoryId,
+        destination: CategoryId,
+    },
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AssignmentCommand {
@@ -146,7 +160,23 @@ pub enum ReconciliationCommand {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TargetCommand {
+    Save(Target),
     Delete(TargetId),
+}
+
+/// Presentation intents which need routing but are not themselves persistence commands.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CategoryAction {
+    RefreshCatalog,
+    Select(CategoryId),
+    ToggleArchived(bool),
+    NewGroup,
+    NewCategory(crate::domain::CategoryGroupId),
+    Edit(CategoryId),
+    OpenActivity(CategoryId),
+    OpenTransactions(CategoryId),
+    BeginGoal(CategoryId),
+    BeginGoalTransfer(CategoryId),
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScheduleCommand {
@@ -182,6 +212,7 @@ pub enum ApplicationAction {
     /// distinct from worker commands and never enter undo/redo history.
     Budget(BudgetAction),
     Financial(FinancialCommand),
+    Category(CategoryAction),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
