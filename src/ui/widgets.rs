@@ -117,7 +117,7 @@ mod tests {
     }
 }
 use crate::app::{
-    command::{AppCommand, CommandAvailabilityContext, command_availability},
+    command::{AppCommand, CommandAvailabilityContext},
     dispatcher::ActionCollector,
 };
 
@@ -130,9 +130,9 @@ pub fn action_button(
     context: CommandAvailabilityContext,
     actions: &mut ActionCollector,
 ) -> egui::Response {
-    let availability = command_availability(context, command);
-    let response = ui.add_enabled(availability.enabled, egui::Button::new(label));
-    let response = if let Some(reason) = availability.disabled_reason {
+    let descriptor = crate::app::command::action_descriptor(context, command);
+    let response = ui.add_enabled(descriptor.enabled, egui::Button::new(label));
+    let response = if let Some(reason) = descriptor.disabled_reason {
         response.on_disabled_hover_text(reason)
     } else {
         response

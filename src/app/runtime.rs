@@ -958,15 +958,9 @@ impl ApplicationRuntime {
     }
 
     fn report_data_result(&mut self, title: &str, result: Result<String, String>) {
-        let (kind, detail) = match result {
-            Ok(detail) => (NotificationKind::Information, detail),
-            Err(detail) => (NotificationKind::Error, detail),
-        };
-        self.view.notifications.push(Notification {
-            kind,
-            title: title.into(),
-            detail,
-            persistent: true,
+        self.view.notifications.push(match result {
+            Ok(detail) => Notification::success(title, detail),
+            Err(detail) => Notification::actionable_error(title, detail),
         });
     }
 
@@ -1171,7 +1165,17 @@ impl ApplicationRuntime {
             }
             // Budget widgets own their draft/preview state. These semantic intents exist so the
             // shared availability policy remains the sole source of enablement and explanations.
-            AutoAssign | MoveMoney => return,
+            AutoAssign | MoveMoney => {
+                self.view.notifications.push(Notification::success(
+                    if intent == AutoAssign {
+                        "Auto-Assign preview ready"
+                    } else {
+                        "Move Money ready"
+                    },
+                    "Review the selected budget categories before confirming.",
+                ));
+                return;
+            }
             CompleteOnboarding
                 if self.database_lifecycle == DatabaseLifecycle::FirstRunRequired =>
             {
@@ -1729,6 +1733,15 @@ impl ApplicationRuntime {
         self.view.complete_request(id);
         match result {
             Ok(crate::storage::worker::TypedResult::Mutation(m)) => {
+                let success_title = match &c.envelope.payload {
+                    ApplicationAction::Financial(FinancialCommand::Transaction(_)) => {
+                        "Transaction saved"
+                    }
+                    ApplicationAction::Financial(FinancialCommand::Assignment(_)) => {
+                        "Assignments updated"
+                    }
+                    _ => "Changes saved",
+                };
                 if self
                     .view
                     .editor
@@ -1806,6 +1819,9 @@ impl ApplicationRuntime {
                     )
                 });
                 self.invalidations.merge(m.invalidations);
+                self.view
+                    .notifications
+                    .push(Notification::success(success_title, &m.operation_label));
                 if refresh_report {
                     if let Some(request) = self.view.report_query.current_request.clone() {
                         self.request_report(request);
@@ -1835,6 +1851,17 @@ impl ApplicationRuntime {
                 )),
                 &mut self.terminal_sequence,
             ),
+        }
+        if let Some(command) = self.pending_commands.get(&cid)
+            && command.status == CommandStatus::Failed
+        {
+            let detail = command.safe_failure.as_ref().map_or_else(
+                || "The operation failed without changing your data.".to_owned(),
+                |failure| format!("{failure:?}"),
+            );
+            self.view
+                .notifications
+                .push(Notification::actionable_error("Operation failed", detail));
         }
         let editor_owns_response = self
             .view

@@ -163,9 +163,49 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
         Workspace::Inbox => super::workspaces::inbox::show(ui, state, actions),
         Workspace::Account(id) => super::workspaces::register::show(ui, state, id, actions),
     });
+    show_notifications(ctx, state, actions);
     show_palette(ctx, state, actions);
     show_workflow_editor(ctx, state, actions);
     show_budget_dialog(ctx, state, actions);
+}
+
+fn show_notifications(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionCollector) {
+    if state.notifications.is_empty() {
+        return;
+    }
+    let mut dismiss = None;
+    egui::TopBottomPanel::bottom("application-notifications").show(ctx, |ui| {
+        for (index, notice) in state.notifications.iter().enumerate() {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    let color = match notice.kind {
+                        crate::app::state::NotificationKind::Error => egui::Color32::RED,
+                        crate::app::state::NotificationKind::Warning => egui::Color32::YELLOW,
+                        crate::app::state::NotificationKind::Information => {
+                            ui.visuals().strong_text_color()
+                        }
+                    };
+                    ui.colored_label(color, &notice.title);
+                    if notice.persistent && ui.button("Retry").clicked() {
+                        actions.push(crate::app::command::AppCommand::RetryOperation);
+                    }
+                    if notice.persistent {
+                        ui.collapsing("Details", |ui| {
+                            ui.label(&notice.detail);
+                        });
+                    } else {
+                        ui.label(&notice.detail);
+                    }
+                    if ui.button("Dismiss").clicked() {
+                        dismiss = Some(index);
+                    }
+                });
+            });
+        }
+    });
+    if let Some(index) = dismiss {
+        state.dismiss_notification(index);
+    }
 }
 
 /// Renders the runtime-owned editor state.  Editors remain visible while a typed worker request is
