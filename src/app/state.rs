@@ -5,7 +5,7 @@ use crate::{
     },
     domain::{
         AccountGroupId, AccountId, BudgetId, BudgetMonth, CategoryGroupId, CategoryId,
-        ImportBatchId, Money, TransactionId, TransferId,
+        ImportBatchId, Money, TransactionId,
     },
     storage::worker::{Generation, RequestId},
 };
@@ -187,7 +187,6 @@ pub struct AccountSummary {
 pub enum Dialog {
     Onboarding,
     BudgetMaintenance,
-    RenameBudget,
     RepairBudget,
     RecoveryChoice,
     Reconcile(AccountId),
@@ -197,12 +196,6 @@ pub enum Dialog {
 #[derive(Clone, Debug)]
 pub enum InspectorContext {
     AccountSummary(Option<AccountId>),
-    Transaction(TransactionId),
-    Transfer(TransferId),
-    CategoryGoal(CategoryId),
-    Reconciliation(AccountId),
-    ImportCandidate(ImportBatchId),
-    BackgroundOperation(RequestId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -313,7 +313,6 @@ pub struct AccountHeader {
     pub transaction_count: u64,
     pub last_reconciliation_date: Option<String>,
     pub reconciliation_difference: Money,
-    pub goal_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -378,18 +377,8 @@ impl<'a> QueryStore<'a> {
     }
 
     pub fn account_header(&self, account: AccountId) -> Result<AccountHeader, RepositoryError> {
-        let mut header = self.connection.query_row(r#"SELECT a.id,a.name,a.account_type,COALESCE(g.name,'Ungrouped'),COALESCE(SUM(CASE WHEN t.archived=0 AND t.voided=0 THEN t.amount ELSE 0 END),0),COALESCE(SUM(CASE WHEN t.archived=0 AND t.voided=0 AND t.cleared_state IN ('cleared','reconciled') THEN t.amount ELSE 0 END),0),COALESCE(SUM(CASE WHEN t.archived=0 AND t.voided=0 AND t.cleared_state='uncleared' THEN t.amount ELSE 0 END),0),COUNT(CASE WHEN t.archived=0 THEN 1 END),(SELECT MAX(rr.statement_date) FROM reconciliations rr WHERE rr.account_id=a.id AND rr.state='completed'),COALESCE((SELECT difference FROM reconciliations lr WHERE lr.account_id=a.id ORDER BY statement_date DESC,id DESC LIMIT 1),0)
-            FROM accounts a LEFT JOIN account_groups g ON g.id=a.group_id LEFT JOIN transactions t ON t.account_id=a.id WHERE a.id=?1 GROUP BY a.id"#,[account.to_string()],|r| Ok(AccountHeader{account_id:r.get(0)?,name:r.get(1)?,account_type:r.get(2)?,group_path:r.get(3)?,working:Money::from_minor_units(r.get(4)?),cleared:Money::from_minor_units(r.get(5)?),uncleared:Money::from_minor_units(r.get(6)?),transaction_count:r.get::<_,i64>(7)? as u64,last_reconciliation_date:r.get(8)?,reconciliation_difference:Money::from_minor_units(r.get(9)?),goal_ids:vec![]})).map_err(repo)?;
-        let mut goals = self
-            .connection
-            .prepare("SELECT id FROM category_goals WHERE account_id=?1 ORDER BY id")
-            .map_err(repo)?;
-        header.goal_ids = goals
-            .query_map([account.to_string()], |r| r.get(0))
-            .map_err(repo)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(repo)?;
-        Ok(header)
+        self.connection.query_row(r#"SELECT a.id,a.name,a.account_type,COALESCE(g.name,'Ungrouped'),COALESCE(SUM(CASE WHEN t.archived=0 AND t.voided=0 THEN t.amount ELSE 0 END),0),COALESCE(SUM(CASE WHEN t.archived=0 AND t.voided=0 AND t.cleared_state IN ('cleared','reconciled') THEN t.amount ELSE 0 END),0),COALESCE(SUM(CASE WHEN t.archived=0 AND t.voided=0 AND t.cleared_state='uncleared' THEN t.amount ELSE 0 END),0),COUNT(CASE WHEN t.archived=0 THEN 1 END),(SELECT MAX(rr.statement_date) FROM reconciliations rr WHERE rr.account_id=a.id AND rr.state='completed'),COALESCE((SELECT difference FROM reconciliations lr WHERE lr.account_id=a.id ORDER BY statement_date DESC,id DESC LIMIT 1),0)
+            FROM accounts a LEFT JOIN account_groups g ON g.id=a.group_id LEFT JOIN transactions t ON t.account_id=a.id WHERE a.id=?1 GROUP BY a.id"#,[account.to_string()],|r| Ok(AccountHeader{account_id:r.get(0)?,name:r.get(1)?,account_type:r.get(2)?,group_path:r.get(3)?,working:Money::from_minor_units(r.get(4)?),cleared:Money::from_minor_units(r.get(5)?),uncleared:Money::from_minor_units(r.get(6)?),transaction_count:r.get::<_,i64>(7)? as u64,last_reconciliation_date:r.get(8)?,reconciliation_difference:Money::from_minor_units(r.get(9)?)})).map_err(repo)
     }
 
     pub fn register_projection(

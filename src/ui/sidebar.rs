@@ -69,18 +69,12 @@ fn group(
         let g = &state.account_groups[index];
         (g.name.clone(), g.collapsed)
     };
-    let response = ui
-        .horizontal(|ui| {
-            ui.add_space(depth as f32 * 12.0);
-            if ui.small_button(if collapsed { "▶" } else { "▼" }).clicked() {
-                state.account_groups[index].collapsed = !collapsed;
-            }
-            ui.strong(name);
-        })
-        .response;
-    response.context_menu(|ui| {
-        ui.label("Rename / move group");
-        ui.label("Use Move Up / Move Down for keyboard reorder");
+    ui.horizontal(|ui| {
+        ui.add_space(depth as f32 * 12.0);
+        if ui.small_button(if collapsed { "▶" } else { "▼" }).clicked() {
+            state.account_groups[index].collapsed = !collapsed;
+        }
+        ui.strong(name);
     });
     if collapsed {
         return None;

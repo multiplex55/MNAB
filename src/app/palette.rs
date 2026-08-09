@@ -374,8 +374,6 @@ pub struct RowSelection<Id: Ord> {
     pub hidden: std::collections::BTreeSet<Id>,
 }
 impl<Id: Ord + Clone> RowSelection<Id> {
-    /// Opening a context menu is deliberately a no-op: selection and native text selection survive.
-    pub const fn open_context_menu(&self) {}
     pub fn apply_visible(&mut self, visible: impl IntoIterator<Item = Id>) {
         let v = visible
             .into_iter()
