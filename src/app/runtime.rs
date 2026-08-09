@@ -502,6 +502,10 @@ impl ApplicationRuntime {
             self.dispatch_category(intent);
             return;
         }
+        if let ApplicationAction::Report(intent) = action {
+            self.dispatch_report(intent);
+            return;
+        }
         if self.generation.budget == 0 {
             return;
         }
@@ -853,6 +857,72 @@ impl ApplicationRuntime {
             );
         }
     }
+
+    fn dispatch_report(&mut self, action: crate::app::command::ReportAction) {
+        match action {
+            crate::app::command::ReportAction::Refresh(request)
+            | crate::app::command::ReportAction::Retry(request) => self.request_report(request),
+            crate::app::command::ReportAction::ExportCsv { destination } => {
+                let result = self
+                    .view
+                    .report_query
+                    .view
+                    .last_successful
+                    .as_ref()
+                    .ok_or_else(|| "There is no displayed report to export.".to_owned())
+                    .and_then(|view| {
+                        std::fs::write(&destination, view.csv.as_bytes()).map_err(|_| {
+                            "The report could not be written to the selected destination."
+                                .to_owned()
+                        })
+                    });
+                let (kind, title, detail, persistent) = match result {
+                    Ok(()) => (
+                        NotificationKind::Information,
+                        "Report exported",
+                        destination.display().to_string(),
+                        false,
+                    ),
+                    Err(message) => (NotificationKind::Error, "Export failed", message, true),
+                };
+                self.view.notifications.push(Notification {
+                    kind,
+                    title: title.into(),
+                    detail,
+                    persistent,
+                });
+            }
+        }
+    }
+
+    fn request_report(&mut self, request: crate::domain::ReportRequest) {
+        let Some(budget_id) = self.view.active_budget else {
+            return;
+        };
+        let id = self.allocate_request();
+        self.view
+            .report_query
+            .begin(request.clone(), id, self.generation);
+        let operation = crate::storage::worker::WorkerOperation::Report(
+            crate::storage::worker::ReportOperation { budget_id, request },
+        );
+        let submission = crate::storage::worker::StorageRequest {
+            id,
+            generation: self.generation,
+            operation,
+        };
+        if self
+            .worker
+            .as_ref()
+            .is_none_or(|worker| worker.submit(submission).is_err())
+        {
+            let _ = self.view.report_query.view.fail(
+                id,
+                self.generation,
+                "The report could not be requested.",
+            );
+        }
+    }
     fn request_category_detail(
         &mut self,
         category_id: crate::domain::CategoryId,
@@ -894,6 +964,9 @@ impl ApplicationRuntime {
             Ok(crate::storage::worker::TypedResult::CategoryDetail(value)) => {
                 let _ = self.view.category_detail.accept(id, generation, value);
             }
+            Ok(crate::storage::worker::TypedResult::Report(value)) => {
+                let _ = self.view.report_query.view.accept(id, generation, value);
+            }
             Err(error) => {
                 let message = safe.map_or_else(
                     || format!("Refresh failed: {error}"),
@@ -903,7 +976,11 @@ impl ApplicationRuntime {
                     .view
                     .category_catalog
                     .fail(id, generation, message.clone());
-                let _ = self.view.category_detail.fail(id, generation, message);
+                let _ = self
+                    .view
+                    .category_detail
+                    .fail(id, generation, message.clone());
+                let _ = self.view.report_query.view.fail(id, generation, message);
             }
             _ => self.view.complete_request(id),
         }
@@ -1028,7 +1105,18 @@ impl ApplicationRuntime {
                         inverse,
                     });
                 }
+                let refresh_report = m.invalidations.iter().any(|value| {
+                    matches!(
+                        value,
+                        crate::app::view_invalidation::ViewInvalidation::Reports
+                    )
+                });
                 self.invalidations.merge(m.invalidations);
+                if refresh_report {
+                    if let Some(request) = self.view.report_query.current_request.clone() {
+                        self.request_report(request);
+                    }
+                }
             }
             Err(crate::storage::worker::WorkerError::Cancelled) => {
                 let _ = c.transition(CommandStatus::Cancelled);

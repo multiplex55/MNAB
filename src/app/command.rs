@@ -213,6 +213,15 @@ pub enum ApplicationAction {
     Budget(BudgetAction),
     Financial(FinancialCommand),
     Category(CategoryAction),
+    Report(ReportAction),
+}
+
+/// Typed report intents. A retry always carries the original immutable request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReportAction {
+    Refresh(crate::domain::ReportRequest),
+    Retry(crate::domain::ReportRequest),
+    ExportCsv { destination: PathBuf },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

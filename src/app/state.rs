@@ -69,6 +69,25 @@ impl<T> ViewQueryState<T> {
     }
 }
 
+/// Correlated report projection plus the exact request needed for retry/invalidation.
+#[derive(Clone, Debug, Default)]
+pub struct ReportQueryState {
+    pub current_request: Option<crate::domain::ReportRequest>,
+    pub view: ViewQueryState<crate::app::view_model::ReportView>,
+}
+
+impl ReportQueryState {
+    pub fn begin(
+        &mut self,
+        request: crate::domain::ReportRequest,
+        id: RequestId,
+        generation: Generation,
+    ) {
+        self.current_request = Some(request);
+        self.view.begin(id, generation, None);
+    }
+}
+
 /// Correlated register paging state. A failed refresh deliberately leaves
 /// `last_successful` intact so the ledger never disappears behind an error.
 #[derive(Clone, Debug, Default)]
@@ -349,7 +368,7 @@ pub struct AppState {
     pub register_focus: Option<Id>,
     pub editor: EditorState,
     pub selected_month: BudgetMonth,
-    pub selected_report: Option<String>,
+    pub report_query: ReportQueryState,
     pub dialog: Option<DialogState>,
     pub notifications: Vec<Notification>,
     pub operations: BTreeMap<RequestId, BackgroundOperation>,
@@ -392,7 +411,7 @@ impl Default for AppState {
             register_focus: None,
             editor: EditorState::Idle,
             selected_month: BudgetMonth::new(1970, 1).expect("valid report filter month"),
-            selected_report: None,
+            report_query: ReportQueryState::default(),
             dialog: None,
             notifications: vec![],
             operations: BTreeMap::new(),
@@ -459,7 +478,7 @@ impl AppState {
         self.selected_account = None;
         self.selected_transaction = None;
         self.editor = EditorState::Idle;
-        self.selected_report = None;
+        self.report_query = ReportQueryState::default();
         self.accounts.clear();
         self.account_groups.clear();
         self.operations.clear();
