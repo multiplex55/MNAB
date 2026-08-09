@@ -1751,6 +1751,8 @@ mod tests {
             activity_cents: 0,
             available_cents: 0,
             overspending_cents: 0,
+            cash_overspending_cents: 0,
+            credit_card_overspending_cents: 0,
             rows: vec![],
             inspector: vec![],
         };
