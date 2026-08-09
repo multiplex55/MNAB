@@ -1,6 +1,7 @@
 //! Immediate-mode UI. This layer emits typed commands and does not access persistence.
 pub mod account_header;
 pub mod budget_view;
+pub mod format;
 pub mod inspector;
 pub mod keyboard;
 pub mod onboarding;

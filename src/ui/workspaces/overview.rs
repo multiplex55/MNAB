@@ -35,7 +35,9 @@ impl OverviewProjection {
         if let Some(month) = state.budget_month.last_successful.as_ref() {
             cards.push(OverviewCard {
                 title: "Ready to Assign".into(),
-                value: Money::from_minor_units(month.ready_to_assign_cents).to_string(),
+                value: crate::ui::format::money(Money::from_minor_units(
+                    month.ready_to_assign_cents,
+                )),
                 detail: "Plan this month's available money".into(),
                 destination: OverviewDestination::Workspace(Workspace::Budget),
             });
@@ -60,7 +62,7 @@ impl OverviewProjection {
                 .unwrap_or(Money::ZERO);
             cards.push(OverviewCard {
                 title: "Account balances".into(),
-                value: total.to_string(),
+                value: crate::ui::format::money(total),
                 detail: format!("Across {} open accounts", open.len()),
                 destination: OverviewDestination::Workspace(Workspace::AllTransactions),
             });

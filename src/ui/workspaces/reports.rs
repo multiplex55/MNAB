@@ -95,9 +95,7 @@ fn edit_date(ui: &mut egui::Ui, label: &str, date: &mut Date) {
     }
 }
 pub(crate) fn format_minor_units(cents: i64) -> String {
-    let sign = if cents < 0 { "-" } else { "" };
-    let n = cents.unsigned_abs();
-    format!("{sign}${}.{:02}", n / 100, n % 100)
+    crate::ui::format::money(crate::domain::Money::from_minor_units(cents))
 }
 
 pub fn show(ui: &mut egui::Ui, state: &AppState, commands: &mut ActionCollector) {
@@ -127,8 +125,8 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, commands: &mut ActionCollector)
                     ui.selectable_value(&mut controls.kind, kind, label);
                 }
             });
-        edit_date(ui, "From (Y M D)", &mut controls.dates.start);
-        edit_date(ui, "Through (Y M D)", &mut controls.dates.end);
+        edit_date(ui, "From (MM/DD/YYYY)", &mut controls.dates.start);
+        edit_date(ui, "Through (MM/DD/YYYY)", &mut controls.dates.end);
         egui::ComboBox::from_label("Accounts")
             .selected_text(format!("{:?}", controls.accounts))
             .show_ui(ui, |ui| {
@@ -306,8 +304,8 @@ mod tests {
 
     #[test]
     fn signed_minor_units_never_use_floating_point() {
-        assert_eq!(format_minor_units(-123_456), "-$1234.56");
+        assert_eq!(format_minor_units(-123_456), "-$1,234.56");
         assert_eq!(format_minor_units(5), "$0.05");
-        assert_eq!(format_minor_units(i64::MIN), "-$92233720368547758.08");
+        assert_eq!(format_minor_units(i64::MIN), "-$92,233,720,368,547,758.08");
     }
 }
