@@ -355,7 +355,13 @@ impl SettingsSession {
                 if !matches!(
                     value.last_workspace.as_deref(),
                     None | Some(
-                        "all_transactions" | "categories" | "reports" | "inbox" | "account"
+                        "overview"
+                            | "budget"
+                            | "all_transactions"
+                            | "categories"
+                            | "reports"
+                            | "inbox"
+                            | "account"
                     )
                 ) {
                     value.last_workspace = None;
@@ -430,7 +436,15 @@ impl Settings {
         self.collapsed_account_groups.dedup();
         if !matches!(
             self.last_workspace.as_deref(),
-            None | Some("all_transactions" | "categories" | "reports" | "inbox" | "account")
+            None | Some(
+                "overview"
+                    | "budget"
+                    | "all_transactions"
+                    | "categories"
+                    | "reports"
+                    | "inbox"
+                    | "account"
+            )
         ) {
             self.last_workspace = None;
         }

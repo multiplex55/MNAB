@@ -45,6 +45,8 @@ pub enum AppCommand {
     SelectAllTransactions,
     ResetRegisterColumns,
     Rename,
+    NavigateOverview,
+    NavigateBudget,
     NavigateCategories,
     NavigateReports,
     NavigateAllTransactions,
@@ -535,6 +537,8 @@ mod tests {
 pub enum CommandWorkspace {
     #[default]
     None,
+    Overview,
+    Budget,
     Categories,
     Reports,
     AllTransactions,
@@ -617,6 +621,8 @@ pub const MAJOR_WORKFLOW_COMMANDS: &[AppCommand] = &[
     AppCommand::MoveDown,
     AppCommand::ToggleSelection,
     AppCommand::Rename,
+    AppCommand::NavigateOverview,
+    AppCommand::NavigateBudget,
     AppCommand::NavigateCategories,
     AppCommand::NavigateReports,
     AppCommand::NavigateAllTransactions,
@@ -699,6 +705,8 @@ pub fn command_availability(
             | ToggleSelection
             | Rename
             | NavigateCategories
+            | NavigateOverview
+            | NavigateBudget
             | NavigateReports
             | NavigateAllTransactions
             | PreviousMonth
@@ -774,10 +782,9 @@ pub fn command_availability(
         }
         Undo if !ctx.can_undo => CommandAvailability::disabled(command, "Nothing to undo"),
         Redo if !ctx.can_redo => CommandAvailability::disabled(command, "Nothing to redo"),
-        PreviousMonth | NextMonth => CommandAvailability::disabled(
-            command,
-            "Month navigation is available inside report date filters",
-        ),
+        PreviousMonth | NextMonth if ctx.workspace != CommandWorkspace::Budget => {
+            CommandAvailability::disabled(command, "Open Budget to change its month")
+        }
         CancelOperation if !ctx.mutation_locked && !ctx.lifecycle_busy => {
             CommandAvailability::disabled(command, "No cancellable operation is running")
         }

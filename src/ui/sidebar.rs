@@ -166,6 +166,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollect
     );
     ui.separator();
     for (label, workspace) in [
+        ("Overview", Workspace::Overview),
+        ("Budget", Workspace::Budget),
         ("Categories", Workspace::Categories),
         ("Reports", Workspace::Reports),
         ("All Transactions", Workspace::AllTransactions),

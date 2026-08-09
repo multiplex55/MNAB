@@ -399,6 +399,8 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         let nav = Navigation::default();
+        let now =
+            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
         Self {
             inbox_counts: crate::app::inbox::InboxCounts::default(),
             inbox_review: vec![],
@@ -410,7 +412,8 @@ impl Default for AppState {
             selected_transaction: None,
             register_focus: None,
             editor: EditorState::Idle,
-            selected_month: BudgetMonth::new(1970, 1).expect("valid report filter month"),
+            selected_month: BudgetMonth::new(now.year(), u8::from(now.month()))
+                .expect("current calendar month is valid"),
             report_query: ReportQueryState::default(),
             dialog: None,
             notifications: vec![],
@@ -442,6 +445,22 @@ impl Default for AppState {
     }
 }
 impl AppState {
+    /// Changes the planning month only while the month-aware Budget workspace is active.
+    /// Returns the new month when callers should request its projection.
+    pub fn step_budget_month(&mut self, forward: bool) -> Option<BudgetMonth> {
+        if self.navigation.workspace != crate::app::navigation::Workspace::Budget {
+            return None;
+        }
+        let month = if forward {
+            self.selected_month.next()
+        } else {
+            self.selected_month.previous()
+        }
+        .ok()?;
+        self.selected_month = month;
+        Some(month)
+    }
+
     /// Applies all parts of register navigation as one state transition. The returned
     /// first-page request is the only request the caller should submit.
     pub fn open_register(
@@ -536,6 +555,42 @@ impl AppState {
         {
             self.latest_by_purpose.remove(&purpose);
         }
+    }
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+    use crate::app::navigation::Workspace;
+
+    #[test]
+    fn account_and_budget_navigation_preserve_active_budget_and_month() {
+        let mut state = AppState::default();
+        let budget = BudgetId::new();
+        let month = BudgetMonth::new(2026, 8).unwrap();
+        state.active_budget = Some(budget);
+        state.selected_month = month;
+        state.navigation.workspace = Workspace::Account(AccountId::new());
+        state.navigation.workspace = Workspace::Budget;
+        state.navigation.workspace = Workspace::Overview;
+        assert_eq!(state.active_budget, Some(budget));
+        assert_eq!(state.selected_month, month);
+    }
+
+    #[test]
+    fn month_steps_are_budget_local_and_stable_across_transitions() {
+        let mut state = AppState::default();
+        state.selected_month = BudgetMonth::new(2026, 8).unwrap();
+        state.navigation.workspace = Workspace::Reports;
+        assert_eq!(state.step_budget_month(true), None);
+        assert_eq!(state.selected_month, BudgetMonth::new(2026, 8).unwrap());
+        state.navigation.workspace = Workspace::Budget;
+        assert_eq!(
+            state.step_budget_month(true),
+            BudgetMonth::new(2026, 9).ok()
+        );
+        state.navigation.workspace = Workspace::Overview;
+        assert_eq!(state.selected_month, BudgetMonth::new(2026, 9).unwrap());
     }
 }
 
