@@ -115,7 +115,7 @@ pub fn commands_for(context: CommandContext) -> Vec<CommandDescriptor> {
         ),
         (
             NavigateBudget,
-            "Open budget",
+            "View budget",
             "budget plan assign month",
             BudgetOpen,
         ),
@@ -127,7 +127,7 @@ pub fn commands_for(context: CommandContext) -> Vec<CommandDescriptor> {
         ),
         (AddAccount, "New account", "create add account", BudgetOpen),
         (EditAccount, "Edit account", "rename account", BudgetOpen),
-        (CloseAccount, "Close account", "archive account", BudgetOpen),
+        (CloseAccount, "Close account", "close account", BudgetOpen),
         (
             AddAccountGroup,
             "New account group",

@@ -16,7 +16,7 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AppCommand {
     ContextualNew,
-    CreateBudget,
+    CompleteOnboarding,
     AddAccount,
     EditAccount,
     CloseAccount,
@@ -300,23 +300,10 @@ pub enum ReportAction {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BudgetAction {
-    ShowCreate,
-    ShowOpen,
-    ShowRecents,
-    Create(crate::service::budget_service::CreateBudget),
-    Open(PathBuf),
+    ShowMaintenance,
     Rename {
         budget_id: crate::domain::BudgetId,
         name: String,
-    },
-    SetArchived {
-        budget_id: crate::domain::BudgetId,
-        archived: bool,
-    },
-    RemoveRecent(crate::domain::BudgetId),
-    Delete {
-        budget_id: crate::domain::BudgetId,
-        exact_name: String,
     },
     Reveal(crate::domain::BudgetId),
     Validate(crate::domain::BudgetId),
@@ -683,7 +670,7 @@ impl CommandAvailability {
 
 pub const MAJOR_WORKFLOW_COMMANDS: &[AppCommand] = &[
     AppCommand::ContextualNew,
-    AppCommand::CreateBudget,
+    AppCommand::CompleteOnboarding,
     AppCommand::AddAccount,
     AppCommand::EditAccount,
     AppCommand::CloseAccount,

@@ -96,17 +96,17 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
             ui.menu_button("Data", |ui| {
                 use crate::app::command::{ApplicationAction, BudgetAction};
                 if ui.button("Budget settings…").clicked() {
-                    actions.push(ApplicationAction::Budget(BudgetAction::ShowRecents));
+                    actions.push(ApplicationAction::Budget(BudgetAction::ShowMaintenance));
                     ui.close();
                 }
                 ui.separator();
                 ui.label("Maintenance");
                 if ui.button("Reveal data folder…").clicked() {
-                    actions.push(ApplicationAction::Budget(BudgetAction::ShowRecents));
+                    actions.push(ApplicationAction::Budget(BudgetAction::ShowMaintenance));
                     ui.close();
                 }
                 if ui.button("Reveal backup folder…").clicked() {
-                    actions.push(ApplicationAction::Budget(BudgetAction::ShowRecents));
+                    actions.push(ApplicationAction::Budget(BudgetAction::ShowMaintenance));
                     ui.close();
                 }
             });
@@ -244,27 +244,19 @@ fn show_budget_dialog(ctx: &egui::Context, state: &mut AppState, actions: &mut A
     let Some(dialog) = state.dialog.as_ref().map(|dialog| dialog.dialog.clone()) else {
         return;
     };
-    if matches!(dialog, crate::app::state::Dialog::CreateBudget) {
+    if matches!(dialog, crate::app::state::Dialog::Onboarding) {
         show_onboarding_wizard(ctx, state, actions);
         return;
     }
     let (title, guidance) = match dialog {
-        crate::app::state::Dialog::CreateBudget => unreachable!(),
-        crate::app::state::Dialog::OpenBudget => (
-            "Database maintenance",
-            "MNAB opens mnab-data/mnab.sqlite3 automatically; file picker workflows are retired.",
-        ),
-        crate::app::state::Dialog::RecentBudgets => (
+        crate::app::state::Dialog::Onboarding => unreachable!(),
+        crate::app::state::Dialog::BudgetMaintenance => (
             "Budget settings",
             "Rename budget metadata, back up, restore, validate, repair, or reveal data and backup folders.",
         ),
         crate::app::state::Dialog::RenameBudget => (
             "Rename budget",
             "Renaming changes only database metadata; mnab.sqlite3 keeps its fixed filename.",
-        ),
-        crate::app::state::Dialog::ArchiveBudget => (
-            "Archive budget",
-            "Archiving hides this entry from recents without deleting financial data.",
         ),
         crate::app::state::Dialog::RepairBudget => (
             "Repair budget",
@@ -273,10 +265,6 @@ fn show_budget_dialog(ctx: &egui::Context, state: &mut AppState, actions: &mut A
         crate::app::state::Dialog::RecoveryChoice => (
             "Budget recovery required",
             "Opening was refused. Choose a backup or an explicit diagnostic/repair action; MNAB will not reset the database.",
-        ),
-        crate::app::state::Dialog::ConfirmDelete => (
-            "Delete unavailable",
-            "The fixed database lifecycle preserves data; use restore or repair for maintenance.",
         ),
         crate::app::state::Dialog::Reconcile(_)
         | crate::app::state::Dialog::Import(_)
@@ -329,7 +317,7 @@ fn show_onboarding_wizard(
             if wizard.step > 1 && ui.button("Back").clicked() { wizard.step -= 1; }
             if wizard.step < 4 {
                 if ui.button("Next").clicked() { wizard.step += 1; }
-            } else if ui.button("Create budget").clicked() { actions.push(crate::app::command::AppCommand::CreateBudget); }
+            } else if ui.button("Finish setup").clicked() { actions.push(crate::app::command::AppCommand::CompleteOnboarding); }
             if ui.button("Cancel").clicked() { state.dialog = None; }
         });
     });
