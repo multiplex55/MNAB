@@ -33,7 +33,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
         })
     });
     if palette_pressed && !state.palette.open {
-        let initiating = ctx.memory(|memory| memory.focused());
+        let initiating = ctx.memory(egui::Memory::focused);
         state.palette.open(initiating);
     }
     let modal = state.dialog.is_some();
@@ -52,72 +52,91 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
     for command in keyboard_commands {
         actions.push(command);
     }
-    egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            ui.heading(format!("MNAB — {}", state.budget_name));
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut state.search)
-                    .hint_text("Search (Cmd/Ctrl+F)")
-                    .desired_width(180.0)
-                    .id(state.search_id),
-            );
-            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
-                response.request_focus();
-            }
-            if ui
-                .button(format!("Inbox ({})", state.inbox_counts.total))
-                .clicked()
-            {
-                state.navigation.workspace = Workspace::Inbox;
-            }
-            ui.menu_button("Data", |ui| {
-                use crate::app::command::{ApplicationAction, DataAction};
-                if ui.button("Budget settings…").clicked() {
-                    state.maintenance_budget_name.clone_from(&state.budget_name);
-                    state.open_dialog(
-                        crate::app::state::Dialog::BudgetMaintenance,
-                        egui::Id::new("data-menu"),
-                        egui::Id::new("toolbar"),
-                    );
-                    ui.close();
+    let tokens = super::style::SemanticTokens::from_visuals(&ctx.style().visuals);
+    egui::TopBottomPanel::top("global-bar")
+        .frame(
+            egui::Frame::new()
+                .fill(tokens.header)
+                .inner_margin(egui::Margin::symmetric(12, 6)),
+        )
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.strong(format!("MNAB · {}", state.budget_name));
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut state.search)
+                        .hint_text("Search (Cmd/Ctrl+F)")
+                        .desired_width(180.0)
+                        .id(state.search_id),
+                );
+                if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
+                    response.request_focus();
                 }
-                ui.separator();
-                ui.label("Maintenance");
-                if ui.button("Create validated backup").clicked() {
-                    actions.push(ApplicationAction::Data(DataAction::CreateBackup));
-                    ui.close();
+                if ui
+                    .button(format!("Inbox ({})", state.inbox_counts.total))
+                    .clicked()
+                {
+                    state.navigation.workspace = Workspace::Inbox;
                 }
-                if ui.button("Restore from backup…").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("MNAB backup metadata", &["json"])
-                        .pick_file()
-                    {
-                        actions.push(ApplicationAction::Data(DataAction::RestoreBackup {
-                            metadata_path: path,
-                            confirmed: false,
-                        }));
+                ui.menu_button("Data", |ui| {
+                    use crate::app::command::{ApplicationAction, DataAction};
+                    if ui.button("Budget settings…").clicked() {
+                        state.maintenance_budget_name.clone_from(&state.budget_name);
+                        state.open_dialog(
+                            crate::app::state::Dialog::BudgetMaintenance,
+                            egui::Id::new("data-menu"),
+                            egui::Id::new("toolbar"),
+                        );
+                        ui.close();
                     }
-                    ui.close();
+                    ui.separator();
+                    ui.label("Maintenance");
+                    if ui.button("Create validated backup").clicked() {
+                        actions.push(ApplicationAction::Data(DataAction::CreateBackup));
+                        ui.close();
+                    }
+                    if ui.button("Restore from backup…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("MNAB backup metadata", &["json"])
+                            .pick_file()
+                        {
+                            actions.push(ApplicationAction::Data(DataAction::RestoreBackup {
+                                metadata_path: path,
+                                confirmed: false,
+                            }));
+                        }
+                        ui.close();
+                    }
+                    if ui.button("Validate database").clicked() {
+                        actions.push(ApplicationAction::Data(DataAction::Validate));
+                        ui.close();
+                    }
+                    if ui.button("Reveal data folder…").clicked() {
+                        actions.push(ApplicationAction::Data(DataAction::RevealDataDirectory));
+                        ui.close();
+                    }
+                    if ui.button("Reveal backup folder…").clicked() {
+                        actions.push(ApplicationAction::Data(DataAction::RevealBackupDirectory));
+                        ui.close();
+                    }
+                });
+                if ui.button("Settings").clicked() {
+                    actions.push(crate::app::command::AppCommand::Settings);
                 }
-                if ui.button("Validate database").clicked() {
-                    actions.push(ApplicationAction::Data(DataAction::Validate));
-                    ui.close();
-                }
-                if ui.button("Reveal data folder…").clicked() {
-                    actions.push(ApplicationAction::Data(DataAction::RevealDataDirectory));
-                    ui.close();
-                }
-                if ui.button("Reveal backup folder…").clicked() {
-                    actions.push(ApplicationAction::Data(DataAction::RevealBackupDirectory));
-                    ui.close();
+                if ui
+                    .button(format!("Commands ({})", state.palette_shortcut))
+                    .clicked()
+                {
+                    let initiating = ctx.memory(egui::Memory::focused);
+                    state.palette.open(initiating);
                 }
             });
-            if ui.button("Settings").clicked() {
-                actions.push(crate::app::command::AppCommand::Settings);
-            }
         });
-    });
     let left = egui::SidePanel::left("navigation")
+        .frame(
+            egui::Frame::new()
+                .fill(tokens.sidebar)
+                .inner_margin(egui::Margin::same(12)),
+        )
         .resizable(true)
         .default_width(state.sidebar_width)
         .min_width(160.0)
@@ -518,5 +537,15 @@ mod tests {
         show(&ctx, &mut s, &mut ActionCollector::default());
         let _ = ctx.end_pass();
         assert_eq!(s.inspector_width, saved);
+    }
+
+    #[test]
+    fn daily_navigation_never_exposes_the_storage_location() {
+        let daily_surfaces = [include_str!("shell.rs"), include_str!("sidebar.rs")];
+        assert!(
+            daily_surfaces
+                .into_iter()
+                .all(|source| !source.contains(concat!("database", "_path")))
+        );
     }
 }

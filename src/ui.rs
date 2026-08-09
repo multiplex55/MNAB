@@ -8,5 +8,6 @@ pub mod onboarding;
 pub mod register;
 pub mod shell;
 pub mod sidebar;
+pub mod style;
 pub mod widgets;
 pub mod workspaces;
