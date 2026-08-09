@@ -233,6 +233,7 @@ pub fn show(
                 if let Some(error) = &editor.errors.amount {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
+                let mut remove_split = None;
                 for (i, split) in editor.splits.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
                         ui.label(format!("Split {}", i + 1));
@@ -240,10 +241,88 @@ pub fn show(
                             .category_id
                             .and_then(|id| category_names.iter().find(|c| c.0 == id))
                             .map_or("Choose a category", |c| c.1.as_str());
-                        ui.label(name);
-                        ui.text_edit_singleline(&mut split.amount_text);
-                        ui.text_edit_singleline(&mut split.memo);
+                        egui::ComboBox::from_id_salt(("split-category", i))
+                            .selected_text(name)
+                            .show_ui(ui, |ui| {
+                                for (id, name, group) in &category_names {
+                                    ui.selectable_value(
+                                        &mut split.category_id,
+                                        Some(*id),
+                                        format!("{group} / {name}"),
+                                    );
+                                }
+                            });
+                        ui.add(egui::TextEdit::singleline(&mut split.memo).hint_text("Memo"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut split.amount_text)
+                                .hint_text("Amount")
+                                .horizontal_align(egui::Align::RIGHT),
+                        );
+                        if ui.small_button("Remove").clicked() {
+                            remove_split = Some(i);
+                        }
                     });
+                    if let Some(Some(error)) = editor.errors.split_lines.get(i) {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                    }
+                }
+                if let Some(index) = remove_split {
+                    editor.remove_split(index);
+                }
+                ui.horizontal(|ui| {
+                    ui.label(match editor.remaining() {
+                        Ok(value) => format!("Remaining: {value}"),
+                        Err(_) => "Remaining: —".into(),
+                    });
+                    if ui.button("Add Split").clicked() {
+                        editor.add_split();
+                    }
+                    if ui
+                        .add_enabled(
+                            !editor.splits.is_empty(),
+                            egui::Button::new("Distribute Remainder"),
+                        )
+                        .clicked()
+                    {
+                        if let Err(errors) = editor.distribute_remainder() {
+                            editor.errors = errors;
+                        }
+                    }
+                });
+                if editor.reconciled && !editor.protected_edit_confirmed {
+                    ui.group(|ui| {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            "This transaction is reconciled and protected.",
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("Cancel").clicked() {
+                                commands.push(crate::app::command::AppCommand::Cancel);
+                            }
+                            if ui.button("Edit Anyway").clicked() {
+                                editor.protected_edit_confirmed = true;
+                            }
+                        });
+                    });
+                }
+                if editor.closed_account && !editor.closed_account_confirmed {
+                    ui.group(|ui| {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            "This account is closed. Editing will not reopen it.",
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("Cancel").clicked() {
+                                commands.push(crate::app::command::AppCommand::Cancel);
+                            }
+                            if ui.button("Edit Anyway").clicked() {
+                                editor.closed_account_confirmed = true;
+                            }
+                        });
+                    });
+                }
+                if let Some(error) = &editor.errors.form {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 ui.horizontal(|ui| {
                     if ui

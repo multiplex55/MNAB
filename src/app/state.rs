@@ -271,6 +271,11 @@ pub struct AccountEditorState {
 #[derive(Clone, Debug)]
 pub struct TransferEditorState {
     pub draft: crate::ui::workspaces::register::TransferEditor,
+    /// Present when the workflow edits an existing linked transfer.  Keeping this
+    /// identity prevents an edit from silently becoming a new transfer/categorized row.
+    pub transfer_id: Option<crate::domain::TransferId>,
+    pub edited_leg_id: Option<crate::domain::TransactionId>,
+    pub other_leg_id: Option<crate::domain::TransactionId>,
     pub metadata: EditorMetadata,
 }
 #[derive(Clone, Debug)]

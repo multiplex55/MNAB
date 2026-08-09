@@ -493,7 +493,9 @@ impl ApplicationRuntime {
                         destination_summary.account_type,
                     );
                     destination_account.id = to;
-                    let transfer_id = crate::domain::TransferId::new();
+                    let transfer_id = editor
+                        .transfer_id
+                        .unwrap_or_else(crate::domain::TransferId::new);
                     let source_amount = amount.checked_neg().map_err(|error| error.to_string())?;
                     let (source_body, destination_body) =
                         crate::domain::TransactionBody::categorized_transfer(
@@ -507,7 +509,15 @@ impl ApplicationRuntime {
                         )
                         .map_err(|error| error.to_string())?;
                     let make = |account_id, leg_amount, body| crate::domain::Transaction {
-                        id: crate::domain::TransactionId::new(),
+                        id: if account_id == from {
+                            editor
+                                .edited_leg_id
+                                .unwrap_or_else(crate::domain::TransactionId::new)
+                        } else {
+                            editor
+                                .other_leg_id
+                                .unwrap_or_else(crate::domain::TransactionId::new)
+                        },
                         budget_id,
                         account_id,
                         date,
@@ -1237,12 +1247,78 @@ impl ApplicationRuntime {
                     .last_successful
                     .as_ref()
                     .and_then(|p| p.rows.iter().find(|r| r.transaction_id == id));
-                if let Some(draft) = row.and_then(|row| {
+                if let Some(row) = row.filter(|row| row.is_transfer) {
+                    let transfer_id = row.transfer_id.as_deref().and_then(|id| id.parse().ok());
+                    let other =
+                        self.view
+                            .register_query
+                            .last_successful
+                            .as_ref()
+                            .and_then(|page| {
+                                page.rows.iter().find(|candidate| {
+                                    candidate.transaction_id != row.transaction_id
+                                        && candidate.transfer_id == row.transfer_id
+                                })
+                            });
+                    if let Some(other) = other {
+                        let (source, destination, source_id, destination_id) =
+                            if row.outflow_cents > 0 {
+                                (
+                                    row.account_id,
+                                    other.account_id,
+                                    row.transaction_id,
+                                    other.transaction_id,
+                                )
+                            } else {
+                                (
+                                    other.account_id,
+                                    row.account_id,
+                                    other.transaction_id,
+                                    row.transaction_id,
+                                )
+                            };
+                        self.view.editor = crate::app::state::EditorState::CreatingTransfer(
+                            crate::app::state::TransferEditorState {
+                                draft: crate::ui::workspaces::register::TransferEditor {
+                                    from_account: Some(source),
+                                    to_account: Some(destination),
+                                    amount: crate::domain::Money::from_minor_units(
+                                        row.inflow_cents.max(row.outflow_cents),
+                                    )
+                                    .to_string(),
+                                    date: row.date.to_string(),
+                                    memo: row.memo.clone().unwrap_or_default(),
+                                    category_id: row.category_id,
+                                    ..Default::default()
+                                },
+                                transfer_id,
+                                edited_leg_id: Some(source_id),
+                                other_leg_id: Some(destination_id),
+                                metadata: crate::app::state::EditorMetadata::new(egui::Id::new(
+                                    "register-transfer",
+                                )),
+                            },
+                        );
+                    } else {
+                        self.view.notifications.push(crate::app::state::Notification {
+                            kind: crate::app::state::NotificationKind::Information,
+                            title: "Loading linked transfer".into(),
+                            detail: "Both linked transfer legs are required before the dedicated transfer editor can open.".into(),
+                            persistent: false,
+                        });
+                    }
+                } else if let Some(mut draft) = row.and_then(|row| {
                     crate::ui::workspaces::register::editor_from_row(
                         row,
                         crate::app::state::EditorMetadata::new(egui::Id::new("register")),
                     )
                 }) {
+                    draft.closed_account = self
+                        .view
+                        .accounts
+                        .iter()
+                        .find(|account| Some(account.id) == draft.account_id)
+                        .is_some_and(|account| account.closed);
                     self.view.editor = crate::app::state::EditorState::EditingTransaction(draft);
                 } else {
                     self.view
@@ -1589,6 +1665,9 @@ impl ApplicationRuntime {
                         from_account: self.view.selected_account,
                         ..Default::default()
                     },
+                    transfer_id: None,
+                    edited_leg_id: None,
+                    other_leg_id: None,
                     metadata: EditorMetadata::new(egui::Id::new("register")),
                 });
                 return;

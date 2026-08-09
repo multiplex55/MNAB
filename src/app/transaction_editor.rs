@@ -225,6 +225,33 @@ impl TransactionEditorState {
         TransactionBody::split_remaining(amount, &lines)
             .map_err(|_| form_error("Split total overflowed"))
     }
+    /// Adds a blank, identity-bearing split form.  A blank category is deliberate: the
+    /// line cannot be persisted until the user chooses a stable `CategoryId`.
+    pub fn add_split(&mut self) {
+        if self.splits.is_empty() {
+            self.splits.push(SplitLineForm::default());
+        }
+        self.splits.push(SplitLineForm::default());
+        self.category_id = None;
+    }
+
+    pub fn remove_split(&mut self, index: usize) {
+        if index < self.splits.len() {
+            self.splits.remove(index);
+        }
+    }
+
+    /// Uses the domain's checked-cent implementation and writes the exact remainder to
+    /// the final line. No allocation/division (and therefore no floating point) occurs.
+    pub fn distribute_remainder(&mut self) -> Result<(), TransactionEditorErrors> {
+        let (_, parent, mut lines) = self.validate_parts(false)?;
+        TransactionBody::distribute_remainder(parent, &mut lines)
+            .map_err(|error| form_error(&error.to_string()))?;
+        for (form, line) in self.splits.iter_mut().zip(lines) {
+            form.amount_text = line.amount.to_string();
+        }
+        Ok(())
+    }
     fn validate_parts(
         &self,
         check_total: bool,
@@ -287,7 +314,7 @@ impl TransactionEditorState {
                     continue;
                 }
             };
-            match parse_currency_field(&line.amount_text) {
+            match parse_split_currency_field(&line.amount_text) {
                 Ok(amount) => lines.push(Subtransaction {
                     category_id: category,
                     amount,
@@ -388,6 +415,17 @@ pub fn parse_currency_field(text: &str) -> Result<Money, &'static str> {
     }
     if s.starts_with('-') || s.starts_with("$-") || s.starts_with('+') {
         return Err("Enter a non-negative amount");
+    }
+    s.parse().map_err(|_| "Invalid amount")
+}
+
+/// Split amounts are signed because a split may contain refunds/credits and an outflow
+/// parent necessarily has a negative cent total. Unlike the two-column parent controls,
+/// there is no separate inflow/outflow field from which to infer the sign.
+pub fn parse_split_currency_field(text: &str) -> Result<Money, &'static str> {
+    let s = text.trim();
+    if s.is_empty() {
+        return Ok(Money::ZERO);
     }
     s.parse().map_err(|_| "Invalid amount")
 }
@@ -535,6 +573,36 @@ mod tests {
         ];
         TransactionBody::distribute_remainder(Money::from_minor_units(100), &mut lines).unwrap();
         assert_eq!(lines[1].amount.minor_units(), 67);
+        let negative = split_editor("", &["-0.75", "0.75"])
+            .build_transaction(BudgetId::new())
+            .unwrap();
+        assert_eq!(negative.amount, Money::ZERO);
+    }
+
+    #[test]
+    fn split_actions_keep_minimum_shape_and_apply_exact_final_remainder() {
+        let mut e = editor();
+        e.category_id = Some(CategoryId::new());
+        e.inflow_text = "1.00".into();
+        e.add_split();
+        assert_eq!(e.splits.len(), 2);
+        for line in &mut e.splits {
+            line.category_id = Some(CategoryId::new());
+            line.amount_text = "0.33".into();
+        }
+        e.distribute_remainder().unwrap();
+        assert_eq!(
+            parse_split_currency_field(&e.splits[1].amount_text).unwrap(),
+            Money::from_minor_units(67)
+        );
+        e.remove_split(0);
+        assert!(
+            e.build_transaction(BudgetId::new())
+                .unwrap_err()
+                .form
+                .unwrap()
+                .contains("two")
+        );
     }
     #[test]
     fn original_properties_survive_and_transfers_are_rejected() {
