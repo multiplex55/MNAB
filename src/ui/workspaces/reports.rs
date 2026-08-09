@@ -236,13 +236,11 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, commands: &mut ActionCollector)
                 }
                 ui.strong(format!("Total {}", format_minor_units(view.total_cents)));
             }
-            if ui.button("Export CSV").clicked() {
-                let destination = state
-                    .database_path
-                    .as_ref()
-                    .and_then(|p| p.parent())
-                    .unwrap_or_else(|| std::path::Path::new("."))
-                    .join("report.csv");
+            if ui.button("Export CSV").clicked()
+                && let Some(destination) = rfd::FileDialog::new()
+                    .set_file_name("report.csv")
+                    .save_file()
+            {
                 commands.push(ReportAction::ExportCsv { destination });
             }
             ui.weak("Aggregated results only");

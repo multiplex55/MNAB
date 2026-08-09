@@ -116,7 +116,7 @@ fn show_detail(ui: &mut egui::Ui, state: &AppState, actions: &mut ActionCollecto
             })
             .clicked()
         {
-            let mut c = crate::domain::Category {
+            let c = crate::domain::Category {
                 id: detail.category.id,
                 group_id: detail.category.group_id,
                 name: detail.category.name.clone(),

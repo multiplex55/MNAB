@@ -9,21 +9,20 @@ use crate::{
 };
 
 fn account_row(ui: &mut egui::Ui, account: &AccountSummary, selected: bool) -> egui::Response {
-    let warning = if account.unreconciled { " ⚠" } else { "" };
-    let kind = if account.tracking { " · tracking" } else { "" };
-    let closed = if account.closed { " · closed" } else { "" };
-    ui.selectable_label(
-        selected,
-        format!(
-            "{}{}{}{}{}   {}",
+    ui.horizontal(|ui| {
+        let label = format!(
+            "{}{}{}",
             if account.favorite { "★ " } else { "" },
             account.name,
-            warning,
-            kind,
-            closed,
-            crate::ui::format::money(account.working_balance)
-        ),
-    )
+            if account.unreconciled { "  ⚠" } else { "" },
+        );
+        let response = ui.selectable_label(selected, label);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            crate::ui::format::money_cell(ui, account.working_balance);
+        });
+        response
+    })
+    .inner
 }
 
 /// Stable traversal order used by arrow-key navigation. Collapsed descendants are omitted, but
@@ -55,81 +54,6 @@ pub fn traversal(groups: &[AccountGroup], accounts: &[AccountSummary]) -> Vec<Ac
     out
 }
 
-fn group(
-    ui: &mut egui::Ui,
-    id: AccountGroupId,
-    depth: usize,
-    state: &mut AppState,
-    actions: &mut ActionCollector,
-) -> Option<AccountId> {
-    let Some(index) = state.account_groups.iter().position(|g| g.id == id) else {
-        return None;
-    };
-    let (name, collapsed) = {
-        let g = &state.account_groups[index];
-        (g.name.clone(), g.collapsed)
-    };
-    ui.horizontal(|ui| {
-        ui.add_space(depth as f32 * 12.0);
-        if ui.small_button(if collapsed { "▶" } else { "▼" }).clicked() {
-            state.account_groups[index].collapsed = !collapsed;
-        }
-        ui.strong(name);
-    });
-    if collapsed {
-        return None;
-    }
-    let mut selected = None;
-    let account_ids: Vec<_> = state
-        .accounts
-        .iter()
-        .filter(|a| a.group_id == Some(id))
-        .map(|a| a.id)
-        .collect();
-    for account_id in account_ids {
-        let account = state.accounts.iter().find(|a| a.id == account_id).unwrap();
-        let r = ui
-            .horizontal(|ui| {
-                ui.add_space((depth + 1) as f32 * 12.0);
-                account_row(ui, account, state.selected_account == Some(account.id))
-            })
-            .inner;
-        let account_id = account.id;
-        let closed = account.closed;
-        let favorite = account.favorite;
-        r.context_menu(|ui| {
-            use crate::app::command::{AccountCommand, ApplicationAction, FinancialCommand};
-            if ui.button("Edit / rename…").clicked() { state.selected_account = Some(account_id); actions.push(AppCommand::EditAccount); ui.close(); }
-            if ui.button("Move to ungrouped").clicked() { actions.push(ApplicationAction::Financial(FinancialCommand::Account(AccountCommand::MoveToGroup { id: account_id, group_id: None }))); ui.close(); }
-            if ui.button(if closed { "Reopen" } else { "Close…" }).clicked() { actions.push(ApplicationAction::Financial(FinancialCommand::Account(if closed { AccountCommand::Reopen(account_id) } else { AccountCommand::Close(account_id) }))); ui.close(); }
-            if ui.button(if favorite { "Remove favorite" } else { "Favorite" }).clicked() { actions.push(ApplicationAction::Financial(FinancialCommand::Account(AccountCommand::SetFavorite { id: account_id, favorite: !favorite }))); ui.close(); }
-            if ui.button("Delete if genuinely unused…").clicked() { actions.push(ApplicationAction::Financial(FinancialCommand::Account(AccountCommand::DeleteUnused(account_id)))); ui.close(); }
-            ui.small("This deletes only the unused account record; it never deletes or resets mnab.sqlite3.");
-        });
-        if r.clicked() {
-            selected = Some(account_id);
-        }
-    }
-    let mut children: Vec<_> = state
-        .account_groups
-        .iter()
-        .filter(|g| g.parent_group_id == Some(id))
-        .map(|g| g.id)
-        .collect();
-    children.sort_by_key(|child| {
-        state
-            .account_groups
-            .iter()
-            .find(|g| g.id == *child)
-            .map(|g| g.sort_order)
-            .unwrap_or(0)
-    });
-    for child in children {
-        selected = group(ui, child, depth + 1, state, actions).or(selected);
-    }
-    selected
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccountSection {
     OnBudget,
@@ -150,30 +74,53 @@ pub fn account_section(account: &AccountSummary) -> AccountSection {
 #[must_use]
 pub fn navigation_items(inbox_count: usize) -> Vec<(String, Workspace)> {
     vec![
-        ("Overview".into(), Workspace::Overview),
         ("Budget".into(), Workspace::Budget),
-        ("All Transactions".into(), Workspace::AllTransactions),
         ("Reports".into(), Workspace::Reports),
+        ("All Transactions".into(), Workspace::AllTransactions),
         (format!("Inbox ({inbox_count})"), Workspace::Inbox),
-        ("Categories · Structure".into(), Workspace::Categories),
+        ("Manage Categories".into(), Workspace::Categories),
     ]
 }
 
-fn account_kind(account: &AccountSummary) -> &'static str {
-    if account.tracking {
-        return "TRACKING";
-    }
-    match account.account_type {
-        crate::domain::AccountType::CreditCard => "CREDIT CARD",
-        _ => "CASH",
-    }
+/// Deterministic ordering prevents refreshes from moving keyboard targets under the user.
+#[must_use]
+pub fn ordered_accounts(
+    accounts: &[AccountSummary],
+    section: AccountSection,
+) -> Vec<&AccountSummary> {
+    let mut result: Vec<_> = accounts
+        .iter()
+        .filter(|account| account_section(account) == section)
+        .collect();
+    result.sort_by_key(|account| {
+        (
+            !account.favorite,
+            account.name.to_ascii_lowercase(),
+            account.id,
+        )
+    });
+    result
+}
+
+#[must_use]
+pub fn section_balance(accounts: &[&AccountSummary]) -> Option<Money> {
+    accounts
+        .iter()
+        .try_fold(Money::ZERO, |sum, account| {
+            sum.checked_add(account.working_balance)
+        })
+        .ok()
 }
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollector) {
-    ui.heading("MNAB");
-    ui.label(&state.budget_name);
-    ui.separator();
-    for (label, workspace) in navigation_items(state.inbox_counts.total) {
+    for (index, (label, workspace)) in navigation_items(state.inbox_counts.total)
+        .into_iter()
+        .enumerate()
+    {
+        if index == 4 {
+            ui.add_space(4.0);
+            ui.weak("ADMINISTRATION");
+        }
         if ui
             .selectable_label(state.navigation.workspace == workspace, label)
             .clicked()
@@ -181,32 +128,25 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollect
             state.navigation.workspace = workspace;
         }
     }
-    ui.small("Categories manages groups, names, targets, and structure—not a monthly plan.");
     ui.separator();
-    for section in ["CASH", "CREDIT CARD", "TRACKING"] {
-        let accounts: Vec<_> = state
-            .accounts
-            .iter()
-            .filter(|account| !account.closed && account_kind(account) == section)
-            .collect();
+    for (title, section) in [
+        ("BUDGET ACCOUNTS", AccountSection::OnBudget),
+        ("TRACKING", AccountSection::Tracking),
+        ("CLOSED", AccountSection::Closed),
+    ] {
+        let accounts = ordered_accounts(&state.accounts, section);
         if accounts.is_empty() {
             continue;
         }
-        let total = accounts
-            .iter()
-            .try_fold(Money::ZERO, |sum, account| {
-                sum.checked_add(account.working_balance)
-            })
-            .unwrap_or(Money::ZERO);
         ui.horizontal(|ui| {
-            ui.strong(section);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                crate::ui::format::money_cell(ui, total);
-            });
+            ui.strong(title);
+            if let Some(total) = section_balance(&accounts) {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    crate::ui::format::money_cell(ui, total);
+                });
+            }
         });
-        let mut ordered = accounts;
-        ordered.sort_by_key(|account| (!account.favorite, account.name.to_ascii_lowercase()));
-        for account in ordered {
+        for account in accounts {
             if account_row(
                 ui,
                 account,
@@ -218,18 +158,16 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollect
                 state.navigation.workspace = Workspace::Account(account.id);
             }
         }
+        ui.add_space(6.0);
     }
     ui.separator();
     if ui.button("＋ Add Account").clicked() {
         actions.push(AppCommand::AddAccount);
     }
-    if ui.button("＋ Add Group").clicked() {
+    if ui.small_button("Add account group").clicked() {
         actions.push(AppCommand::AddAccountGroup);
     }
 }
-
-#[allow(dead_code)]
-fn _money(_: Money) {}
 
 #[cfg(test)]
 mod tests {
@@ -279,12 +217,46 @@ mod tests {
     #[test]
     fn every_sidebar_item_has_a_workspace_destination() {
         let items = navigation_items(7);
-        assert_eq!(items.len(), 6);
+        assert_eq!(items.len(), 5);
         assert!(
             items
                 .iter()
                 .any(|(label, route)| label == "Inbox (7)" && *route == Workspace::Inbox)
         );
         assert!(items.iter().all(|(label, _)| !label.is_empty()));
+        assert_eq!(items[0].1, Workspace::Budget);
+        assert_eq!(items[1].1, Workspace::Reports);
+        assert_eq!(items[2].1, Workspace::AllTransactions);
+        assert_eq!(items[4].1, Workspace::Categories);
+    }
+
+    #[test]
+    fn classification_and_ordering_are_stable() {
+        let make = |name: &str, tracking, closed, favorite| AccountSummary {
+            id: AccountId::new(),
+            name: name.into(),
+            working_balance: Money::ZERO,
+            unreconciled: false,
+            tracking,
+            closed,
+            group_id: None,
+            favorite,
+            cleared_balance: Money::ZERO,
+            account_type: crate::domain::AccountType::Checking,
+        };
+        let accounts = vec![
+            make("zebra", false, false, false),
+            make("Alpha", false, false, false),
+            make("Favorite", false, false, true),
+            make("Tracker", true, false, false),
+            make("Closed", false, true, false),
+        ];
+        assert_eq!(account_section(&accounts[3]), AccountSection::Tracking);
+        assert_eq!(account_section(&accounts[4]), AccountSection::Closed);
+        let names: Vec<_> = ordered_accounts(&accounts, AccountSection::OnBudget)
+            .into_iter()
+            .map(|account| account.name.as_str())
+            .collect();
+        assert_eq!(names, ["Favorite", "Alpha", "zebra"]);
     }
 }
