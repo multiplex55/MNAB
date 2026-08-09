@@ -225,6 +225,50 @@ pub fn advance_after_resolution(
         .map(|item| item.id.clone())
 }
 
+/// Transaction cleanup is always performed in the canonical All Transactions
+/// register. Non-transaction items intentionally return `None` for their direct
+/// detail workflows.
+#[must_use]
+pub fn transaction_destination(
+    item: &InboxItem,
+) -> Option<crate::app::navigation::RegisterDestination> {
+    use crate::app::{
+        search::{RegisterSort, SearchAst, SearchTerm},
+        view_model::{RegisterScope, RegisterSortDirection, RegisterSortField},
+    };
+    let transaction_cleanup = matches!(item.id, InboxItemId::Transaction(_))
+        || item.reasons.iter().any(|reason| {
+            matches!(
+                reason,
+                InboxReason::Unapproved | InboxReason::Uncategorized | InboxReason::StaleUncleared
+            )
+        });
+    if !transaction_cleanup {
+        return None;
+    }
+    let mut terms = Vec::new();
+    if item.reasons.contains(&InboxReason::StagedImport) {
+        terms.push(SearchTerm::Imported(true));
+    }
+    if item.reasons.contains(&InboxReason::Unapproved) {
+        terms.push(SearchTerm::Approved(false));
+    }
+    if item.reasons.contains(&InboxReason::Uncategorized) {
+        terms.push(SearchTerm::Uncategorized(true));
+    }
+    if item.reasons.contains(&InboxReason::StaleUncleared) {
+        terms.push(SearchTerm::Cleared(false));
+    }
+    Some(crate::app::navigation::RegisterDestination {
+        scope: RegisterScope::AllTransactions,
+        filter: SearchAst { terms },
+        sort: RegisterSort {
+            field: RegisterSortField::Date,
+            direction: RegisterSortDirection::Descending,
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
