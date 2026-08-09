@@ -64,6 +64,23 @@ impl Default for TransactionSelection {
 }
 
 impl TransactionSelection {
+    /// Retains stable explicit identities after a same-query projection refresh.
+    pub fn retain_valid_ids(&mut self, valid_ids: &BTreeSet<TransactionId>) {
+        if let Self::Explicit {
+            ids,
+            anchor,
+            cursor,
+        } = self
+        {
+            ids.retain(|id| valid_ids.contains(id));
+            if anchor.is_some_and(|id| !valid_ids.contains(&id)) {
+                *anchor = None;
+            }
+            if cursor.is_some_and(|id| !valid_ids.contains(&id)) {
+                *cursor = None;
+            }
+        }
+    }
     #[must_use]
     pub fn is_empty(&self) -> bool {
         matches!(self, Self::Explicit { ids, .. } if ids.is_empty())
@@ -166,20 +183,7 @@ impl TransactionSelection {
             self.clear();
             return;
         }
-        if let Self::Explicit {
-            ids,
-            anchor,
-            cursor,
-        } = self
-        {
-            ids.retain(|id| valid_ids.contains(id));
-            if anchor.is_some_and(|id| !valid_ids.contains(&id)) {
-                *anchor = None;
-            }
-            if cursor.is_some_and(|id| !valid_ids.contains(&id)) {
-                *cursor = None;
-            }
-        }
+        self.retain_valid_ids(valid_ids);
     }
     pub fn move_cursor(
         &mut self,

@@ -4,6 +4,7 @@ pub mod budget_view;
 pub mod inspector;
 pub mod keyboard;
 pub mod onboarding;
+pub mod register;
 pub mod shell;
 pub mod sidebar;
 pub mod widgets;
