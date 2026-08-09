@@ -92,6 +92,9 @@ impl ApplicationRuntime {
                 title: "Settings were reset".into(),
                 detail: "settings.json is malformed or contains invalid supported-version data; defaults are in use.".into(),
                 persistent: true,
+                created_at: time::OffsetDateTime::now_utc(),
+                expires_at: None,
+                retry_action: None,
             });
         }
         let mut runtime = Self {
@@ -226,6 +229,9 @@ impl ApplicationRuntime {
             title: title.into(),
             detail: detail.into(),
             persistent: true,
+            created_at: time::OffsetDateTime::now_utc(),
+            expires_at: None,
+            retry_action: None,
         });
     }
     pub fn save_settings(&mut self) -> std::io::Result<()> {
@@ -1046,6 +1052,9 @@ impl ApplicationRuntime {
                 title: "Confirmation required".into(),
                 detail: "Review and confirm this change before continuing.".into(),
                 persistent: true,
+                created_at: time::OffsetDateTime::now_utc(),
+                expires_at: None,
+                retry_action: None,
             });
             self.pending_commands.insert(id, command);
             return;
@@ -1313,6 +1322,9 @@ impl ApplicationRuntime {
                             title: "Loading linked transfer".into(),
                             detail: "Both linked transfer legs are required before the dedicated transfer editor can open.".into(),
                             persistent: false,
+                            created_at: time::OffsetDateTime::now_utc(),
+                            expires_at: Some(time::OffsetDateTime::now_utc() + time::Duration::seconds(8)),
+                            retry_action: None,
                         });
                     }
                 } else if let Some(mut draft) = row.and_then(|row| {
@@ -1338,6 +1350,11 @@ impl ApplicationRuntime {
                                 "The complete transaction and splits are required before editing."
                                     .into(),
                             persistent: false,
+                            created_at: time::OffsetDateTime::now_utc(),
+                            expires_at: Some(
+                                time::OffsetDateTime::now_utc() + time::Duration::seconds(8),
+                            ),
+                            retry_action: None,
                         });
                 }
             }
@@ -1771,6 +1788,9 @@ impl ApplicationRuntime {
             title: "Command unavailable".into(),
             detail: disabled.into(),
             persistent: false,
+            created_at: time::OffsetDateTime::now_utc(),
+            expires_at: Some(time::OffsetDateTime::now_utc() + time::Duration::seconds(8)),
+            retry_action: None,
         });
     }
 
@@ -1909,6 +1929,13 @@ impl ApplicationRuntime {
                     title: title.into(),
                     detail,
                     persistent,
+                    created_at: time::OffsetDateTime::now_utc(),
+                    expires_at: if persistent {
+                        None
+                    } else {
+                        Some(time::OffsetDateTime::now_utc() + time::Duration::seconds(8))
+                    },
+                    retry_action: None,
                 });
             }
         }
@@ -2056,7 +2083,7 @@ impl ApplicationRuntime {
             }
             Err(error) => {
                 let message = safe.map_or_else(
-                    || format!("Refresh failed: {error}"),
+                    || crate::ui::notifications::sanitize_failure(&error.to_string()),
                     |v| v.rendered_message(),
                 );
                 let _ = self
@@ -2176,6 +2203,12 @@ impl ApplicationRuntime {
                     ApplicationAction::Financial(FinancialCommand::Assignment(_)) => {
                         "Assignments updated"
                     }
+                    ApplicationAction::Financial(FinancialCommand::Import(_)) => {
+                        "Import completed"
+                    }
+                    ApplicationAction::Financial(FinancialCommand::Reconciliation(_)) => {
+                        "Reconciliation completed"
+                    }
                     _ => "Changes saved",
                 };
                 if editor_matches {
@@ -2275,13 +2308,24 @@ impl ApplicationRuntime {
         if let Some(command) = self.pending_commands.get(&cid)
             && command.status == CommandStatus::Failed
         {
-            let detail = command.safe_failure.as_ref().map_or_else(
-                || "The operation failed without changing your data.".to_owned(),
-                |failure| format!("{failure:?}"),
+            let (detail, retryable) = command.safe_failure.as_ref().map_or_else(
+                || {
+                    (
+                        "The operation failed without changing your data.".to_owned(),
+                        false,
+                    )
+                },
+                |failure| match failure {
+                    FailureSafety::Retryable(safe) => (safe.rendered_message(), true),
+                    FailureSafety::NonRetryable(safe) => (safe.rendered_message(), false),
+                },
             );
-            self.view
-                .notifications
-                .push(Notification::actionable_error("Operation failed", detail));
+            let notice = if retryable {
+                Notification::actionable_error("Operation failed", detail)
+            } else {
+                Notification::persistent_error("Operation failed", detail)
+            };
+            self.view.notifications.push(notice);
         }
         let editor_owns_response = editor_matches;
         let (editor_result, editor_error) =
