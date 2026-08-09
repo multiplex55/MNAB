@@ -20,6 +20,8 @@ pub trait BudgetRepository {
 pub trait AccountRepository {
     fn put_account(&mut self, value: &Account) -> Result<(), RepositoryError>;
     fn account(&mut self, id: AccountId) -> Result<Option<Account>, RepositoryError>;
+    fn account_is_used(&mut self, id: AccountId) -> Result<bool, RepositoryError>;
+    fn delete_account(&mut self, id: AccountId) -> Result<(), RepositoryError>;
 }
 pub trait CategoryRepository {
     fn put_group(&mut self, value: &CategoryGroup) -> Result<(), RepositoryError>;
@@ -196,6 +198,16 @@ impl AccountRepository for InMemoryRepositories {
     }
     fn account(&mut self, id: AccountId) -> Result<Option<Account>, RepositoryError> {
         Ok(self.accounts.get(&id).cloned())
+    }
+    fn account_is_used(&mut self, id: AccountId) -> Result<bool, RepositoryError> {
+        Ok(self
+            .transactions
+            .values()
+            .any(|transaction| transaction.account_id == id))
+    }
+    fn delete_account(&mut self, id: AccountId) -> Result<(), RepositoryError> {
+        self.accounts.remove(&id);
+        Ok(())
     }
 }
 impl CategoryRepository for InMemoryRepositories {

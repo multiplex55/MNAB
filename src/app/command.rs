@@ -78,8 +78,23 @@ pub enum FinancialCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AccountCommand {
     Create(Account),
+    CreateWithOpening {
+        account: Account,
+        opening_magnitude: crate::domain::Money,
+        opening_date: crate::domain::TransactionDate,
+    },
     Update(Account),
     Close(AccountId),
+    Reopen(AccountId),
+    SetFavorite {
+        id: AccountId,
+        favorite: bool,
+    },
+    MoveToGroup {
+        id: AccountId,
+        group_id: Option<crate::domain::AccountGroupId>,
+    },
+    DeleteUnused(AccountId),
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CategoryCommand {
@@ -140,6 +155,10 @@ impl AssignmentBatchChange {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransactionCommand {
     Save(Transaction),
+    SaveTransfer {
+        source: Transaction,
+        destination: Transaction,
+    },
     Delete {
         transaction_id: TransactionId,
         account_id: AccountId,
@@ -192,6 +211,7 @@ pub enum ImportCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReconciliationCommand {
     Complete(ReconciliationId),
+    CompleteSnapshot(crate::domain::Reconciliation),
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TargetCommand {

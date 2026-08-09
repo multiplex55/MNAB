@@ -47,11 +47,20 @@ impl BudgetRepository for SqliteRepositories<'_> {
 }
 impl AccountRepository for SqliteRepositories<'_> {
     fn put_account(&mut self, v: &Account) -> Result<(), RepositoryError> {
-        self.transaction.execute("INSERT INTO accounts(id,budget_id,name,account_type,sort_order,closed,note,favorite,created_at,modified_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,datetime('now'),datetime('now')) ON CONFLICT(id) DO UPDATE SET name=excluded.name,sort_order=excluded.sort_order,closed=excluded.closed,note=excluded.note,favorite=excluded.favorite,modified_at=datetime('now')",(v.id.to_string(),v.budget_id.to_string(),&v.name,account_type(v.account_type),v.sort_order,v.closed,&v.note,v.favorite)).map(|_|()).map_err(repo)
+        self.transaction.execute("INSERT INTO accounts(id,budget_id,group_id,name,account_type,sort_order,closed,note,favorite,created_at,modified_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,datetime('now'),datetime('now')) ON CONFLICT(id) DO UPDATE SET group_id=excluded.group_id,name=excluded.name,sort_order=excluded.sort_order,closed=excluded.closed,note=excluded.note,favorite=excluded.favorite,modified_at=datetime('now')",(v.id.to_string(),v.budget_id.to_string(),v.group_id.map(|id| id.to_string()),&v.name,account_type(v.account_type),v.sort_order,v.closed,&v.note,v.favorite)).map(|_|()).map_err(repo)
     }
     fn account(&mut self, id: AccountId) -> Result<Option<Account>, RepositoryError> {
         use rusqlite::OptionalExtension;
-        self.transaction.query_row("SELECT budget_id,name,account_type,closed,note,sort_order,favorite FROM accounts WHERE id=?1",[id.to_string()],|r|Ok(Account{id,budget_id:parse(r.get::<_,String>(0)?)?,group_id:None,name:r.get(1)?,account_type:parse_account_type(&r.get::<_,String>(2)?)?,closed:r.get(3)?,note:r.get(4)?,sort_order:r.get(5)?,favorite:r.get(6)?})).optional().map_err(repo)
+        self.transaction.query_row("SELECT budget_id,group_id,name,account_type,closed,note,sort_order,favorite FROM accounts WHERE id=?1",[id.to_string()],|r|Ok(Account{id,budget_id:parse(r.get::<_,String>(0)?)?,group_id:r.get::<_,Option<String>>(1)?.map(|value| parse(value)).transpose()?,name:r.get(2)?,account_type:parse_account_type(&r.get::<_,String>(3)?)?,closed:r.get(4)?,note:r.get(5)?,sort_order:r.get(6)?,favorite:r.get(7)?})).optional().map_err(repo)
+    }
+    fn account_is_used(&mut self, id: AccountId) -> Result<bool, RepositoryError> {
+        self.transaction.query_row("SELECT EXISTS(SELECT 1 FROM transactions WHERE account_id=?1 UNION ALL SELECT 1 FROM reconciliations WHERE account_id=?1 UNION ALL SELECT 1 FROM import_batches WHERE account_id=?1 UNION ALL SELECT 1 FROM targets WHERE account_id=?1 UNION ALL SELECT 1 FROM scheduled_transactions WHERE account_id=?1 UNION ALL SELECT 1 FROM import_sources WHERE account_id=?1 UNION ALL SELECT 1 FROM import_identities WHERE account_id=?1 UNION ALL SELECT 1 FROM credit_card_payment_categories WHERE account_id=?1 UNION ALL SELECT 1 FROM category_goals WHERE account_id=?1 UNION ALL SELECT 1 FROM merchant_rules WHERE account_id=?1)", [id.to_string()], |row| row.get(0)).map_err(repo)
+    }
+    fn delete_account(&mut self, id: AccountId) -> Result<(), RepositoryError> {
+        self.transaction
+            .execute("DELETE FROM accounts WHERE id=?1", [id.to_string()])
+            .map(|_| ())
+            .map_err(repo)
     }
 }
 fn parse<T: std::str::FromStr>(s: String) -> rusqlite::Result<T> {
