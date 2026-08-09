@@ -615,15 +615,12 @@ pub fn empty(ui: &mut egui::Ui) {
 }
 
 fn empty_budget(ui: &mut egui::Ui, actions: &mut ActionCollector) {
-    ui.vertical_centered(|ui| {
-        ui.heading("Build your budget");
-        ui.label("Add a category group, then organize categories in the Categories workspace.");
-        if ui.button("Add Category Group").clicked() {
-            actions.push(ApplicationAction::Category(
-                crate::app::command::CategoryAction::NewGroup,
-            ));
-        }
-    });
+    let model = crate::ui::empty_state::model(
+        crate::ui::empty_state::EmptyState::BudgetWithoutCategories,
+        true,
+        false,
+    );
+    crate::ui::empty_state::show(ui, &model, actions);
 }
 
 #[cfg(test)]

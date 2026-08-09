@@ -380,16 +380,37 @@ pub struct Notification {
     pub title: String,
     pub detail: String,
     pub persistent: bool,
+    pub created_at: time::OffsetDateTime,
+    pub expires_at: Option<time::OffsetDateTime>,
+    pub retry_action: Option<NotificationRetryAction>,
 }
 impl Notification {
-    #[must_use]
-    pub fn success(title: impl Into<String>, detail: impl Into<String>) -> Self {
+    const ORDINARY_LIFETIME: time::Duration = time::Duration::seconds(8);
+
+    fn transient(
+        kind: NotificationKind,
+        title: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        let created_at = time::OffsetDateTime::now_utc();
         Self {
-            kind: NotificationKind::Information,
+            kind,
             title: title.into(),
             detail: detail.into(),
             persistent: false,
+            created_at,
+            expires_at: Some(created_at + Self::ORDINARY_LIFETIME),
+            retry_action: None,
         }
+    }
+    #[must_use]
+    pub fn success(title: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::transient(NotificationKind::Information, title, detail)
+    }
+
+    #[must_use]
+    pub fn warning(title: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::transient(NotificationKind::Warning, title, detail)
     }
 
     #[must_use]
@@ -399,8 +420,26 @@ impl Notification {
             title: title.into(),
             detail: detail.into(),
             persistent: true,
+            created_at: time::OffsetDateTime::now_utc(),
+            expires_at: None,
+            retry_action: Some(NotificationRetryAction::RetryOperation),
         }
     }
+
+    #[must_use]
+    pub fn persistent_error(title: impl Into<String>, detail: impl Into<String>) -> Self {
+        let mut notification = Self::actionable_error(title, detail);
+        notification.retry_action = None;
+        notification
+    }
+
+    pub fn is_expired_at(&self, now: time::OffsetDateTime) -> bool {
+        !self.persistent && self.expires_at.is_some_and(|expiry| expiry <= now)
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NotificationRetryAction {
+    RetryOperation,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NotificationKind {

@@ -214,7 +214,12 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, commands: &mut ActionCollector)
         if let Some(view) = &query.last_successful {
             ui.heading(&view.title);
             if view.points.is_empty() {
-                ui.label("No aggregated results for these filters.");
+                let model = crate::ui::empty_state::model(
+                    crate::ui::empty_state::EmptyState::ReportsWithoutData,
+                    true,
+                    !state.accounts.is_empty(),
+                );
+                crate::ui::empty_state::show(ui, &model, commands);
             } else {
                 for point in &view.points {
                     ui.horizontal(|ui| {

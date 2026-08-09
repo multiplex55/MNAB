@@ -23,7 +23,7 @@ pub fn show_header_preview(ui: &mut egui::Ui, columns: &[RegisterColumn]) {
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut AppState,
-    empty_title: &str,
+    _empty_title: &str,
     commands: &mut ActionCollector,
 ) {
     let query = &state.register_query;
@@ -61,7 +61,12 @@ pub fn show(
         EditorState::CreatingTransaction(_) | EditorState::EditingTransaction(_)
     );
     if page.as_ref().is_none_or(|p| p.rows.is_empty()) && !editor_active {
-        empty(ui, empty_title, commands);
+        let model = crate::ui::empty_state::model(
+            crate::ui::empty_state::EmptyState::EmptyRegister,
+            state.active_budget.is_some(),
+            state.selected_account.is_some(),
+        );
+        crate::ui::empty_state::show(ui, &model, commands);
         return;
     }
     if let Some(page) = &page {
@@ -223,18 +228,4 @@ fn context_menu(
             ui.close();
         }
     }
-}
-fn empty(ui: &mut egui::Ui, title: &str, commands: &mut ActionCollector) {
-    ui.group(|ui| {
-        ui.strong(title);
-        ui.label("Add a transaction or import a statement to get started.");
-        ui.horizontal(|ui| {
-            if ui.button("Add Transaction").clicked() {
-                commands.push(AppCommand::AddTransaction);
-            }
-            if ui.button("Import").clicked() {
-                commands.push(AppCommand::Import);
-            }
-        });
-    });
 }

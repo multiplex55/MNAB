@@ -161,11 +161,20 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollect
         ui.add_space(6.0);
     }
     ui.separator();
-    if ui.button("＋ Add Account").clicked() {
-        actions.push(AppCommand::AddAccount);
-    }
-    if ui.small_button("Add account group").clicked() {
-        actions.push(AppCommand::AddAccountGroup);
+    if state.accounts.is_empty() {
+        let model = crate::ui::empty_state::model(
+            crate::ui::empty_state::EmptyState::NoAccounts,
+            state.active_budget.is_some(),
+            false,
+        );
+        crate::ui::empty_state::show(ui, &model, actions);
+    } else {
+        if ui.button("＋ Add Account").clicked() {
+            actions.push(AppCommand::AddAccount);
+        }
+        if ui.small_button("Add account group").clicked() {
+            actions.push(AppCommand::AddAccountGroup);
+        }
     }
 }
 
