@@ -142,3 +142,24 @@ pub fn action_button(
     }
     response
 }
+
+/// The shared transaction-style date field. Parsing and validation belong to the
+/// owning form; this widget only provides a consistent, accessible editor.
+pub fn date_picker(ui: &mut egui::Ui, text: &mut String) -> egui::Response {
+    ui.horizontal(|ui| {
+        let response = ui.add(
+            egui::TextEdit::singleline(text)
+                .hint_text("MM/DD/YYYY")
+                .desired_width(100.0),
+        );
+        if ui
+            .small_button("📅")
+            .on_hover_text("Open date picker (MM/DD/YYYY)")
+            .clicked()
+        {
+            response.request_focus();
+        }
+        response
+    })
+    .inner
+}
