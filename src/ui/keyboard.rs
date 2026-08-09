@@ -121,6 +121,8 @@ pub fn map(stroke: KeyStroke, scope: Scope) -> Option<AppCommand> {
     }
     if scope.text_editor {
         return match (stroke.key, stroke.modifiers.command, stroke.modifiers.shift) {
+            // Find is an application search command even while another text edit owns input.
+            (K::F, true, false) => Some(C::FocusSearch),
             (K::Escape, _, _) => Some(C::Cancel),
             (K::Enter, false, _) => Some(C::Commit),
             (K::Z, true, false) => Some(C::Undo),
@@ -236,6 +238,32 @@ mod tests {
             },
             repeat: false,
         }
+    }
+
+    #[test]
+    fn find_reaches_search_while_modal_escape_keeps_precedence() {
+        assert_eq!(
+            map(
+                key(Key::F, true, false),
+                Scope {
+                    text_editor: true,
+                    command_enabled: true,
+                    ..Scope::default()
+                }
+            ),
+            Some(AppCommand::FocusSearch)
+        );
+        assert_eq!(
+            map(
+                key(Key::Escape, false, false),
+                Scope {
+                    modal: true,
+                    text_editor: true,
+                    command_enabled: true
+                }
+            ),
+            Some(AppCommand::Cancel)
+        );
     }
     #[test]
     fn shortcuts_and_conflicts() {

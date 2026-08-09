@@ -1,4 +1,5 @@
 //! Pure transaction-search parsing and safe query planning.
+use crate::app::view_model::{RegisterScope, RegisterSortDirection, RegisterSortField};
 use crate::domain::{AccountId, CategoryId, Money, PayeeId};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -38,6 +39,61 @@ pub enum SearchTerm {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SearchAst {
     pub terms: Vec<SearchTerm>,
+}
+impl SearchAst {
+    /// Stable textual form used only at compatibility boundaries. Parsing it always
+    /// returns this AST; UI surfaces must not implement their own parser.
+    #[must_use]
+    pub fn canonical_text(&self) -> String {
+        self.terms
+            .iter()
+            .map(|term| match term {
+                SearchTerm::Text(v) => quote(v),
+                SearchTerm::Account(v) => format!("account:{}", quote(v)),
+                SearchTerm::AccountGroup(v) => format!("group:{}", quote(v)),
+                SearchTerm::Category(v) => format!("category:{}", quote(v)),
+                SearchTerm::Payee(v) => format!("payee:{}", quote(v)),
+                SearchTerm::Memo(v) => format!("memo:{}", quote(v)),
+                SearchTerm::Amount { comparison, value } => format!(
+                    "amount:{}{}",
+                    match comparison {
+                        Comparison::Less => "<",
+                        Comparison::LessEqual => "<=",
+                        Comparison::Equal => "=",
+                        Comparison::GreaterEqual => ">=",
+                        Comparison::Greater => ">",
+                    },
+                    value
+                ),
+                SearchTerm::Before(v) => format!("before:{v}"),
+                SearchTerm::After(v) => format!("after:{v}"),
+                SearchTerm::From(v) => format!("from:{v}"),
+                SearchTerm::Through(v) => format!("through:{v}"),
+                SearchTerm::Uncategorized(v) => format!("uncategorized:{v}"),
+                SearchTerm::Reconciled(v) => format!("reconciled:{v}"),
+                SearchTerm::Imported(v) => format!("imported:{v}"),
+                SearchTerm::Transfer(v) => format!("transfer:{v}"),
+                SearchTerm::Cleared(v) => format!("cleared:{v}"),
+                SearchTerm::Approved(v) => format!("approved:{v}"),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+fn quote(value: &str) -> String {
+    if value.chars().any(char::is_whitespace) || value.contains(['"', '\\']) {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        value.to_owned()
+    }
+}
+
+#[must_use]
+pub fn register_filter(ast: &SearchAst) -> crate::app::view_model::RegisterFilter {
+    crate::app::view_model::RegisterFilter {
+        search: ast.canonical_text(),
+        ..Default::default()
+    }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Span {
@@ -324,19 +380,35 @@ pub fn compile(ast: &SearchAst) -> QueryPlan {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SavedFilter {
+/// Complete, durable register presentation.  Deliberately contains no cursor,
+/// selection, editor, error, page, or other session state.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SavedView {
     pub name: String,
     pub version: u32,
+    pub scope: RegisterScope,
     pub filter: SearchAst,
-    pub sort_order: i64,
-    pub workspace: String,
+    pub sort: RegisterSort,
+    pub columns: Option<SavedColumns>,
     pub account_ids: Vec<AccountId>,
     pub category_ids: Vec<CategoryId>,
     pub payee_ids: Vec<PayeeId>,
 }
-impl SavedFilter {
-    pub const VERSION: u32 = 1;
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RegisterSort {
+    pub field: RegisterSortField,
+    pub direction: RegisterSortDirection,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SavedColumns {
+    Named { name: String },
+    Visible { visible: Vec<String> },
+}
+
+impl SavedView {
+    pub const VERSION: u32 = 2;
     #[must_use]
     pub fn missing_references(
         &self,
@@ -363,21 +435,166 @@ impl SavedFilter {
             .collect()
     }
 }
+
+impl<'de> Deserialize<'de> for SavedView {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let version = value
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| D::Error::custom("saved view version is missing or malformed"))?;
+        if version > u64::from(Self::VERSION) {
+            return Err(D::Error::custom(format!(
+                "unsupported saved view version {version}"
+            )));
+        }
+        if version == 0 {
+            return Err(D::Error::custom("saved view version 0 is malformed"));
+        }
+        if version == 1 {
+            #[derive(Deserialize)]
+            struct Legacy {
+                name: String,
+                filter: SearchAst,
+                #[serde(default)]
+                sort_order: i64,
+                workspace: String,
+                #[serde(default)]
+                account_ids: Vec<AccountId>,
+                #[serde(default)]
+                category_ids: Vec<CategoryId>,
+                #[serde(default)]
+                payee_ids: Vec<PayeeId>,
+            }
+            let old: Legacy = serde_json::from_value(value).map_err(D::Error::custom)?;
+            let scope = legacy_scope(&old.workspace, &old.account_ids).map_err(D::Error::custom)?;
+            return Ok(Self {
+                name: old.name,
+                version: Self::VERSION,
+                scope,
+                filter: old.filter,
+                sort: RegisterSort {
+                    field: RegisterSortField::Date,
+                    direction: if old.sort_order < 0 {
+                        RegisterSortDirection::Descending
+                    } else {
+                        RegisterSortDirection::Ascending
+                    },
+                },
+                columns: None,
+                account_ids: old.account_ids,
+                category_ids: old.category_ids,
+                payee_ids: old.payee_ids,
+            });
+        }
+        #[derive(Deserialize)]
+        struct Current {
+            name: String,
+            scope: RegisterScope,
+            filter: SearchAst,
+            sort: RegisterSort,
+            #[serde(default)]
+            columns: Option<SavedColumns>,
+            #[serde(default)]
+            account_ids: Vec<AccountId>,
+            #[serde(default)]
+            category_ids: Vec<CategoryId>,
+            #[serde(default)]
+            payee_ids: Vec<PayeeId>,
+        }
+        let current: Current = serde_json::from_value(value).map_err(D::Error::custom)?;
+        Ok(Self {
+            name: current.name,
+            version: Self::VERSION,
+            scope: current.scope,
+            filter: current.filter,
+            sort: current.sort,
+            columns: current.columns,
+            account_ids: current.account_ids,
+            category_ids: current.category_ids,
+            payee_ids: current.payee_ids,
+        })
+    }
+}
+
+fn legacy_scope(workspace: &str, accounts: &[AccountId]) -> Result<RegisterScope, String> {
+    let normalized = workspace.trim().to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "register" | "all" | "all-transactions" | "all_transactions"
+    ) {
+        return Ok(RegisterScope::AllTransactions);
+    }
+    if normalized == "account" {
+        return accounts
+            .first()
+            .copied()
+            .map(RegisterScope::Account)
+            .ok_or_else(|| "legacy account view has no account id".into());
+    }
+    if let Some(raw) = normalized.strip_prefix("account:") {
+        return raw
+            .parse()
+            .map(RegisterScope::Account)
+            .map_err(|_| "legacy account workspace contains an invalid account id".into());
+    }
+    Err(format!("unsupported legacy workspace `{workspace}`"))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuickFilter {
+    Unapproved,
+    Uncategorized,
+    Uncleared,
+    Imported,
+    Transfers,
+}
+
+impl QuickFilter {
+    const fn term(self) -> SearchTerm {
+        match self {
+            Self::Unapproved => SearchTerm::Approved(false),
+            Self::Uncategorized => SearchTerm::Uncategorized(true),
+            Self::Uncleared => SearchTerm::Cleared(false),
+            Self::Imported => SearchTerm::Imported(true),
+            Self::Transfers => SearchTerm::Transfer(true),
+        }
+    }
+    /// Toggles this chip in the same AST submitted to the worker.
+    pub fn toggle(self, ast: &mut SearchAst) {
+        let term = self.term();
+        if let Some(position) = ast.terms.iter().position(|candidate| *candidate == term) {
+            ast.terms.remove(position);
+        } else {
+            ast.terms.push(term);
+        }
+    }
+}
 #[must_use]
-pub fn useful_presets() -> Vec<SavedFilter> {
+pub fn useful_presets() -> Vec<SavedView> {
     [
         ("Unapproved", "approved:false"),
+        ("Uncategorized", "uncategorized:true"),
         ("Uncleared", "cleared:false"),
+        ("Imported", "imported:true"),
+        ("Transfers", "transfer:true"),
+        ("Needs Review", "approved:false"),
+        ("Recent Imports", "imported:true approved:false"),
         ("Large outflows", "amount:<-100.00"),
     ]
     .into_iter()
     .filter_map(|(name, q)| {
-        parse(q).ok().map(|filter| SavedFilter {
+        parse(q).ok().map(|filter| SavedView {
             name: name.into(),
-            version: SavedFilter::VERSION,
+            version: SavedView::VERSION,
+            scope: RegisterScope::AllTransactions,
             filter,
-            sort_order: 0,
-            workspace: "register".into(),
+            sort: RegisterSort {
+                field: RegisterSortField::Date,
+                direction: RegisterSortDirection::Descending,
+            },
+            columns: None,
             account_ids: vec![],
             category_ids: vec![],
             payee_ids: vec![],
@@ -559,6 +776,62 @@ mod result_tests {
             plan.binds
                 .iter()
                 .any(|v| matches!(v, BindValue::Text(t) if t.contains("OR 1=1")))
+        );
+    }
+
+    #[test]
+    fn saved_view_migrates_and_round_trips_without_transient_state() {
+        let account = AccountId::new();
+        let legacy = serde_json::json!({"name":"Old","version":1,"filter":{"terms":[{"Approved":false}]},
+            "sort_order":-1,"workspace":"account","account_ids":[account],"category_ids":[],"payee_ids":[]});
+        let migrated: SavedView = serde_json::from_value(legacy).unwrap();
+        assert_eq!(migrated.scope, RegisterScope::Account(account));
+        assert_eq!(migrated.version, SavedView::VERSION);
+        let json = serde_json::to_string(&migrated).unwrap();
+        assert!(
+            !json.contains("selection") && !json.contains("cursor") && !json.contains("editor")
+        );
+        assert_eq!(serde_json::from_str::<SavedView>(&json).unwrap(), migrated);
+        assert!(serde_json::from_value::<SavedView>(serde_json::json!({"version":99})).is_err());
+        assert!(serde_json::from_value::<SavedView>(serde_json::json!({"version":"two"})).is_err());
+    }
+
+    #[test]
+    fn quick_filters_are_canonical_and_worker_ready() {
+        for (chip, expected) in [
+            (QuickFilter::Unapproved, SearchTerm::Approved(false)),
+            (QuickFilter::Uncategorized, SearchTerm::Uncategorized(true)),
+            (QuickFilter::Uncleared, SearchTerm::Cleared(false)),
+            (QuickFilter::Imported, SearchTerm::Imported(true)),
+            (QuickFilter::Transfers, SearchTerm::Transfer(true)),
+        ] {
+            let mut ast = SearchAst::default();
+            chip.toggle(&mut ast);
+            assert_eq!(ast.terms, vec![expected]);
+            assert_eq!(parse(&register_filter(&ast).search).unwrap(), ast);
+        }
+    }
+
+    #[test]
+    fn missing_reference_diagnostics_survive_migration() {
+        let missing = AccountId::new();
+        let view = SavedView {
+            name: "x".into(),
+            version: SavedView::VERSION,
+            scope: RegisterScope::AllTransactions,
+            filter: SearchAst::default(),
+            sort: RegisterSort {
+                field: RegisterSortField::Date,
+                direction: RegisterSortDirection::Descending,
+            },
+            columns: None,
+            account_ids: vec![missing],
+            category_ids: vec![],
+            payee_ids: vec![],
+        };
+        assert_eq!(
+            view.missing_references(&[], &[], &[]),
+            vec![format!("Missing or archived account {missing}")]
         );
     }
 }

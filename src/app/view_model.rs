@@ -179,7 +179,7 @@ pub struct CategoryRowView {
 
 /// The identity of a register.  This is the only register scope used by the
 /// application, worker protocol, storage query, and widgets.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum RegisterScope {
     Account(AccountId),
     AllTransactions,
@@ -191,12 +191,12 @@ pub struct RegisterCursor {
     pub created_at: String,
     pub transaction_id: TransactionId,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum RegisterSortDirection {
     Ascending,
     Descending,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum RegisterSortField {
     Date,
 }

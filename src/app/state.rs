@@ -406,6 +406,34 @@ impl Default for AppState {
     }
 }
 impl AppState {
+    /// Applies all parts of register navigation as one state transition. The returned
+    /// first-page request is the only request the caller should submit.
+    pub fn open_register(
+        &mut self,
+        destination: &crate::app::navigation::RegisterDestination,
+    ) -> Option<crate::app::view_model::RegisterRequest> {
+        let budget_id = self.active_budget?;
+        self.navigation.workspace = match destination.scope {
+            crate::app::view_model::RegisterScope::Account(id) => {
+                crate::app::navigation::Workspace::Account(id)
+            }
+            crate::app::view_model::RegisterScope::AllTransactions => {
+                crate::app::navigation::Workspace::AllTransactions
+            }
+        };
+        self.selected_account = match destination.scope {
+            crate::app::view_model::RegisterScope::Account(id) => Some(id),
+            _ => None,
+        };
+        self.selected_transaction = None;
+        self.editor = EditorState::Idle;
+        self.generation.view = self.generation.view.saturating_add(1);
+        let request =
+            destination.request(budget_id, crate::app::view_model::MAX_REGISTER_PAGE_SIZE);
+        self.register_query.active_request = Some(request.clone());
+        self.register_query.last_successful = None;
+        Some(request)
+    }
     /// Remove state whose identity belongs to the previous budget.
     pub fn clear_budget_state(&mut self) {
         self.active_budget = None;
