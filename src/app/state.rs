@@ -456,6 +456,9 @@ pub struct AppState {
     pub account_groups: Vec<crate::domain::AccountGroup>,
     pub account_tree: ViewQueryState<Vec<crate::storage::query_store::AccountTreeGroup>>,
     pub budget_month: ViewQueryState<crate::app::view_model::BudgetMonthView>,
+    /// Exact logical key of the in-flight budget projection. Request/generation correlation
+    /// alone is insufficient when the user changes month while a response is in flight.
+    pub budget_month_request: Option<(BudgetId, BudgetMonth)>,
     pub budget_month_cache: crate::app::view_model::BudgetMonthCache,
     pub budget_ui: crate::ui::budget_view::BudgetUiState,
     pub inbox_summary: ViewQueryState<crate::app::view_model::InboxSummaryView>,
@@ -511,6 +514,7 @@ impl Default for AppState {
             account_groups: vec![],
             account_tree: ViewQueryState::default(),
             budget_month: ViewQueryState::default(),
+            budget_month_request: None,
             budget_month_cache: Default::default(),
             budget_ui: Default::default(),
             inbox_summary: ViewQueryState::default(),

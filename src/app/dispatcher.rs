@@ -116,7 +116,9 @@ pub fn invalidations_for(c: &FinancialCommand) -> ViewInvalidations {
             )
             .expect("transaction date has a valid month");
             [
-                V::AccountRegister(transaction.account_id),
+                // Save is also edit: the persisted row may previously have belonged to a
+                // different account, so conservatively invalidate every register.
+                V::AllAccountRegisters,
                 V::Accounts,
                 V::BudgetMonth(month),
                 V::BudgetRolloverFrom(month),
@@ -317,5 +319,67 @@ mod tests {
                 .iter()
                 .any(|v| matches!(v, V::Accounts | V::Inbox | V::Schedules))
         );
+    }
+
+    #[test]
+    fn transaction_save_invalidates_registers_and_all_budget_dependents() {
+        let budget_id = crate::domain::BudgetId::new();
+        let month = crate::domain::BudgetMonth::new(2026, 8).unwrap();
+        let transaction = crate::domain::Transaction {
+            id: crate::domain::TransactionId::new(),
+            budget_id,
+            account_id: crate::domain::AccountId::new(),
+            date: crate::domain::TransactionDate(
+                time::Date::from_calendar_date(2026, time::Month::August, 9).unwrap(),
+            ),
+            payee_id: None,
+            amount: crate::domain::Money::ZERO,
+            memo: None,
+            clearance: crate::domain::Clearance::Uncleared,
+            approval: crate::domain::Approval::Approved,
+            body: crate::domain::TransactionBody::OpeningBalance { category_id: None },
+            archived: false,
+            voided: false,
+        };
+        let values = invalidations_for(&FinancialCommand::Transaction(TransactionCommand::Save(
+            transaction,
+        )));
+        for expected in [
+            V::AllAccountRegisters,
+            V::BudgetMonth(month),
+            V::BudgetRolloverFrom(month),
+            V::Reports,
+            V::Targets,
+            V::Inbox,
+            V::Search,
+            V::Inspectors,
+        ] {
+            assert!(
+                values.iter().any(|value| value == &expected),
+                "missing {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn assignment_invalidations_are_symmetric_across_projection_dependents() {
+        let month = crate::domain::BudgetMonth::new(2026, 8).unwrap();
+        let values = invalidations_for(&FinancialCommand::Assignment(AssignmentCommand::Remove {
+            category_id: crate::domain::CategoryId::new(),
+            month,
+        }));
+        for expected in [
+            V::BudgetMonth(month),
+            V::BudgetRolloverFrom(month),
+            V::Reports,
+            V::Targets,
+            V::Inbox,
+            V::Inspectors,
+        ] {
+            assert!(
+                values.iter().any(|value| value == &expected),
+                "missing {expected:?}"
+            );
+        }
     }
 }
