@@ -62,17 +62,18 @@ pub fn transaction_commit_available(e: &TransactionEditorState) -> bool {
         && e.build_transaction(crate::domain::BudgetId::new()).is_ok()
 }
 
-pub fn show(
+pub fn show_cell(
     ui: &mut egui::Ui,
     state: &mut AppState,
     commands: &mut ActionCollector,
     scope: super::RegisterScope,
+    column: super::RegisterColumn,
+    cached_page_missing: bool,
 ) {
     debug_assert_eq!(
         state.editor.surface(),
         crate::app::state::EditorSurface::InlineRegister
     );
-    let creating = matches!(state.editor, EditorState::CreatingTransaction(_));
     let accounts = &state.accounts;
     let payee_names = state
         .register_query
@@ -112,12 +113,27 @@ pub fn show(
         _ => return,
     };
     let enabled = editor.mutations_enabled();
-    let identity = super::editor_row_identity(editor.transaction_id);
-    let response = ui
-        .push_id(identity, |ui| {
-            ui.add_enabled_ui(enabled, |ui| {
-                ui.horizontal(|ui| {
-                    if scope == super::RegisterScope::AllTransactions {
+    let identity = editor.transaction_id;
+    ui.push_id(("transaction-editor", identity), |ui| {
+        ui.add_enabled_ui(enabled, |ui| match column {
+            super::RegisterColumn::Selection => {
+                ui.vertical(|ui| {
+                    if cached_page_missing {
+                        ui.colored_label(ui.visuals().warn_fg_color, "⚠")
+                            .on_hover_text("The edited transaction is not in the cached page; your changes are preserved.");
+                    }
+                    if ui.add_enabled(transaction_commit_available(editor), egui::Button::new("💾"))
+                        .on_hover_text("Save Transaction (Enter)").clicked() {
+                        commands.push(crate::app::command::AppCommand::Commit);
+                    }
+                    if ui.button("✕").on_hover_text("Cancel (Esc)").clicked() {
+                        commands.push(crate::app::command::AppCommand::Cancel);
+                    }
+                    if !enabled { ui.spinner(); }
+                });
+            }
+            super::RegisterColumn::Account => {
+                if scope == super::RegisterScope::AllTransactions {
                         let name = accounts
                             .iter()
                             .find(|a| Some(a.id) == editor.account_id)
@@ -138,11 +154,16 @@ pub fn show(
                         {
                             r.response.request_focus();
                         }
-                    }
+                }
+            }
+            super::RegisterColumn::Date => {
                     let date = crate::ui::widgets::date_picker(ui, &mut editor.date_text);
                     if date.lost_focus() {
                         editor.normalize_date_on_blur();
                     }
+                    if let Some(error) = &editor.errors.date { ui.colored_label(ui.visuals().error_fg_color, error); }
+            }
+            super::RegisterColumn::PayeeTransfer => {
                     let payee = editor
                         .payee_id
                         .and_then(|id| payee_names.iter().find(|p| p.0 == Some(id)))
@@ -161,6 +182,8 @@ pub fn show(
                     {
                         r.response.request_focus();
                     }
+            }
+            super::RegisterColumn::Category => {
                     let category = editor
                         .category_id
                         .and_then(|id| category_names.iter().find(|c| c.0 == id))
@@ -180,7 +203,29 @@ pub fn show(
                                 });
                             }
                         });
+                    for (i, split) in editor.splits.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Split {}", i + 1));
+                            let name = split.category_id.and_then(|id| category_names.iter().find(|c| c.0 == id)).map_or("Choose", |c| c.1.as_str());
+                            egui::ComboBox::from_id_salt(("split-category", i)).selected_text(name).show_ui(ui, |ui| {
+                                for (id, name, group) in &category_names { ui.selectable_value(&mut split.category_id, Some(*id), format!("{group} / {name}")); }
+                            });
+                        });
+                    }
+            }
+            super::RegisterColumn::Memo => {
                     ui.text_edit_singleline(&mut editor.memo);
+                    if editor.reconciled && !editor.protected_edit_confirmed {
+                        ui.colored_label(ui.visuals().warn_fg_color, "Reconciled and protected");
+                        if ui.small_button("Edit Anyway").clicked() { editor.protected_edit_confirmed = true; }
+                    }
+                    if editor.closed_account && !editor.closed_account_confirmed {
+                        ui.colored_label(ui.visuals().warn_fg_color, "Closed account");
+                        if ui.small_button("Edit Anyway").clicked() { editor.closed_account_confirmed = true; }
+                    }
+                    if let Some(error) = &editor.errors.form { ui.colored_label(ui.visuals().error_fg_color, error); }
+            }
+            super::RegisterColumn::Outflow => {
                     let outflow = ui.add(
                         egui::TextEdit::singleline(&mut editor.outflow_text)
                             .horizontal_align(egui::Align::RIGHT),
@@ -188,6 +233,9 @@ pub fn show(
                     if outflow.lost_focus() {
                         editor.normalize_amount_on_blur(true);
                     }
+                    if let Some(error) = &editor.errors.amount { ui.colored_label(ui.visuals().error_fg_color, error); }
+            }
+            super::RegisterColumn::Inflow => {
                     let inflow = ui.add(
                         egui::TextEdit::singleline(&mut editor.inflow_text)
                             .horizontal_align(egui::Align::RIGHT),
@@ -195,6 +243,8 @@ pub fn show(
                     if inflow.lost_focus() {
                         editor.normalize_amount_on_blur(false);
                     }
+            }
+            super::RegisterColumn::Cleared => {
                     egui::ComboBox::from_id_salt("clearance")
                         .selected_text(format!("{:?}", editor.clearance))
                         .show_ui(ui, |ui| {
@@ -213,6 +263,8 @@ pub fn show(
                                     .on_hover_text("Reconciled; use protected edit to change");
                             }
                         });
+            }
+            super::RegisterColumn::Approved => {
                     let approval_label = if editor.approved {
                         "Approved"
                     } else {
@@ -220,128 +272,8 @@ pub fn show(
                     };
                     ui.checkbox(&mut editor.approved, approval_label)
                         .on_hover_text(approval_label);
-                });
-                if let Some(error) = &editor.errors.date {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
-                }
-                if let Some(error) = &editor.errors.amount {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
-                }
-                let mut remove_split = None;
-                for (i, split) in editor.splits.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Split {}", i + 1));
-                        let name = split
-                            .category_id
-                            .and_then(|id| category_names.iter().find(|c| c.0 == id))
-                            .map_or("Choose a category", |c| c.1.as_str());
-                        egui::ComboBox::from_id_salt(("split-category", i))
-                            .selected_text(name)
-                            .show_ui(ui, |ui| {
-                                for (id, name, group) in &category_names {
-                                    ui.selectable_value(
-                                        &mut split.category_id,
-                                        Some(*id),
-                                        format!("{group} / {name}"),
-                                    );
-                                }
-                            });
-                        ui.add(egui::TextEdit::singleline(&mut split.memo).hint_text("Memo"));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut split.amount_text)
-                                .hint_text("Amount")
-                                .horizontal_align(egui::Align::RIGHT),
-                        );
-                        if ui.small_button("Remove").clicked() {
-                            remove_split = Some(i);
-                        }
-                    });
-                    if let Some(Some(error)) = editor.errors.split_lines.get(i) {
-                        ui.colored_label(ui.visuals().error_fg_color, error);
-                    }
-                }
-                if let Some(index) = remove_split {
-                    editor.remove_split(index);
-                }
-                ui.horizontal(|ui| {
-                    ui.label(match editor.remaining() {
-                        Ok(value) => format!("Remaining: {value}"),
-                        Err(_) => "Remaining: —".into(),
-                    });
-                    if ui.button("Add Split").clicked() {
-                        editor.add_split();
-                    }
-                    if ui
-                        .add_enabled(
-                            !editor.splits.is_empty(),
-                            egui::Button::new("Distribute Remainder"),
-                        )
-                        .clicked()
-                    {
-                        if let Err(errors) = editor.distribute_remainder() {
-                            editor.errors = errors;
-                        }
-                    }
-                });
-                if editor.reconciled && !editor.protected_edit_confirmed {
-                    ui.group(|ui| {
-                        ui.colored_label(
-                            ui.visuals().warn_fg_color,
-                            "This transaction is reconciled and protected.",
-                        );
-                        ui.horizontal(|ui| {
-                            if ui.button("Cancel").clicked() {
-                                commands.push(crate::app::command::AppCommand::Cancel);
-                            }
-                            if ui.button("Edit Anyway").clicked() {
-                                editor.protected_edit_confirmed = true;
-                            }
-                        });
-                    });
-                }
-                if editor.closed_account && !editor.closed_account_confirmed {
-                    ui.group(|ui| {
-                        ui.colored_label(
-                            ui.visuals().warn_fg_color,
-                            "This account is closed. Editing will not reopen it.",
-                        );
-                        ui.horizontal(|ui| {
-                            if ui.button("Cancel").clicked() {
-                                commands.push(crate::app::command::AppCommand::Cancel);
-                            }
-                            if ui.button("Edit Anyway").clicked() {
-                                editor.closed_account_confirmed = true;
-                            }
-                        });
-                    });
-                }
-                if let Some(error) = &editor.errors.form {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
-                }
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            transaction_commit_available(editor),
-                            egui::Button::new("Save"),
-                        )
-                        .clicked()
-                    {
-                        commands.push(crate::app::command::AppCommand::Commit);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        commands.push(crate::app::command::AppCommand::Cancel);
-                    }
-                });
-            });
-            if !enabled {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Saving…");
-                });
             }
-        })
-        .response;
-    if creating {
-        response.scroll_to_me(Some(egui::Align::Center));
-    }
+            super::RegisterColumn::RunningBalance => { ui.label("—"); }
+        });
+    });
 }

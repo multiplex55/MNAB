@@ -57,6 +57,12 @@ pub fn show(
     };
     let columns = super::columns_for(scope);
     let editor_active = super::editor_visible(state.editor.surface());
+    let editor_mode = super::transaction_editor_mode(&state.editor);
+    let editor_id = match &state.editor {
+        crate::app::state::EditorState::CreatingTransaction(e)
+        | crate::app::state::EditorState::EditingTransaction(e) => e.transaction_id,
+        _ => None,
+    };
     debug_assert_eq!(
         editor_active,
         state.editor.surface() == EditorSurface::InlineRegister
@@ -74,18 +80,20 @@ pub fn show(
         ui.label(format!("{} transactions", page.total_matches));
     }
     use egui_extras::{Column, TableBuilder};
+    let creation_key = ui.id().with("register-creation-active");
+    let was_creating = ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(creation_key).unwrap_or(false));
+    let creating = editor_mode == Some(super::TransactionEditorMode::Creating);
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(creation_key, creating));
     let mut table = TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
-        .sense(egui::Sense::click())
-        .scroll_to_row(
-            if editor_active {
-                page.as_ref().map_or(0, |p| p.rows.len())
-            } else {
-                0
-            },
-            Some(egui::Align::Center),
-        );
+        .sense(egui::Sense::click());
+    if creating && !was_creating {
+        table = table.scroll_to_row(0, Some(egui::Align::TOP));
+    }
     for c in columns {
         table = table.column(Column::initial(width(*c)).at_least(
             if *c == RegisterColumn::Selection {
@@ -104,36 +112,56 @@ pub fn show(
             }
         })
         .body(|mut body| {
-            if let Some(page) = &page {
-                for model in &page.rows {
-                    body.row(26.0, |mut row| {
-                        row.set_selected(state.register_selection.contains(model.transaction_id));
-                        for c in columns {
-                            row.col(|ui| cell(ui, *c, model, state, commands));
-                        }
-                        let response = row.response();
-                        if response.clicked() {
-                            let m = response.ctx.input(|i| i.modifiers);
-                            commands.push(ApplicationAction::Register(RegisterAction::Click {
-                                id: model.transaction_id,
-                                ctrl: m.command || m.ctrl,
-                                shift: m.shift,
-                            }));
-                        }
-                        if response.double_clicked() {
-                            commands.push(ApplicationAction::Register(RegisterAction::BeginEdit(
-                                model.transaction_id,
-                            )));
-                        }
-                        response.context_menu(|ui| context_menu(ui, model, commands));
-                    });
+            let saved = page.as_ref().map(|p| p.rows.as_slice()).unwrap_or_default();
+            let ids = saved
+                .iter()
+                .map(|row| row.transaction_id)
+                .collect::<Vec<_>>();
+            for placement in super::table_row_placements(&ids, editor_mode, editor_id) {
+                match placement {
+                    super::TableRowPlacement::Editor { replaces } => {
+                        let missing = editor_mode == Some(super::TransactionEditorMode::Editing)
+                            && replaces.is_none();
+                        body.row(54.0, |mut row| {
+                            // Editor rows deliberately have no row-level response handlers.
+                            for c in columns {
+                                row.col(|ui| {
+                                    super::editor::show_cell(
+                                        ui, state, commands, scope, *c, missing,
+                                    )
+                                });
+                            }
+                        });
+                    }
+                    super::TableRowPlacement::Saved(index) => {
+                        let model = &saved[index];
+                        body.row(26.0, |mut row| {
+                            row.set_selected(
+                                state.register_selection.contains(model.transaction_id),
+                            );
+                            for c in columns {
+                                row.col(|ui| cell(ui, *c, model, state, commands));
+                            }
+                            let response = row.response();
+                            if response.clicked() {
+                                let m = response.ctx.input(|i| i.modifiers);
+                                commands.push(ApplicationAction::Register(RegisterAction::Click {
+                                    id: model.transaction_id,
+                                    ctrl: m.command || m.ctrl,
+                                    shift: m.shift,
+                                }));
+                            }
+                            if response.double_clicked() {
+                                commands.push(ApplicationAction::Register(
+                                    RegisterAction::BeginEdit(model.transaction_id),
+                                ));
+                            }
+                            response.context_menu(|ui| context_menu(ui, model, commands));
+                        });
+                    }
                 }
             }
         });
-    // The expansion immediately follows the saved rows and shares their register scroll area.
-    if editor_active {
-        super::editor::show(ui, state, commands, scope);
-    }
 }
 fn cell(
     ui: &mut egui::Ui,
