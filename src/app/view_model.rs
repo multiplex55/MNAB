@@ -289,10 +289,17 @@ pub struct RegisterRowView {
     pub transfer_id: Option<String>,
     pub is_transfer: bool,
     pub split_count: u32,
+    pub splits: Vec<RegisterSplitLineView>,
     pub import_batch_id: Option<ImportBatchId>,
     pub import_source: Option<String>,
     pub review_state: Option<String>,
     pub running_balance_cents: Option<i64>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegisterSplitLineView {
+    pub category_id: CategoryId,
+    pub amount_cents: i64,
+    pub memo: Option<String>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReconciliationSeparatorView {
@@ -519,6 +526,7 @@ mod tests {
             transfer_id: None,
             is_transfer: false,
             split_count: 0,
+            splits: vec![],
             import_batch_id: None,
             import_source: None,
             review_state: None,

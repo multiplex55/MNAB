@@ -170,6 +170,19 @@ pub fn register_page(
                 is_transfer: row.transfer_id.is_some(),
                 transfer_id: row.transfer_id,
                 split_count: row.split_count,
+                splits: row
+                    .splits
+                    .into_iter()
+                    .map(|split| {
+                        Ok(RegisterSplitLineView {
+                            category_id: uuid(&split.category_id, "categories", &split.category_id)
+                                .map(CategoryId::from_uuid)
+                                .map_err(projection_error)?,
+                            amount_cents: split.amount.minor_units(),
+                            memo: split.memo,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, crate::error::RepositoryError>>()?,
                 import_batch_id: row
                     .import_batch_id
                     .as_deref()

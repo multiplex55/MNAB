@@ -231,6 +231,15 @@ fn show_palette(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionC
     if !state.palette.open {
         return;
     }
+    let selected_reconciled_transaction = state
+        .register_query
+        .last_successful
+        .as_ref()
+        .is_some_and(|page| {
+            page.rows
+                .iter()
+                .any(|row| row.reconciled && state.register_selection.contains(row.transaction_id))
+        });
     let context = crate::app::palette::CommandContext {
         database_available: state.active_budget.is_some(),
         account_register: matches!(state.navigation.workspace, Workspace::Account(_)),
@@ -248,6 +257,7 @@ fn show_palette(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionC
         can_redo: state.can_redo,
         selected_account: state.selected_account.is_some(),
         selected_transaction: state.selected_transaction.is_some(),
+        selected_reconciled_transaction,
         register_focused: state.register_focus.is_some(),
         import_active: matches!(state.editor, crate::app::state::EditorState::Importing(_)),
         reconciliation_active: matches!(

@@ -625,6 +625,8 @@ pub struct CommandAvailabilityContext {
     pub can_redo: bool,
     pub selected_account: bool,
     pub selected_transaction: bool,
+    /// The current register selection contains at least one protected reconciled row.
+    pub selected_reconciled_transaction: bool,
     pub register_focused: bool,
     pub import_active: bool,
     pub reconciliation_active: bool,
@@ -830,6 +832,12 @@ pub fn command_availability(
         EditTransaction | DeleteTransaction if !ctx.selected_transaction => {
             CommandAvailability::disabled(command, "Select a transaction first")
         }
+        Delete | DeleteTransaction if ctx.selected_reconciled_transaction => {
+            CommandAvailability::disabled(
+                command,
+                "Reconciled transactions cannot be changed in bulk; deselect them or edit them individually.",
+            )
+        }
         RenameAccountGroup | DeleteAccountGroup | MoveAccountGroup => {
             CommandAvailability::disabled(command, "Select an account group first")
         }
@@ -865,4 +873,29 @@ pub fn command_catalog(ctx: CommandAvailabilityContext) -> Vec<CommandAvailabili
         .copied()
         .map(|c| command_availability(ctx, c))
         .collect()
+}
+
+#[cfg(test)]
+mod availability_tests {
+    use super::*;
+
+    #[test]
+    fn reconciled_register_selection_explains_disabled_bulk_delete() {
+        let context = CommandAvailabilityContext {
+            database_available: true,
+            workspace: CommandWorkspace::AccountRegister,
+            has_selection: true,
+            selected_transaction: true,
+            selected_reconciled_transaction: true,
+            ..Default::default()
+        };
+        let availability = command_availability(context, AppCommand::DeleteTransaction);
+        assert!(!availability.enabled);
+        assert_eq!(
+            availability.disabled_reason,
+            Some(
+                "Reconciled transactions cannot be changed in bulk; deselect them or edit them individually."
+            )
+        );
+    }
 }
