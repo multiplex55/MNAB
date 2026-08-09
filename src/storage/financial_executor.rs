@@ -55,7 +55,7 @@ fn apply<R: Repositories>(
     c: &FinancialCommand,
     correlation: CorrelationId,
 ) -> Result<(&'static str, Vec<A>, Option<UndoData>), WorkerError> {
-    let (label, ids, undo, entity, id) = match c {
+    let (label, ids, mut undo, entity, id) = match c {
         FinancialCommand::Account(AccountCommand::Create(v)) => {
             validate_name(&v.name)?;
             r.put_account(v).map_err(repository)?;
@@ -167,9 +167,13 @@ fn apply<R: Repositories>(
                     category: v.category_id,
                     month: v.month,
                 }],
-                old.map(|x| {
-                    UndoData::Command(FinancialCommand::Assignment(AssignmentCommand::Set(x)))
-                }),
+                Some(UndoData::Command(FinancialCommand::Assignment(match old {
+                    Some(x) => AssignmentCommand::Set(x),
+                    None => AssignmentCommand::Remove {
+                        category_id: v.category_id,
+                        month: v.month,
+                    },
+                }))),
                 "assignment",
                 format!(
                     "{}:{:04}-{:02}",
@@ -177,6 +181,100 @@ fn apply<R: Repositories>(
                     v.month.year(),
                     v.month.month()
                 ),
+            )
+        }
+        FinancialCommand::Assignment(AssignmentCommand::Remove { category_id, month }) => {
+            let old = r.assignment(*category_id, *month).map_err(repository)?;
+            r.delete_assignment(*category_id, *month)
+                .map_err(repository)?;
+            (
+                "Remove assignment",
+                vec![A::Assignment {
+                    category: *category_id,
+                    month: *month,
+                }],
+                old.map(|x| {
+                    UndoData::Command(FinancialCommand::Assignment(AssignmentCommand::Set(x)))
+                }),
+                "assignment",
+                format!("{}:{:04}-{:02}", category_id, month.year(), month.month()),
+            )
+        }
+        FinancialCommand::Assignment(AssignmentCommand::Batch(batch)) => {
+            if batch.changes.is_empty() {
+                return Err(safe("assignment batch is empty"));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for change in &batch.changes {
+                if !seen.insert(change.category_id()) {
+                    return Err(safe("assignment batch contains duplicate categories"));
+                }
+            }
+            let first = batch.changes[0].category_id();
+            let revision = r.assignment_revision(first).map_err(repository)?;
+            if revision != batch.expected_source_revision {
+                return Err(safe("stale assignment revision"));
+            }
+            // Preflight every category and capture absence as well as values before writing.
+            let mut prior = Vec::with_capacity(batch.changes.len());
+            for change in &batch.changes {
+                let category = change.category_id();
+                if r.category(category).map_err(repository)?.is_none() {
+                    return Err(safe("assignment category not found"));
+                }
+                prior.push((
+                    category,
+                    r.assignment(category, batch.month).map_err(repository)?,
+                ));
+            }
+            for change in &batch.changes {
+                match change {
+                    AssignmentBatchChange::Set {
+                        category_id,
+                        amount,
+                    } => r
+                        .put_assignment(&crate::domain::BudgetAssignment {
+                            category_id: *category_id,
+                            month: batch.month,
+                            amount: *amount,
+                        })
+                        .map_err(repository)?,
+                    AssignmentBatchChange::Remove { category_id } => r
+                        .delete_assignment(*category_id, batch.month)
+                        .map_err(repository)?,
+                }
+            }
+            let inverse = AssignmentBatch {
+                month: batch.month,
+                // This command appends exactly one audit record in the same transaction.
+                expected_source_revision: revision.saturating_add(1),
+                changes: prior
+                    .into_iter()
+                    .map(|(category_id, old)| match old {
+                        Some(value) => AssignmentBatchChange::Set {
+                            category_id,
+                            amount: value.amount,
+                        },
+                        None => AssignmentBatchChange::Remove { category_id },
+                    })
+                    .collect(),
+            };
+            let affected = batch
+                .changes
+                .iter()
+                .map(|change| A::Assignment {
+                    category: change.category_id(),
+                    month: batch.month,
+                })
+                .collect();
+            (
+                "Change assignments",
+                affected,
+                Some(UndoData::Command(FinancialCommand::Assignment(
+                    AssignmentCommand::Batch(inverse),
+                ))),
+                "assignment_batch",
+                first.to_string(),
             )
         }
         FinancialCommand::Transaction(TransactionCommand::Save(v)) => {
@@ -345,6 +443,18 @@ fn apply<R: Repositories>(
     };
     r.append_audit(entity, &id, &format!("{label}; correlation={correlation}"))
         .map_err(repository)?;
+    // SQLite audit ids are database-wide, so another budget can make the next id greater than
+    // `source + 1`. Read back the exact budget revision after the audit insert and bind it into
+    // the inverse command used by undo/redo.
+    if let (
+        FinancialCommand::Assignment(AssignmentCommand::Batch(batch)),
+        Some(UndoData::Command(FinancialCommand::Assignment(AssignmentCommand::Batch(inverse)))),
+    ) = (c, &mut undo)
+    {
+        inverse.expected_source_revision = r
+            .assignment_revision(batch.changes[0].category_id())
+            .map_err(repository)?;
+    }
     Ok((label, ids, undo))
 }
 fn validate_name(v: &str) -> Result<(), WorkerError> {

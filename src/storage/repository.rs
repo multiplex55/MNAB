@@ -55,6 +55,13 @@ pub trait AssignmentRepository {
         category: CategoryId,
         month: crate::domain::BudgetMonth,
     ) -> Result<Option<BudgetAssignment>, RepositoryError>;
+    fn delete_assignment(
+        &mut self,
+        category: CategoryId,
+        month: crate::domain::BudgetMonth,
+    ) -> Result<(), RepositoryError>;
+    /// Current budget projection revision for the budget containing `category`.
+    fn assignment_revision(&mut self, category: CategoryId) -> Result<u64, RepositoryError>;
 }
 pub trait TargetRepository {
     fn put_target(&mut self, value: &Target) -> Result<(), RepositoryError>;
@@ -332,6 +339,17 @@ impl AssignmentRepository for InMemoryRepositories {
         m: crate::domain::BudgetMonth,
     ) -> Result<Option<BudgetAssignment>, RepositoryError> {
         Ok(self.assignments.get(&(c, m)).cloned())
+    }
+    fn delete_assignment(
+        &mut self,
+        c: CategoryId,
+        m: crate::domain::BudgetMonth,
+    ) -> Result<(), RepositoryError> {
+        self.assignments.remove(&(c, m));
+        Ok(())
+    }
+    fn assignment_revision(&mut self, _category: CategoryId) -> Result<u64, RepositoryError> {
+        Ok(0)
     }
 }
 impl TargetRepository for InMemoryRepositories {

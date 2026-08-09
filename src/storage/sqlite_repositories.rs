@@ -302,6 +302,21 @@ impl AssignmentRepository for SqliteRepositories<'_> {
             .optional()
             .map_err(repo)
     }
+    fn delete_assignment(&mut self, c: CategoryId, m: BudgetMonth) -> Result<(), RepositoryError> {
+        self.transaction
+            .execute(
+                "DELETE FROM budget_assignments WHERE category_id=?1 AND budget_month=?2",
+                (c.to_string(), month_text(m)),
+            )
+            .map(|_| ())
+            .map_err(repo)
+    }
+    fn assignment_revision(&mut self, c: CategoryId) -> Result<u64, RepositoryError> {
+        self.transaction.query_row(
+            "SELECT COALESCE(MAX(l.id),0) FROM categories c JOIN category_groups g ON g.id=c.group_id LEFT JOIN change_log l ON l.budget_id=g.budget_id WHERE c.id=?1",
+            [c.to_string()], |row| row.get(0),
+        ).map_err(repo)
+    }
 }
 fn month_text(m: BudgetMonth) -> String {
     format!("{:04}-{:02}", m.year(), m.month())
@@ -457,7 +472,18 @@ impl AuditRepository for SqliteRepositories<'_> {
         let correlation = operation
             .rsplit_once("correlation=")
             .map_or("unknown", |(_, value)| value);
-        self.transaction.execute("INSERT INTO change_log(budget_id,entity_table,entity_id,operation,changed_at,correlation_id) VALUES(NULL,?1,?2,?3,datetime('now'),?4)",(entity,record_id,kind,correlation)).map(|_|()).map_err(repo)
+        // Assignment batch record ids are category ids, allowing the audit and projection
+        // revision to advance atomically with the writes.
+        let budget_id: Option<String> = if entity == "assignment_batch" {
+            use rusqlite::OptionalExtension;
+            self.transaction.query_row(
+                "SELECT g.budget_id FROM categories c JOIN category_groups g ON g.id=c.group_id WHERE c.id=?1",
+                [record_id], |row| row.get(0),
+            ).optional().map_err(repo)?
+        } else {
+            None
+        };
+        self.transaction.execute("INSERT INTO change_log(budget_id,entity_table,entity_id,operation,changed_at,correlation_id) VALUES(?1,?2,?3,?4,datetime('now'),?5)",(budget_id,entity,record_id,kind,correlation)).map(|_|()).map_err(repo)
     }
 }
 impl InboxRepository for SqliteRepositories<'_> {

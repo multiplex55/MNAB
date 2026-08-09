@@ -1383,10 +1383,22 @@ impl ApplicationRuntime {
                 self.terminal_sequence += 1;
                 c.terminal_sequence = Some(self.terminal_sequence);
                 if let Some(redo) = self.history_operations.remove(&cid) {
+                    let subsequent = match &m.undo {
+                        Some(crate::storage::protocol::UndoData::Command(command)) => {
+                            Some(command.clone())
+                        }
+                        _ => None,
+                    };
                     if redo {
                         let _ = self.history.redo();
+                        if let Some(inverse) = subsequent {
+                            self.history.replace_next_undo(inverse);
+                        }
                     } else {
                         let _ = self.history.undo();
+                        if let Some(command) = subsequent {
+                            self.history.replace_next_redo(command);
+                        }
                     }
                 } else if let (
                     ApplicationAction::Financial(command),
