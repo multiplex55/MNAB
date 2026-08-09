@@ -122,7 +122,17 @@ pub fn show(
                     super::TableRowPlacement::Editor { replaces } => {
                         let missing = editor_mode == Some(super::TransactionEditorMode::Editing)
                             && replaces.is_none();
-                        body.row(54.0, |mut row| {
+                        let expanded = match &state.editor {
+                            crate::app::state::EditorState::CreatingTransaction(e)
+                            | crate::app::state::EditorState::EditingTransaction(e) => {
+                                !e.errors.is_empty()
+                                    || (e.reconciled && !e.protected_edit_confirmed)
+                                    || (e.closed_account && !e.closed_account_confirmed)
+                                    || !e.metadata.validation_errors.is_empty()
+                            }
+                            _ => false,
+                        };
+                        body.row(if expanded { 108.0 } else { 54.0 }, |mut row| {
                             // Editor rows deliberately have no row-level response handlers.
                             for c in columns {
                                 row.col(|ui| {

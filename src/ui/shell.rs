@@ -57,15 +57,28 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
         state.palette.open(initiating);
     }
     let modal = state.dialog.is_some();
-    let editor = ctx.memory(|m| m.focused().is_some_and(|id| id == state.search_id));
+    let search_owns_text = ctx.memory(|m| m.focused().is_some_and(|id| id == state.search_id));
+    let transaction_id = match &state.editor {
+        crate::app::state::EditorState::CreatingTransaction(editor)
+        | crate::app::state::EditorState::EditingTransaction(editor) => editor.transaction_id,
+        _ => None,
+    };
+    let transaction_text = state.editor.surface()
+        == crate::app::state::EditorSurface::InlineRegister
+        && crate::ui::register::editor::owns_text_focus(ctx, transaction_id);
+    let transaction_picker = state.editor.surface()
+        == crate::app::state::EditorSurface::InlineRegister
+        && ctx.is_popup_open();
     let mut keyboard_commands = Vec::new();
     super::keyboard::route(
         ctx,
         super::keyboard::Scope {
             modal,
-            text_editor: editor,
+            text_editor: search_owns_text,
+            transaction_text,
             command_enabled: true,
             popup: false,
+            transaction_picker,
         },
         &mut keyboard_commands,
     );

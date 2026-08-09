@@ -74,10 +74,15 @@ pub struct KeyStroke {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Scope {
     pub modal: bool,
+    /// A non-transaction text editor (for example register search) owns typing.
     pub text_editor: bool,
+    /// One of the inline transaction's stable text widget IDs owns typing.
+    pub transaction_text: bool,
     pub command_enabled: bool,
     /// A picker owns Enter/Escape/Up/Down and prevents a second form command in this frame.
     pub popup: bool,
+    /// An editor picker, rather than a true modal, owns accept/cancel/navigation.
+    pub transaction_picker: bool,
 }
 
 /// Canonical, non-configurable global bindings. Preferences are validated against
@@ -114,7 +119,9 @@ pub fn map(stroke: KeyStroke, scope: Scope) -> Option<AppCommand> {
     if stroke.repeat && !matches!(stroke.key, K::ArrowLeft | K::ArrowRight) {
         return None;
     }
-    if scope.popup && matches!(stroke.key, K::Enter | K::Escape | K::ArrowUp | K::ArrowDown) {
+    if (scope.popup || scope.transaction_picker)
+        && matches!(stroke.key, K::Enter | K::Escape | K::ArrowUp | K::ArrowDown)
+    {
         return None;
     }
     if scope.modal {
@@ -124,13 +131,15 @@ pub fn map(stroke: KeyStroke, scope: Scope) -> Option<AppCommand> {
             _ => None,
         };
     }
-    if scope.text_editor {
+    if scope.text_editor || scope.transaction_text {
         return match (stroke.key, stroke.modifiers.command, stroke.modifiers.shift) {
             // Find is an application search command even while another text edit owns input.
             (K::F, true, false) => Some(C::FocusSearch),
             (K::Escape, _, _) => Some(C::Cancel),
             (K::Enter, false, _) => Some(C::Commit),
             (K::Enter, true, _) => Some(C::Commit),
+            (K::Tab, false, false) if scope.transaction_text => Some(C::NextField),
+            (K::Tab, false, true) if scope.transaction_text => Some(C::PreviousField),
             (K::Z, true, false) => Some(C::Undo),
             (K::Z, true, true) => Some(C::Redo),
             _ => None,
@@ -268,6 +277,8 @@ mod tests {
                     text_editor: true,
                     command_enabled: true,
                     popup: false,
+                    transaction_text: false,
+                    transaction_picker: false,
                 }
             ),
             Some(AppCommand::Cancel)
@@ -297,6 +308,8 @@ mod tests {
             command_enabled: true,
             text_editor: false,
             popup: false,
+            transaction_text: false,
+            transaction_picker: false,
         };
         assert_eq!(
             map(key(Key::Escape, false, false), s),
@@ -315,6 +328,8 @@ mod tests {
             command_enabled: true,
             modal: false,
             popup: false,
+            transaction_text: false,
+            transaction_picker: false,
         };
         assert_eq!(map(key(Key::Delete, false, false), s), None);
         assert_eq!(map(key(Key::A, true, false), s), None);
@@ -351,5 +366,29 @@ mod tests {
             ),
             Some(AppCommand::Commit)
         );
+    }
+
+    #[test]
+    fn transaction_typing_and_picker_own_register_keys() {
+        let typing = Scope {
+            transaction_text: true,
+            command_enabled: true,
+            ..Scope::default()
+        };
+        assert_eq!(map(key(Key::Delete, false, false), typing), None);
+        assert_eq!(map(key(Key::Space, false, false), typing), None);
+        assert_eq!(
+            map(key(Key::Escape, false, false), typing),
+            Some(AppCommand::Cancel)
+        );
+
+        let picker = Scope {
+            transaction_picker: true,
+            command_enabled: true,
+            ..Scope::default()
+        };
+        for owned in [Key::Enter, Key::Escape, Key::ArrowUp, Key::ArrowDown] {
+            assert_eq!(map(key(owned, false, false), picker), None);
+        }
     }
 }
