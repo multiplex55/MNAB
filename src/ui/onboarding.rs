@@ -42,15 +42,21 @@ impl Default for OnboardingWizard {
 }
 
 impl OnboardingWizard {
-    pub fn parsed_balance(&self) -> Result<Money, &'static str> {
+    /// Parses exactly what the user entered. Ledger sign is a domain concern and is deliberately
+    /// not applied by the form.
+    pub fn parsed_opening_magnitude(&self) -> Result<Money, &'static str> {
         let value = crate::ui::budget_view::parse_usd_input(&self.account.current_balance)
             .map_err(|_| "Enter an amount such as 1234.56 or $1,234.56")?;
         if value < Money::ZERO {
             return Err("Enter a positive amount owed for debt accounts");
         }
+        Ok(value)
+    }
+    /// The signed effect shown on the review page. This must never be used as service input.
+    pub fn signed_opening_preview(&self) -> Result<Money, &'static str> {
         self.account
             .account_type
-            .opening_amount(value)
+            .opening_amount(self.parsed_opening_magnitude()?)
             .map_err(|_| "Amount is too large")
     }
     pub fn parsed_date(&self) -> Result<TransactionDate, &'static str> {
@@ -82,11 +88,15 @@ mod tests {
         w.account.account_type = AccountType::Loan;
         w.account.current_balance = "$1,234.56".into();
         assert_eq!(
-            w.parsed_balance().unwrap(),
+            w.parsed_opening_magnitude().unwrap(),
+            Money::from_minor_units(123456)
+        );
+        assert_eq!(
+            w.signed_opening_preview().unwrap(),
             Money::from_minor_units(-123456)
         );
         w.account.current_balance = "0".into();
-        assert_eq!(w.parsed_balance().unwrap(), Money::ZERO);
+        assert_eq!(w.parsed_opening_magnitude().unwrap(), Money::ZERO);
     }
     #[test]
     fn starter_selection_can_be_empty() {

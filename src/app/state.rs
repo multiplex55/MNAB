@@ -406,6 +406,7 @@ pub struct DialogState {
 
 #[derive(Debug)]
 pub struct AppState {
+    pub onboarding: crate::ui::onboarding::OnboardingWizard,
     /// Summary and bounded detail are independent projections/requests.
     pub inbox_counts: crate::app::inbox::InboxCounts,
     pub inbox_review: Vec<crate::app::inbox::InboxItem>,
@@ -452,6 +453,7 @@ impl Default for AppState {
         let now =
             time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
         Self {
+            onboarding: crate::ui::onboarding::OnboardingWizard::default(),
             inbox_counts: crate::app::inbox::InboxCounts::default(),
             inbox_review: vec![],
             active_budget: None,

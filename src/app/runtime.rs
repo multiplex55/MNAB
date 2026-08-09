@@ -772,6 +772,59 @@ impl ApplicationRuntime {
                 self.view.navigation.workspace = Workspace::AllTransactions;
                 return;
             }
+            CreateBudget if self.database_lifecycle == DatabaseLifecycle::FirstRunRequired => {
+                let magnitude = match self.view.onboarding.parsed_opening_magnitude() {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.startup_notice(NotificationKind::Error, "Check first account", error);
+                        return;
+                    }
+                };
+                let date = match self.view.onboarding.parsed_date() {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.startup_notice(NotificationKind::Error, "Check first account", error);
+                        return;
+                    }
+                };
+                let Some(paths) = self.paths.as_ref() else {
+                    return;
+                };
+                let wizard = self.view.onboarding.clone();
+                let request = crate::service::onboarding_service::OnboardingRequest {
+                    budget_name: wizard.budget_name,
+                    account_name: wizard.account.name,
+                    account_type: wizard.account.account_type,
+                    opening_magnitude: magnitude,
+                    balance_date: date,
+                    group_name: wizard.account.group,
+                    note: Some(wizard.account.note),
+                    categories: wizard.selected_categories.into_iter().collect(),
+                };
+                match crate::service::onboarding_service::OnboardingService::initialize_database(
+                    &paths.database,
+                    request,
+                    || {},
+                ) {
+                    Ok(initialized) => {
+                        self.commit_session(initialized.session, initialized.worker);
+                        self.database_lifecycle = DatabaseLifecycle::Ready;
+                        self.view.dialog = None;
+                        self.view.navigation.workspace = Workspace::Budget;
+                        self.invalidations.insert(
+                            crate::app::view_invalidation::ViewInvalidation::BudgetMonth(
+                                self.view.selected_month,
+                            ),
+                        );
+                    }
+                    Err(error) => self.startup_notice(
+                        NotificationKind::Error,
+                        "Budget setup failed",
+                        &error.to_string(),
+                    ),
+                }
+                return;
+            }
             Settings => {
                 self.view.open_dialog(
                     Dialog::Settings,
