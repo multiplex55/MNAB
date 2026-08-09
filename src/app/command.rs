@@ -896,6 +896,7 @@ pub fn command_availability(
                 CommandWorkspace::AccountRegister
                     | CommandWorkspace::AllTransactions
                     | CommandWorkspace::Inbox
+                    | CommandWorkspace::Reports
             ) =>
         {
             CommandAvailability::disabled(command, "Open a searchable workspace first")

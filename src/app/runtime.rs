@@ -1219,6 +1219,9 @@ impl ApplicationRuntime {
                     self.view.register_selection.select_only(id);
                 }
                 self.view.selected_transaction = self.view.register_selection.cursor();
+                self.view.inspector_context = crate::app::state::InspectorContext::Transaction(
+                    self.view.selected_transaction,
+                );
             }
             RegisterAction::Move { delta, extend } => {
                 let has_more = self
@@ -1232,6 +1235,9 @@ impl ApplicationRuntime {
                     .register_selection
                     .move_cursor(&ids, delta, extend, has_more);
                 self.view.selected_transaction = self.view.register_selection.cursor();
+                self.view.inspector_context = crate::app::state::InspectorContext::Transaction(
+                    self.view.selected_transaction,
+                );
             }
             RegisterAction::ToggleCurrent => {
                 if let Some(id) = self.view.register_selection.cursor() {
@@ -1782,6 +1788,8 @@ impl ApplicationRuntime {
             }
             CategoryAction::Select(id) => {
                 self.view.selected_category = Some(id);
+                self.view.inspector_context =
+                    crate::app::state::InspectorContext::BudgetCategory(Some(id));
                 self.request_category_detail(id, None);
             }
             CategoryAction::NewGroup => {
@@ -1987,6 +1995,13 @@ impl ApplicationRuntime {
                 if response_matches_key
                     && self.view.budget_month.accept(id, generation, value.clone())
                 {
+                    if self.view.selected_category.is_some_and(|selected| {
+                        !value.rows.iter().any(|row| row.category_id == selected)
+                    }) {
+                        self.view.selected_category = None;
+                        self.view.inspector_context =
+                            crate::app::state::InspectorContext::BudgetCategory(None);
+                    }
                     self.view.budget_month_cache.insert(value);
                 }
             }
@@ -1994,7 +2009,23 @@ impl ApplicationRuntime {
                 let _ = self.view.inbox_summary.accept(id, generation, value);
             }
             Ok(crate::storage::worker::TypedResult::CategoryCatalog(value)) => {
-                let _ = self.view.category_catalog.accept(id, generation, value);
+                if self
+                    .view
+                    .category_catalog
+                    .accept(id, generation, value.clone())
+                    && self.view.selected_category.is_some_and(|selected| {
+                        !value.groups.iter().any(|group| {
+                            group
+                                .categories
+                                .iter()
+                                .any(|category| category.id == selected)
+                        })
+                    })
+                {
+                    self.view.selected_category = None;
+                    self.view.inspector_context =
+                        crate::app::state::InspectorContext::BudgetCategory(None);
+                }
             }
             Ok(crate::storage::worker::TypedResult::CategoryDetail(value)) => {
                 let _ = self.view.category_detail.accept(id, generation, value);
@@ -2018,6 +2049,8 @@ impl ApplicationRuntime {
                         .is_some_and(|selected| !valid.contains(&selected))
                     {
                         self.view.selected_transaction = None;
+                        self.view.inspector_context =
+                            crate::app::state::InspectorContext::Transaction(None);
                     }
                 }
             }

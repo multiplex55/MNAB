@@ -193,9 +193,28 @@ pub enum Dialog {
     Import(AccountId),
     Settings,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InspectorContext {
     AccountSummary(Option<AccountId>),
+    Transaction(Option<TransactionId>),
+    BudgetCategory(Option<CategoryId>),
+}
+
+impl InspectorContext {
+    /// Clears a selection only after an accepted projection proves that its entity disappeared.
+    pub fn retain_loaded_ids(
+        &mut self,
+        accounts: impl Fn(AccountId) -> bool,
+        transactions: impl Fn(TransactionId) -> bool,
+        categories: impl Fn(CategoryId) -> bool,
+    ) {
+        match self {
+            Self::AccountSummary(id) if id.is_some_and(|id| !accounts(id)) => *id = None,
+            Self::Transaction(id) if id.is_some_and(|id| !transactions(id)) => *id = None,
+            Self::BudgetCategory(id) if id.is_some_and(|id| !categories(id)) => *id = None,
+            _ => {}
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -660,6 +679,7 @@ impl AppState {
         self.latest_by_purpose.clear();
         self.purpose_by_request.clear();
         self.register_query = RegisterQueryState::default();
+        self.inspector_context = InspectorContext::AccountSummary(None);
     }
 
     pub fn open_dialog(&mut self, dialog: Dialog, initiating: Id, fallback: Id) {
@@ -819,6 +839,16 @@ mod tests {
             context.memory(|memory| memory.focused()),
             Some(state.search_id)
         );
+    }
+
+    #[test]
+    fn inspector_selection_clears_only_when_loaded_projection_deletes_entity() {
+        let id = TransactionId::new();
+        let mut context = InspectorContext::Transaction(Some(id));
+        context.retain_loaded_ids(|_| true, |_| true, |_| true);
+        assert_eq!(context, InspectorContext::Transaction(Some(id)));
+        context.retain_loaded_ids(|_| true, |_| false, |_| true);
+        assert_eq!(context, InspectorContext::Transaction(None));
     }
 
     #[test]
