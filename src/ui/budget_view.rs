@@ -12,7 +12,7 @@ use crate::{
         dispatcher::ActionCollector,
         view_model::{BudgetMonthView, CategoryRowView},
     },
-    domain::{BudgetMonth, CategoryGroupId, CategoryId, Money},
+    domain::{BudgetAssignment, BudgetMonth, CategoryGroupId, CategoryId, Money},
     service::assignment_service::{
         AutoAssignInput, AutoAssignPreview, AutoAssignStrategy, propose_auto_assign_at_revision,
     },
@@ -60,6 +60,8 @@ pub struct BudgetUiState {
     pub focused_category: Option<CategoryId>,
     pub selected_categories: BTreeSet<CategoryId>,
     edit: Option<AssignmentEdit>,
+    pending_assignments: BTreeSet<CategoryId>,
+    projection_revision: Option<u64>,
     pub auto_strategy: AutoAssignStrategy,
     pub auto_preview: Option<AutoAssignPreview>,
     pub move_preview: Option<MoveMoneyPreview>,
@@ -71,6 +73,8 @@ impl Default for BudgetUiState {
             focused_category: None,
             selected_categories: BTreeSet::new(),
             edit: None,
+            pending_assignments: BTreeSet::new(),
+            projection_revision: None,
             auto_strategy: AutoAssignStrategy::Underfunded,
             auto_preview: None,
             move_preview: None,
@@ -97,6 +101,7 @@ impl BudgetUiState {
     pub fn report_commit_failure(&mut self, message: impl Into<String>) {
         if let Some(edit) = &mut self.edit {
             edit.error = Some(message.into());
+            self.pending_assignments.remove(&edit.category_id);
         }
     }
     pub fn cancel_edit(&mut self) -> Option<String> {
@@ -122,7 +127,26 @@ impl BudgetUiState {
             .focused_category
             .is_some_and(|id| !visible.contains(&id))
         {
-            self.focused_category = visible.first().copied();
+            self.focused_category = None;
+        }
+    }
+    /// Reconciles ephemeral editor state with a newly accepted projection. Collapse state is
+    /// deliberately untouched: it belongs to stable group identities, not a projection revision.
+    pub fn accept_projection(&mut self, view: &BudgetMonthView) {
+        if self.projection_revision != Some(view.calculation_revision) {
+            self.pending_assignments.clear();
+            self.projection_revision = Some(view.calculation_revision);
+        }
+        let categories: Vec<_> = view.rows.iter().map(|row| row.category_id).collect();
+        self.restore_focus(&categories);
+        self.selected_categories
+            .retain(|id| categories.contains(id));
+        if self
+            .edit
+            .as_ref()
+            .is_some_and(|edit| !categories.contains(&edit.category_id))
+        {
+            self.edit = None;
         }
     }
     /// Handles editor keys without destroying a draft. Enter returns a reversible replacement;
@@ -142,6 +166,9 @@ impl BudgetUiState {
         let amount = parse_usd_input(&edit.draft)
             .inspect_err(|_| edit.error = Some("Enter a valid dollar amount".into()))?;
         let committed = (edit.category_id, amount);
+        if key != AssignmentKey::Escape && !self.pending_assignments.insert(edit.category_id) {
+            return Ok(None);
+        }
         if key != AssignmentKey::Enter {
             let at = visible
                 .iter()
@@ -250,6 +277,21 @@ fn submit_batch(
     )));
 }
 
+fn submit_assignment(
+    actions: &mut ActionCollector,
+    month: BudgetMonth,
+    category_id: CategoryId,
+    amount: Money,
+) {
+    actions.push(ApplicationAction::Financial(FinancialCommand::Assignment(
+        AssignmentCommand::Set(BudgetAssignment {
+            category_id,
+            month,
+            amount,
+        }),
+    )));
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     view: &BudgetMonthView,
@@ -257,6 +299,17 @@ pub fn show(
     context: crate::app::command::CommandAvailabilityContext,
     actions: &mut ActionCollector,
 ) {
+    state.accept_projection(view);
+    if view.rows.is_empty() {
+        empty_budget(ui, actions);
+        return;
+    }
+    render_header(ui, view, actions);
+    render_assignment_tools(ui, view, state, context, actions);
+    render_grid(ui, view, state, actions);
+}
+
+fn render_header(ui: &mut egui::Ui, view: &BudgetMonthView, actions: &mut ActionCollector) {
     ui.horizontal(|ui| {
         if ui.button("◀").on_hover_text("Previous month").clicked() {
             actions.push(crate::app::command::AppCommand::PreviousMonth);
@@ -273,11 +326,26 @@ pub fn show(
             actions.push(crate::app::command::AppCommand::NextMonth);
         }
         ui.separator();
-        ui.strong(format!(
-            "Ready to Assign: {}",
-            cents(view.ready_to_assign_cents)
-        ));
+        let (color, icon, meaning) = ready_to_assign_semantics(view.ready_to_assign_cents);
+        ui.colored_label(
+            color,
+            egui::RichText::new(format!(
+                "{icon} Ready to Assign: {} ({meaning})",
+                cents(view.ready_to_assign_cents)
+            ))
+            .strong()
+            .size(18.0),
+        );
     });
+}
+
+fn render_assignment_tools(
+    ui: &mut egui::Ui,
+    view: &BudgetMonthView,
+    state: &mut BudgetUiState,
+    context: crate::app::command::CommandAvailabilityContext,
+    actions: &mut ActionCollector,
+) {
     ui.horizontal(|ui| {
         let auto = crate::app::command::command_availability(
             context,
@@ -349,7 +417,6 @@ pub fn show(
             }
         });
     }
-    render_grid(ui, view, state, actions);
 }
 
 fn render_grid(
@@ -358,13 +425,12 @@ fn render_grid(
     state: &mut BudgetUiState,
     actions: &mut ActionCollector,
 ) {
-    let visible: Vec<_> = view
-        .rows
+    let rows = ordered_rows(view);
+    let visible: Vec<_> = rows
         .iter()
         .filter(|r| !state.is_collapsed(r.group_id))
         .map(|r| (r.category_id, cents(r.assigned_cents)))
         .collect();
-    state.restore_focus(&visible.iter().map(|x| x.0).collect::<Vec<_>>());
     egui::Grid::new("budget-authoritative-grid")
         .striped(true)
         .show(ui, |ui| {
@@ -380,7 +446,7 @@ fn render_grid(
             }
             ui.end_row();
             let mut previous_group = None;
-            for row in &view.rows {
+            for row in rows {
                 if previous_group != Some(row.group_id) {
                     previous_group = Some(row.group_id);
                     let collapsed = state.is_collapsed(row.group_id);
@@ -401,16 +467,25 @@ fn render_grid(
                 if ui.checkbox(&mut selected, "").changed() {
                     state.toggle_selected(row.category_id);
                 }
-                if ui
-                    .selectable_label(state.focused_category == Some(row.category_id), &row.name)
-                    .clicked()
-                {
+                let category_clicked = ui
+                    .horizontal(|ui| {
+                        ui.add_space(16.0);
+                        ui.selectable_label(
+                            state.focused_category == Some(row.category_id),
+                            &row.name,
+                        )
+                        .clicked()
+                    })
+                    .inner;
+                if category_clicked {
                     state.focused_category = Some(row.category_id);
                 }
                 assignment_cell(ui, row, view, state, &visible, actions);
-                ui.label(crate::ui::format::money(cents(row.activity_cents)));
+                ui.label(crate::ui::format::money(cents(row.activity_cents)))
+                    .on_hover_text("Activity is calculated from the budget projection");
                 let (color, label) = availability(row);
-                ui.colored_label(color, label);
+                ui.colored_label(color, label)
+                    .on_hover_text("Available is calculated from the budget projection");
                 if row.underfunded_cents > 0 {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
@@ -426,6 +501,12 @@ fn render_grid(
                 ui.end_row();
             }
         });
+}
+
+fn ordered_rows(view: &BudgetMonthView) -> Vec<&CategoryRowView> {
+    let mut rows: Vec<_> = view.rows.iter().collect();
+    rows.sort_by_key(|row| (row.group_sort, row.category_sort));
+    rows
 }
 
 fn assignment_cell(
@@ -474,12 +555,7 @@ fn assignment_cell(
     });
     if let Some(key) = key {
         if let Ok(Some((category_id, amount))) = state.assignment_key(key, visible) {
-            submit_batch(
-                actions,
-                view.month,
-                view.calculation_revision,
-                vec![assignment_change(category_id, amount)],
-            );
+            submit_assignment(actions, view.month, category_id, amount);
         }
     }
     if let Some(error) = state.edit_error() {
@@ -488,22 +564,49 @@ fn assignment_cell(
 }
 
 fn availability(row: &CategoryRowView) -> (egui::Color32, String) {
-    if row.overspending_cents >= 0 {
+    if row.overspending_cents < 0 {
+        return if row.credit_card_payment {
+            (
+                egui::Color32::from_rgb(205, 125, 25),
+                format!("⚠ {} · credit overspent", cents(row.available_cents)),
+            )
+        } else {
+            (
+                egui::Color32::from_rgb(190, 45, 45),
+                format!("⛔ {} · cash overspent", cents(row.available_cents)),
+            )
+        };
+    }
+    if row.underfunded_cents > 0 {
         return (
-            egui::Color32::from_rgb(35, 130, 70),
-            crate::ui::format::money(cents(row.available_cents)),
+            egui::Color32::from_rgb(205, 125, 25),
+            format!("△ {} · underfunded", cents(row.available_cents)),
         );
     }
-    if row.credit_card_payment {
-        (
-            egui::Color32::from_rgb(205, 125, 25),
-            format!("{} credit-card overspending", cents(row.overspending_cents)),
-        )
-    } else {
-        (
-            egui::Color32::from_rgb(190, 45, 45),
-            format!("{} cash overspending", cents(row.overspending_cents)),
-        )
+    if row.available_cents == 0 {
+        return (egui::Color32::GRAY, "○ $0.00 · zero".into());
+    }
+    if row.available_cents > 0 {
+        return (
+            egui::Color32::from_rgb(35, 130, 70),
+            format!("✓ {} · available", cents(row.available_cents)),
+        );
+    }
+    (
+        egui::Color32::from_rgb(205, 125, 25),
+        format!("△ {} · underfunded", cents(row.available_cents)),
+    )
+}
+
+fn ready_to_assign_semantics(cents: i64) -> (egui::Color32, &'static str, &'static str) {
+    match cents.cmp(&0) {
+        std::cmp::Ordering::Greater => (
+            egui::Color32::from_rgb(35, 130, 70),
+            "✓",
+            "available to assign",
+        ),
+        std::cmp::Ordering::Equal => (egui::Color32::GRAY, "○", "fully assigned"),
+        std::cmp::Ordering::Less => (egui::Color32::from_rgb(190, 45, 45), "⛔", "over-assigned"),
     }
 }
 
@@ -511,9 +614,74 @@ pub fn empty(ui: &mut egui::Ui) {
     ui.label("Open or create a budget to begin.");
 }
 
+fn empty_budget(ui: &mut egui::Ui, actions: &mut ActionCollector) {
+    ui.vertical_centered(|ui| {
+        ui.heading("Build your budget");
+        ui.label("Add a category group, then organize categories in the Categories workspace.");
+        if ui.button("Add Category Group").clicked() {
+            actions.push(ApplicationAction::Category(
+                crate::app::command::CategoryAction::NewGroup,
+            ));
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::{command::ApplicationAction, view_model::ViewVersion};
+
+    fn row(
+        group_id: CategoryGroupId,
+        category_id: CategoryId,
+        group_sort: i64,
+        category_sort: i64,
+    ) -> CategoryRowView {
+        CategoryRowView {
+            group_id,
+            category_id,
+            group_name: format!("group {group_sort}"),
+            name: format!("category {category_sort}"),
+            group_sort,
+            category_sort,
+            group_collapsed: false,
+            assigned_cents: 0,
+            activity_cents: 0,
+            available_cents: 0,
+            overspending_cents: 0,
+            underfunded_cents: 0,
+            target_id: None,
+            target_amount_cents: None,
+            target_remaining_cents: None,
+            target_due_date: None,
+            target_status: String::new(),
+            credit_card_payment: false,
+            protected: false,
+            hidden: false,
+            archived: false,
+            inspector: String::new(),
+        }
+    }
+
+    fn view(revision: u64, rows: Vec<CategoryRowView>) -> BudgetMonthView {
+        BudgetMonthView {
+            version: ViewVersion {
+                generation: 1,
+                revision,
+            },
+            month: BudgetMonth::new(2026, 8).unwrap(),
+            calculation_revision: revision,
+            ready_to_assign_cents: 1234,
+            assigned_cents: 0,
+            activity_cents: 0,
+            available_cents: 0,
+            overspending_cents: 0,
+            cash_overspending_cents: 0,
+            credit_card_overspending_cents: 0,
+            rows,
+            inspector: vec![],
+        }
+    }
     #[test]
     fn keyboard_commit_cancel_and_navigation_preserve_draft_on_failure() {
         let a = CategoryId::new();
@@ -543,5 +711,95 @@ mod tests {
         s.toggle_selected(c);
         assert!(s.is_collapsed(g));
         assert!(s.selected_categories.contains(&c));
+    }
+
+    #[test]
+    fn projection_order_and_collapse_survive_refresh() {
+        let first_group = CategoryGroupId::new();
+        let second_group = CategoryGroupId::new();
+        let a = CategoryId::new();
+        let b = CategoryId::new();
+        let projection = view(
+            1,
+            vec![row(second_group, b, 20, 0), row(first_group, a, 10, 0)],
+        );
+        assert_eq!(
+            ordered_rows(&projection)
+                .iter()
+                .map(|row| row.category_id)
+                .collect::<Vec<_>>(),
+            vec![a, b]
+        );
+
+        let mut state = BudgetUiState::default();
+        state.set_collapsed(first_group, true);
+        state.accept_projection(&projection);
+        let refreshed = view(2, projection.rows.clone());
+        state.accept_projection(&refreshed);
+        assert!(state.is_collapsed(first_group));
+    }
+
+    #[test]
+    fn focus_is_stable_while_collapsed_and_clears_only_when_removed() {
+        let group = CategoryGroupId::new();
+        let category = CategoryId::new();
+        let mut state = BudgetUiState {
+            focused_category: Some(category),
+            ..BudgetUiState::default()
+        };
+        state.set_collapsed(group, true);
+        state.accept_projection(&view(1, vec![row(group, category, 0, 0)]));
+        assert_eq!(state.focused_category, Some(category));
+        state.accept_projection(&view(2, vec![]));
+        assert_eq!(state.focused_category, None);
+    }
+
+    #[test]
+    fn assignment_submission_is_set_and_gated_until_a_new_projection() {
+        let category = CategoryId::new();
+        let month = BudgetMonth::new(2026, 8).unwrap();
+        let mut actions = ActionCollector::default();
+        submit_assignment(&mut actions, month, category, cents(725));
+        assert_eq!(
+            actions.into_actions(),
+            vec![ApplicationAction::Financial(FinancialCommand::Assignment(
+                AssignmentCommand::Set(BudgetAssignment {
+                    category_id: category,
+                    month,
+                    amount: cents(725)
+                })
+            ))]
+        );
+
+        let rows = [(category, Money::ZERO)];
+        let mut state = BudgetUiState::default();
+        state.begin_edit(category, Money::ZERO);
+        *state.edit_text_mut().unwrap() = "1.00".into();
+        assert!(
+            state
+                .assignment_key(AssignmentKey::Enter, &rows)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            state
+                .assignment_key(AssignmentKey::Enter, &rows)
+                .unwrap()
+                .is_none()
+        );
+        state.accept_projection(&view(2, vec![row(CategoryGroupId::new(), category, 0, 0)]));
+        assert!(
+            state
+                .assignment_key(AssignmentKey::Enter, &rows)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn ready_to_assign_semantics_use_the_projection_value_sign() {
+        assert_eq!(ready_to_assign_semantics(1).1, "✓");
+        assert_eq!(ready_to_assign_semantics(0).1, "○");
+        assert_eq!(ready_to_assign_semantics(-1).1, "⛔");
     }
 }
