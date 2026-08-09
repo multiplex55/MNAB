@@ -404,6 +404,66 @@ pub fn backup_fixed(
     )
 }
 
+/// Validates a managed backup and restores it exclusively to the fixed database.
+/// A known-good snapshot of the current database is published before replacement.
+pub fn restore_fixed(
+    paths: &PortablePaths,
+    metadata_path: &Path,
+) -> Result<
+    crate::service::backup_service::BackupArtifact,
+    crate::service::backup_service::BackupError,
+> {
+    use crate::service::backup_service::{BackupReason, BackupService};
+    let service = BackupService::new(&paths.backups);
+    let artifact = service.validate(metadata_path)?;
+    let current = Connection::open_with_flags(&paths.database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let info = inspect(&paths.database)
+        .map_err(|e| crate::service::backup_service::BackupError::Validation(e.to_string()))?
+        .ok_or_else(|| {
+            crate::service::backup_service::BackupError::Validation(
+                "fixed database is not an MNAB database".into(),
+            )
+        })?;
+    if artifact.details.budget_id != info.id.to_string() {
+        return Err(crate::service::backup_service::BackupError::Validation(
+            "backup belongs to a different budget".into(),
+        ));
+    }
+    service.create(
+        &current,
+        &info.id.to_string(),
+        info.version,
+        BackupReason::PreRestore,
+    )?;
+    drop(current);
+
+    let temporary = paths
+        .data
+        .join(format!(".restore-{}.sqlite3", Uuid::new_v4()));
+    let source = Connection::open_with_flags(&artifact.database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut destination = Connection::open(&temporary)?;
+    rusqlite::backup::Backup::new(&source, &mut destination)?.run_to_completion(
+        128,
+        std::time::Duration::from_millis(5),
+        None,
+    )?;
+    drop(destination);
+    let check = Connection::open_with_flags(&temporary, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let findings = diagnostics::all(&check, true)?;
+    drop(check);
+    if findings
+        .iter()
+        .any(|f| f.severity == diagnostics::Severity::Error)
+    {
+        let _ = fs::remove_file(&temporary);
+        return Err(crate::service::backup_service::BackupError::Validation(
+            "restored copy failed complete diagnostics".into(),
+        ));
+    }
+    fs::rename(&temporary, &paths.database)?;
+    Ok(artifact)
+}
+
 pub struct PortableBudgetStorage<'a> {
     root: &'a Path,
 }
@@ -613,5 +673,31 @@ mod tests {
             .unwrap();
         let fixed_database = fs::canonicalize(&paths.database).unwrap();
         assert_eq!(report.replacement, fixed_database);
+    }
+
+    #[test]
+    fn restore_rejects_failure_and_restores_only_the_fixed_database() {
+        let (_dir, paths) = paths();
+        create_managed(&paths, request("Before")).unwrap();
+        let backup = backup_fixed(&paths, BackupReason::Manual).unwrap();
+        let connection = Connection::open(&paths.database).unwrap();
+        connection
+            .execute("UPDATE budgets SET name='After'", [])
+            .unwrap();
+        drop(connection);
+        restore_fixed(&paths, &backup.metadata).unwrap();
+        let restored = Connection::open(&paths.database).unwrap();
+        let name: String = restored
+            .query_row("SELECT name FROM budgets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "Before");
+
+        let outside = paths.data.join("outside.json");
+        fs::write(&outside, b"{}").unwrap();
+        assert!(matches!(
+            restore_fixed(&paths, &outside),
+            Err(crate::service::backup_service::BackupError::OutOfScope)
+        ));
+        assert!(paths.database.is_file());
     }
 }

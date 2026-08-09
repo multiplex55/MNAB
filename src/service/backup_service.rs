@@ -487,4 +487,30 @@ mod tests {
         let backup_dir = directory.path().join("broken");
         assert_eq!(fs::read_dir(backup_dir).unwrap().count(), 0);
     }
+
+    #[test]
+    fn cancelled_backup_publishes_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = Connection::open_in_memory().unwrap();
+        source
+            .execute_batch("CREATE TABLE value_(value TEXT)")
+            .unwrap();
+        let cancellation = BackupCancellation::default();
+        cancellation.cancel();
+        let result = BackupService::new(directory.path()).create_with_progress(
+            &source,
+            "cancelled",
+            3,
+            BackupReason::Manual,
+            &cancellation,
+            |_| {},
+        );
+        assert!(matches!(result, Err(BackupError::Cancelled)));
+        assert_eq!(
+            fs::read_dir(directory.path().join("cancelled"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
 }
