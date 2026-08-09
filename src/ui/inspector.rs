@@ -150,24 +150,6 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, actions: &mut ActionCollect
                 |id| format!("Selected account: {id}"),
             ));
         }
-        InspectorContext::Transaction(_) => {
-            ui.label("Transaction details");
-        }
-        InspectorContext::Transfer(_) => {
-            ui.label("Transfer details");
-        }
-        InspectorContext::Reconciliation(_) => {
-            ui.label("Reconciliation controls");
-        }
-        InspectorContext::ImportCandidate(_) => {
-            ui.label("Import match details");
-        }
-        InspectorContext::CategoryGoal(_) => {
-            ui.label("Category goal details");
-        }
-        InspectorContext::BackgroundOperation(_) => {
-            ui.label("Background operation details");
-        }
     }
     for operation in state.operations.values() {
         ui.separator();

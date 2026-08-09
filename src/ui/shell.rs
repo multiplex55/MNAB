@@ -319,10 +319,6 @@ fn show_budget_dialog(ctx: &egui::Context, state: &mut AppState, actions: &mut A
             "Budget settings",
             "Rename budget metadata, back up, restore, validate, repair, or reveal data and backup folders.",
         ),
-        crate::app::state::Dialog::RenameBudget => (
-            "Rename budget",
-            "Renaming changes only database metadata; mnab.sqlite3 keeps its fixed filename.",
-        ),
         crate::app::state::Dialog::RepairBudget => (
             "Repair budget",
             "Review diagnostics and the validated backup before applying an explicit repair.",

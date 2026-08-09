@@ -12,7 +12,6 @@ pub struct Ledger {
     pub audit: Vec<String>,
     pub hide_closed: bool,
     pub account_groups: HashMap<AccountGroupId, AccountGroup>,
-    pub category_goals: HashMap<CategoryId, CategoryGoal>,
     /// Earliest ledger date invalidated by a transaction mutation; recalculation continues forward.
     pub recalculation_from: Option<TransactionDate>,
 }
