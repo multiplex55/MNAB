@@ -30,3 +30,14 @@ fn dependency_directions_are_preserved() {
         assert_tree_omits(Path::new(path), &["rusqlite", "egui", "eframe"]);
     }
 }
+
+#[test]
+fn transaction_facing_window_titles_do_not_regress() {
+    let shell = fs::read_to_string("src/ui/shell.rs").unwrap();
+    for forbidden in ["\"Workflow\"", "\"Transaction editor\""] {
+        assert!(
+            !shell.contains(forbidden),
+            "shell contains forbidden transaction-facing window title {forbidden}"
+        );
+    }
+}

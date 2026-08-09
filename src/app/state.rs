@@ -345,7 +345,37 @@ pub enum EditorState {
     ManagingCategory(CategoryEditorState),
     ManagingAccountGroup(GroupEditorState),
 }
+
+/// The one presentation surface which owns an [`EditorState`] for a frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EditorSurface {
+    InlineRegister,
+    Modal,
+    Workspace,
+    None,
+}
+
 impl EditorState {
+    /// Returns the authoritative presentation owner for this editor.
+    ///
+    /// Category management is already embedded in the categories workspace. Account-group
+    /// management is reserved to a workspace as well (its workspace UI is currently a
+    /// placeholder), rather than allowing the generic modal to claim either state.
+    pub const fn surface(&self) -> EditorSurface {
+        match self {
+            Self::CreatingTransaction(_) | Self::EditingTransaction(_) => {
+                EditorSurface::InlineRegister
+            }
+            Self::CreatingAccount(_)
+            | Self::EditingAccount(_)
+            | Self::CreatingTransfer(_)
+            | Self::Importing(_)
+            | Self::Reconciling(_) => EditorSurface::Modal,
+            Self::ManagingCategory(_) | Self::ManagingAccountGroup(_) => EditorSurface::Workspace,
+            Self::Idle => EditorSurface::None,
+        }
+    }
+
     pub fn metadata(&self) -> Option<&EditorMetadata> {
         match self {
             Self::Idle => None,
@@ -836,6 +866,86 @@ mod navigation_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn metadata() -> EditorMetadata {
+        EditorMetadata::new(Id::new("surface-test"))
+    }
+
+    #[test]
+    fn every_editor_variant_has_one_authoritative_surface() {
+        let transaction =
+            || crate::app::transaction_editor::TransactionEditorState::new(None, metadata());
+        let account = || AccountEditorState {
+            account_id: None,
+            form: Default::default(),
+            metadata: metadata(),
+        };
+        let cases = [
+            (EditorState::Idle, EditorSurface::None),
+            (
+                EditorState::CreatingAccount(account()),
+                EditorSurface::Modal,
+            ),
+            (EditorState::EditingAccount(account()), EditorSurface::Modal),
+            (
+                EditorState::CreatingTransaction(transaction()),
+                EditorSurface::InlineRegister,
+            ),
+            (
+                EditorState::EditingTransaction(transaction()),
+                EditorSurface::InlineRegister,
+            ),
+            (
+                EditorState::CreatingTransfer(TransferEditorState {
+                    draft: Default::default(),
+                    transfer_id: None,
+                    edited_leg_id: None,
+                    other_leg_id: None,
+                    metadata: metadata(),
+                }),
+                EditorSurface::Modal,
+            ),
+            (
+                EditorState::Importing(ImportEditorState {
+                    account_id: None,
+                    source: PathBuf::new(),
+                    batch_id: None,
+                    metadata: metadata(),
+                }),
+                EditorSurface::Modal,
+            ),
+            (
+                EditorState::Reconciling(ReconciliationEditorState {
+                    account_id: None,
+                    statement_balance: String::new(),
+                    statement_date: String::new(),
+                    metadata: metadata(),
+                }),
+                EditorSurface::Modal,
+            ),
+            (
+                EditorState::ManagingCategory(CategoryEditorState {
+                    category_id: None,
+                    group_id: None,
+                    name: String::new(),
+                    mode: CategoryEditorMode::Category,
+                    metadata: metadata(),
+                }),
+                EditorSurface::Workspace,
+            ),
+            (
+                EditorState::ManagingAccountGroup(GroupEditorState {
+                    group_id: None,
+                    metadata: metadata(),
+                }),
+                EditorSurface::Workspace,
+            ),
+        ];
+
+        for (editor, expected) in cases {
+            assert_eq!(editor.surface(), expected);
+        }
+    }
     #[test]
     fn projection_refresh_retains_prior_and_rejects_stale_completion() {
         let generation = Generation { budget: 1, view: 2 };
