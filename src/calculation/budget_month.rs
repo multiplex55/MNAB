@@ -3,21 +3,13 @@
 //! All values are inputs or results; in particular Ready to Assign is never persisted.
 
 use super::credit_card::{CreditCardError, CreditCardInput, CreditCardResult};
-use crate::domain::{AccountId, BudgetMonth, CategoryId, Money, MoneyError};
+use crate::domain::{BudgetMonth, CategoryId, Money, MoneyError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BudgetAccountKind {
     Cash,
     CreditCard,
     Tracking,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AccountInput {
-    pub id: AccountId,
-    pub kind: BudgetAccountKind,
-    /// Balance at the end of this month (opening balances are included here).
-    pub balance: Money,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,13 +33,26 @@ pub struct PriorCategoryResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BudgetMonthInput {
     pub month: BudgetMonth,
-    pub accounts: Vec<AccountInput>,
     pub categories: Vec<CategoryInput>,
     pub prior_categories: Vec<PriorCategoryResult>,
-    /// Categorized and uncategorized on-budget inflows during the displayed timeline.
-    pub inflows: Money,
+    /// Resources already present in on-budget accounts at the start of the projection.
+    pub on_budget_resources: Money,
+    /// Ready to Assign carried from the preceding calculated month.
+    pub prior_ready_to_assign: Money,
+    /// Tracking balances are facts used by reports, but never budget resources.
+    pub tracking_balances: Money,
+    /// On-budget inflows without a category are new money available to assign.
+    pub uncategorized_inflows: Money,
+    /// Categorized activity is repeated here as an auditable aggregate input.
+    pub categorized_activity: Money,
+    /// Categorized outflows split by payment-account behavior.
+    pub cash_spending: Money,
+    pub card_spending: Money,
+    /// Net assignment movement for this month. Money moves therefore net to zero.
+    pub assignments: Money,
+    /// Positive category availability carried into this month.
+    pub positive_rollover: Money,
     pub prior_cash_overspending: Money,
-    pub manual_adjustments: Money,
     /// Assignments made after this month but visible in the displayed timeline.
     pub future_assignments: Money,
 }
@@ -129,7 +134,6 @@ fn negative_magnitude(value: Money) -> Result<Money, CalculationError> {
 /// Calculates a month without I/O, clocks, global state, or mutation of its input.
 pub fn calculate(input: &BudgetMonthInput) -> Result<BudgetMonthResult, CalculationError> {
     let mut results = Vec::with_capacity(input.categories.len());
-    let mut assigned_total = Money::ZERO;
     let mut card_debt = Money::ZERO;
     for category in &input.categories {
         let prior = input
@@ -138,7 +142,6 @@ pub fn calculate(input: &BudgetMonthInput) -> Result<BudgetMonthResult, Calculat
             .find(|p| p.id == category.id)
             .map_or(Money::ZERO, |p| positive(p.available));
         let available = add(add(prior, category.assigned)?, category.activity)?;
-        assigned_total = add(assigned_total, category.assigned)?;
         let cash_shortfall = negative_magnitude(available)?;
         let card_shortfall =
             if cash_shortfall > Money::ZERO && category.credit_card_activity < Money::ZERO {
@@ -177,25 +180,15 @@ pub fn calculate(input: &BudgetMonthInput) -> Result<BudgetMonthResult, Calculat
             overspending,
         });
     }
-    let cash = input
-        .accounts
-        .iter()
-        .filter(|a| a.kind == BudgetAccountKind::Cash)
-        .try_fold(Money::ZERO, |sum, a| add(sum, a.balance))?;
-    // The balance model naturally includes opening balances. Inflows are supplied separately
-    // for ledger-based callers; use them only when no balance snapshot is available.
-    let resources = if input
-        .accounts
-        .iter()
-        .any(|a| a.kind == BudgetAccountKind::Cash)
-    {
-        cash
-    } else {
-        input.inflows
-    };
-    let mut rta = resources.checked_sub(assigned_total)?;
+    // Activity changes the category envelope, not the resource pool: categorized spending must
+    // not consume RTA after its assignment already did so. Tracking and current account balances
+    // are intentionally absent from this equation.
+    let resources = add(
+        add(input.on_budget_resources, input.prior_ready_to_assign)?,
+        input.uncategorized_inflows,
+    )?;
+    let mut rta = resources.checked_sub(input.assignments)?;
     rta = rta.checked_sub(input.prior_cash_overspending)?;
-    rta = add(rta, input.manual_adjustments)?;
     rta = rta.checked_sub(input.future_assignments)?;
     Ok(BudgetMonthResult {
         month: input.month,
@@ -240,6 +233,7 @@ pub fn calculate_chronological(
     let mut output: Vec<BudgetMonthResult> = Vec::with_capacity(inputs.len());
     for input in &mut inputs {
         if let Some(prior) = output.last() {
+            input.prior_ready_to_assign = prior.ready_to_assign;
             input.prior_categories = prior
                 .categories
                 .iter()
@@ -249,6 +243,12 @@ pub fn calculate_chronological(
                     available: positive(category.available),
                 })
                 .collect();
+            input.positive_rollover = input
+                .prior_categories
+                .iter()
+                .try_fold(Money::ZERO, |total, category| {
+                    add(total, category.available)
+                })?;
             input.prior_cash_overspending =
                 prior
                     .categories
@@ -272,12 +272,18 @@ mod tests {
     fn input(category: CategoryInput) -> BudgetMonthInput {
         BudgetMonthInput {
             month: BudgetMonth::new(2026, 1).unwrap(),
-            accounts: vec![],
             categories: vec![category],
             prior_categories: vec![],
-            inflows: m(1000),
+            on_budget_resources: m(0),
+            prior_ready_to_assign: m(0),
+            tracking_balances: m(0),
+            uncategorized_inflows: m(1000),
+            categorized_activity: m(0),
+            cash_spending: m(0),
+            card_spending: m(0),
+            assignments: m(0),
+            positive_rollover: m(0),
             prior_cash_overspending: m(0),
-            manual_adjustments: m(0),
             future_assignments: m(0),
         }
     }
@@ -294,7 +300,9 @@ mod tests {
             credit_card_activity: m(0),
         });
         let r = calculate(&i).unwrap();
+        assert_eq!(r.categories[0].activity, m(-200));
         assert_eq!(r.categories[0].available, m(300));
+        assert_eq!(r.ready_to_assign, m(1000));
         i.categories[0].activity = m(100);
         assert_eq!(calculate(&i).unwrap().categories[0].available, m(600));
     }
@@ -328,20 +336,73 @@ mod tests {
             target: None,
             credit_card_activity: m(0),
         });
-        i.accounts = vec![
-            AccountInput {
-                id: AccountId::new(),
-                kind: BudgetAccountKind::Cash,
-                balance: m(1000),
-            },
-            AccountInput {
-                id: AccountId::new(),
-                kind: BudgetAccountKind::Tracking,
-                balance: m(9000),
-            },
-        ];
+        i.tracking_balances = m(9000);
+        i.assignments = m(100);
         i.future_assignments = m(200);
         assert_eq!(calculate(&i).unwrap().ready_to_assign, m(700));
+    }
+
+    #[test]
+    fn canonical_budget_facts_have_distinct_rta_semantics() {
+        let id = CategoryId::new();
+        let mut i = input(CategoryInput {
+            id,
+            assigned: m(600),
+            activity: m(-250),
+            hidden: false,
+            archived: false,
+            target: Some(m(800)),
+            credit_card_activity: m(0),
+        });
+        i.on_budget_resources = m(400);
+        i.uncategorized_inflows = m(1_000);
+        i.tracking_balances = m(50_000);
+        i.categorized_activity = m(-250);
+        i.cash_spending = m(250);
+        i.assignments = m(600);
+        let result = calculate(&i).unwrap();
+        assert_eq!(result.ready_to_assign, m(800));
+        assert_eq!(result.categories[0].activity, m(-250));
+        assert_eq!(result.categories[0].available, m(350));
+        assert_eq!(
+            result.categories[0].funding,
+            FundingStatus::Underfunded(m(200))
+        );
+    }
+
+    #[test]
+    fn refund_money_move_and_card_overspending_do_not_spend_rta_twice() {
+        let first = CategoryId::new();
+        let second = CategoryId::new();
+        let mut i = input(CategoryInput {
+            id: first,
+            assigned: m(100),
+            activity: m(-300),
+            hidden: false,
+            archived: false,
+            target: None,
+            credit_card_activity: m(-300),
+        });
+        i.categories.push(CategoryInput {
+            id: second,
+            assigned: m(-100),
+            activity: m(75),
+            hidden: false,
+            archived: false,
+            target: None,
+            credit_card_activity: m(0),
+        });
+        i.assignments = m(0);
+        i.categorized_activity = m(-225);
+        i.card_spending = m(300);
+        let result = calculate(&i).unwrap();
+        assert_eq!(result.ready_to_assign, m(1000));
+        assert_eq!(
+            result.categories[0].overspending,
+            Overspending::CreditCard(m(200))
+        );
+        assert_eq!(result.categories[1].available, m(-25));
+        assert_eq!(result.categories[1].overspending, Overspending::Cash(m(25)));
     }
     #[test]
     fn overflow_is_typed() {
@@ -372,6 +433,7 @@ mod tests {
         };
         let january = input(category(-1_200));
         let mut february = input(category(0));
+        february.uncategorized_inflows = Money::ZERO;
         february.month = BudgetMonth::new(2026, 2).unwrap();
         let result = calculate_chronological(vec![february, january]).unwrap();
         assert_eq!(result[0].categories[0].available, m(-1_200));

@@ -1045,57 +1045,186 @@ impl<'a> QueryStore<'a> {
         budget: BudgetId,
         month: &str,
     ) -> Result<BudgetMonthView, RepositoryError> {
-        let parsed_month = parse_month(month)?;
-        let mut stmt = self.connection.prepare(
-            r"SELECT g.id,c.id,g.name,c.name,g.sort_order,c.sort_order,
-                      COALESCE(g.hidden,0),COALESCE(c.hidden,0),COALESCE(c.archived,0),
-                      COALESCE(a.amount,0),
-                      COALESCE((SELECT SUM(CASE WHEN x.amount<0 THEN x.amount ELSE 0 END) FROM (
-                          SELECT t.category_id,t.amount FROM transactions t WHERE t.budget_id=?1 AND substr(t.transaction_date,1,7)=?2 AND t.archived=0 AND COALESCE(t.voided,0)=0
-                          UNION ALL SELECT s.category_id,s.amount FROM subtransactions s JOIN transactions t ON t.id=s.transaction_id WHERE t.budget_id=?1 AND substr(t.transaction_date,1,7)=?2 AND t.archived=0 AND COALESCE(t.voided,0)=0
-                      ) x WHERE x.category_id=c.id),0) activity,
-                      t.id,t.amount,t.due_date,t.target_type,
-                      CASE WHEN m.category_id IS NULL THEN 0 ELSE 1 END protected
-               FROM category_groups g JOIN categories c ON c.group_id=g.id
-               LEFT JOIN budget_assignments a ON a.category_id=c.id AND a.budget_month=?2
-               LEFT JOIN targets t ON t.category_id=c.id
-               LEFT JOIN credit_card_payment_categories m ON m.category_id=c.id
-               WHERE g.budget_id=?1
-               ORDER BY g.sort_order,g.id,c.sort_order,c.id",
-        ).map_err(repo)?;
-        let mut assigned = 0_i64;
-        let mut activity_total = 0_i64;
-        let rows = stmt.query_map((budget.to_string(), month), |r| {
-            let assigned_cents: i64 = r.get(9)?;
-            let activity_cents: i64 = r.get(10)?;
-            let target_amount: Option<i64> = r.get(12)?;
-            let available = assigned_cents + activity_cents;
-            let underfunded = target_amount.map_or(0, |t| (t - assigned_cents).max(0));
-            Ok(CategoryRowView {
-                group_id: r.get::<_, String>(0)?.parse().map_err(|_| rusqlite::Error::InvalidQuery)?, category_id: r.get::<_, String>(1)?.parse().map_err(|_| rusqlite::Error::InvalidQuery)?,
-                group_name: r.get(2)?, name: r.get(3)?, group_sort: r.get(4)?, category_sort: r.get(5)?,
-                group_collapsed: r.get::<_, i64>(6)? != 0, hidden: r.get::<_, i64>(7)? != 0, archived: r.get::<_, i64>(8)? != 0,
-                assigned_cents, activity_cents, available_cents: available, overspending_cents: (-available).max(0), underfunded_cents: underfunded,
-                target_id: r.get::<_, Option<String>>(11)?.map(|x| x.parse().map_err(|_| rusqlite::Error::InvalidQuery)).transpose()?, target_amount_cents: target_amount,
-                target_remaining_cents: target_amount.map(|_| underfunded), target_due_date: r.get(13)?, target_status: if underfunded == 0 { "funded" } else { "underfunded" }.into(),
-                credit_card_payment: r.get::<_, i64>(15)? != 0, protected: r.get::<_, i64>(15)? != 0,
-                inspector: format!("Assigned {assigned_cents}¢, activity {activity_cents}¢, available {available}¢. Recommendations are advisory and require Apply."),
-            })
-        }).map_err(repo)?.collect::<Result<Vec<_>, _>>().map_err(repo)?;
-        for row in &rows {
-            assigned += row.assigned_cents;
-            activity_total += row.activity_cents;
+        use crate::calculation::budget_month::{
+            BudgetMonthInput, CategoryInput, FundingStatus, Overspending, calculate_chronological,
+        };
+        use std::collections::HashMap;
+
+        #[derive(Clone)]
+        struct CategoryFact {
+            group_id: crate::domain::CategoryGroupId,
+            id: crate::domain::CategoryId,
+            group_name: String,
+            name: String,
+            group_sort: i64,
+            category_sort: i64,
+            group_collapsed: bool,
+            hidden: bool,
+            archived: bool,
+            target_id: Option<crate::domain::TargetId>,
+            target: Option<Money>,
+            due: Option<String>,
+            payment: bool,
         }
-        let available = assigned + activity_total;
-        let revision = self.connection.query_row(
-            "SELECT COALESCE(MAX(rev),0) FROM (SELECT MAX(strftime('%s',modified_at)) rev FROM budget_assignments WHERE budget_id=?1 UNION ALL SELECT MAX(strftime('%s',modified_at)) FROM transactions WHERE budget_id=?1 UNION ALL SELECT MAX(sort_order) FROM categories WHERE budget_id=?1)",
-            [budget.to_string()], |r| r.get::<_, Option<u64>>(0)).map_err(repo)?.unwrap_or(0);
-        // Positive uncategorized cash-account inflows fund the budget. Debt and tracking opening
-        // balances never reduce Ready to Assign merely because their ledger sign is negative.
-        let cash_inflows = self.connection.query_row(
-            "SELECT COALESCE(SUM(CASE WHEN t.amount>0 THEN t.amount ELSE 0 END),0) FROM transactions t JOIN accounts a ON a.id=t.account_id WHERE t.budget_id=?1 AND substr(t.transaction_date,1,7)<=?2 AND t.category_id IS NULL AND t.archived=0 AND COALESCE(t.voided,0)=0 AND a.account_type IN ('checking','savings','cash')",
-            (budget.to_string(), month), |r| r.get::<_, i64>(0)).map_err(repo)?;
-        Ok(BudgetMonthView { version: ViewVersion { generation: 0, revision }, month: parsed_month, calculation_revision: revision, ready_to_assign_cents: cash_inflows - assigned, assigned_cents: assigned, activity_cents: activity_total, available_cents: available, overspending_cents: rows.iter().map(|r| r.overspending_cents).sum(), rows, inspector: vec!["Ready to Assign is calculated from persisted cents; targets never move money without a confirmed assignment command.".into()] })
+
+        let selected = parse_month(month)?;
+        let budget_key = budget.to_string();
+        // Storage returns canonical records and classifications. Budget meaning is assigned only
+        // while constructing the explicitly typed calculation boundary below.
+        let mut category_statement = self.connection.prepare(
+            "SELECT g.id,c.id,g.name,c.name,g.sort_order,c.sort_order,g.hidden,c.hidden,c.archived,t.id,t.amount,t.due_date,CASE WHEN p.category_id IS NULL THEN 0 ELSE 1 END FROM category_groups g JOIN categories c ON c.group_id=g.id LEFT JOIN targets t ON t.category_id=c.id LEFT JOIN credit_card_payment_categories p ON p.category_id=c.id WHERE g.budget_id=?1 ORDER BY g.sort_order,g.id,c.sort_order,c.id",
+        ).map_err(repo)?;
+        let categories = category_statement
+            .query_map([&budget_key], |r| {
+                Ok(CategoryFact {
+                    group_id: r
+                        .get::<_, String>(0)?
+                        .parse()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    id: r
+                        .get::<_, String>(1)?
+                        .parse()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    group_name: r.get(2)?,
+                    name: r.get(3)?,
+                    group_sort: r.get(4)?,
+                    category_sort: r.get(5)?,
+                    group_collapsed: r.get::<_, bool>(6)?,
+                    hidden: r.get(7)?,
+                    archived: r.get(8)?,
+                    target_id: r
+                        .get::<_, Option<String>>(9)?
+                        .map(|v| v.parse().map_err(|_| rusqlite::Error::InvalidQuery))
+                        .transpose()?,
+                    target: r.get::<_, Option<i64>>(10)?.map(Money::from_minor_units),
+                    due: r.get(11)?,
+                    payment: r.get(12)?,
+                })
+            })
+            .map_err(repo)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(repo)?;
+
+        let earliest: Option<String> = self.connection.query_row(
+            "SELECT MIN(m) FROM (SELECT substr(transaction_date,1,7) m FROM transactions WHERE budget_id=?1 AND archived=0 AND COALESCE(voided,0)=0 UNION ALL SELECT budget_month FROM budget_assignments WHERE budget_id=?1)",
+            [&budget_key], |r| r.get(0),
+        ).map_err(repo)?;
+        let mut cursor = earliest
+            .as_deref()
+            .map(parse_month)
+            .transpose()?
+            .unwrap_or(selected);
+        if cursor > selected {
+            cursor = selected;
+        }
+        let mut inputs = Vec::new();
+        loop {
+            let key = format!("{:04}-{:02}", cursor.year(), cursor.month());
+            let assignments = self.connection.prepare("SELECT category_id,amount FROM budget_assignments WHERE budget_id=?1 AND budget_month=?2").map_err(repo)?
+                .query_map((&budget_key, &key), |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).map_err(repo)?
+                .collect::<Result<HashMap<_, _>, _>>().map_err(repo)?;
+            // A split replaces its parent category line. Account types remain facts here and are
+            // used solely to distinguish cash/card/tracking calculation inputs.
+            let lines_sql = "WITH lines AS (SELECT t.account_id,t.category_id,t.amount FROM transactions t WHERE t.budget_id=?1 AND substr(t.transaction_date,1,7)=?2 AND t.archived=0 AND COALESCE(t.voided,0)=0 AND NOT EXISTS(SELECT 1 FROM transaction_splits s WHERE s.transaction_id=t.id) UNION ALL SELECT t.account_id,s.category_id,s.amount FROM transactions t JOIN transaction_splits s ON s.transaction_id=t.id WHERE t.budget_id=?1 AND substr(t.transaction_date,1,7)=?2 AND t.archived=0 AND COALESCE(t.voided,0)=0) SELECT l.category_id,COALESCE(SUM(l.amount),0),COALESCE(SUM(CASE WHEN a.account_type='credit_card' THEN l.amount ELSE 0 END),0),COALESCE(SUM(CASE WHEN a.account_type IN ('checking','savings','cash') AND l.amount<0 THEN -l.amount ELSE 0 END),0),COALESCE(SUM(CASE WHEN a.account_type='credit_card' AND l.amount<0 THEN -l.amount ELSE 0 END),0) FROM lines l JOIN accounts a ON a.id=l.account_id GROUP BY l.category_id";
+            let mut activity = HashMap::<String, (i64, i64)>::new();
+            let mut cash_spending = 0_i64;
+            let mut card_spending = 0_i64;
+            let mut line_stmt = self.connection.prepare(lines_sql).map_err(repo)?;
+            let line_rows = line_stmt
+                .query_map((&budget_key, &key), |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, i64>(4)?,
+                    ))
+                })
+                .map_err(repo)?;
+            for row in line_rows {
+                let (category, total, card, cash_out, card_out) = row.map_err(repo)?;
+                cash_spending += cash_out;
+                card_spending += card_out;
+                if let Some(category) = category {
+                    activity.insert(category, (total, card));
+                }
+            }
+            let uncategorized_inflows: i64 = self.connection.query_row(
+                "SELECT COALESCE(SUM(CASE WHEN t.amount>0 THEN t.amount ELSE 0 END),0) FROM transactions t JOIN accounts a ON a.id=t.account_id WHERE t.budget_id=?1 AND substr(t.transaction_date,1,7)=?2 AND t.category_id IS NULL AND NOT EXISTS(SELECT 1 FROM transaction_splits s WHERE s.transaction_id=t.id) AND t.transfer_id IS NULL AND t.archived=0 AND COALESCE(t.voided,0)=0 AND a.account_type IN ('checking','savings','cash')",
+                (&budget_key, &key), |r| r.get(0),
+            ).map_err(repo)?;
+            let tracking: i64 = self.connection.query_row(
+                "SELECT COALESCE(SUM(t.amount),0) FROM transactions t JOIN accounts a ON a.id=t.account_id WHERE t.budget_id=?1 AND substr(t.transaction_date,1,7)<=?2 AND t.archived=0 AND COALESCE(t.voided,0)=0 AND a.account_type IN ('loan','asset','liability')",
+                (&budget_key, &key), |r| r.get(0),
+            ).map_err(repo)?;
+            let category_inputs = categories
+                .iter()
+                .map(|category| {
+                    let assigned = assignments
+                        .get(&category.id.to_string())
+                        .copied()
+                        .unwrap_or(0);
+                    let (activity, card) = activity
+                        .get(&category.id.to_string())
+                        .copied()
+                        .unwrap_or((0, 0));
+                    CategoryInput {
+                        id: category.id,
+                        assigned: Money::from_minor_units(assigned),
+                        activity: Money::from_minor_units(activity),
+                        hidden: category.hidden,
+                        archived: category.archived,
+                        target: category.target,
+                        credit_card_activity: Money::from_minor_units(card),
+                    }
+                })
+                .collect::<Vec<_>>();
+            inputs.push(BudgetMonthInput {
+                month: cursor,
+                categories: category_inputs,
+                prior_categories: vec![],
+                on_budget_resources: Money::ZERO,
+                prior_ready_to_assign: Money::ZERO,
+                tracking_balances: Money::from_minor_units(tracking),
+                uncategorized_inflows: Money::from_minor_units(uncategorized_inflows),
+                categorized_activity: Money::from_minor_units(activity.values().map(|v| v.0).sum()),
+                cash_spending: Money::from_minor_units(cash_spending),
+                card_spending: Money::from_minor_units(card_spending),
+                assignments: Money::from_minor_units(assignments.values().sum()),
+                positive_rollover: Money::ZERO,
+                prior_cash_overspending: Money::ZERO,
+                future_assignments: Money::ZERO,
+            });
+            if cursor == selected {
+                break;
+            }
+            cursor = cursor
+                .next()
+                .map_err(|_| category_error("budget month out of range"))?;
+        }
+        let future_assignments: i64 = self.connection.query_row("SELECT COALESCE(SUM(amount),0) FROM budget_assignments WHERE budget_id=?1 AND budget_month>?2", (&budget_key, month), |r| r.get(0)).map_err(repo)?;
+        if let Some(last) = inputs.last_mut() {
+            last.future_assignments = Money::from_minor_units(future_assignments);
+        }
+        let projection = calculate_chronological(inputs)
+            .map_err(|_| category_error("budget calculation overflow"))?;
+        let result = projection
+            .last()
+            .ok_or_else(|| category_error("missing budget projection"))?;
+        let rows = categories.iter().zip(&result.categories).map(|(fact, calculated)| {
+            let underfunded = match calculated.funding { FundingStatus::Underfunded(v) => v.minor_units(), FundingStatus::NoTarget | FundingStatus::Funded => 0 };
+            let overspending = match calculated.overspending { Overspending::Cash(v) | Overspending::CreditCard(v) => v.minor_units(), Overspending::None => 0 };
+            CategoryRowView { group_id: fact.group_id, category_id: fact.id, group_name: fact.group_name.clone(), name: fact.name.clone(), group_sort: fact.group_sort, category_sort: fact.category_sort, group_collapsed: fact.group_collapsed, hidden: fact.hidden, archived: fact.archived, assigned_cents: calculated.assigned.minor_units(), activity_cents: calculated.activity.minor_units(), available_cents: calculated.available.minor_units(), overspending_cents: overspending, underfunded_cents: underfunded, target_id: fact.target_id, target_amount_cents: fact.target.map(Money::minor_units), target_remaining_cents: fact.target.map(|_| underfunded), target_due_date: fact.due.clone(), target_status: if underfunded == 0 { "funded" } else { "underfunded" }.into(), credit_card_payment: fact.payment, protected: fact.payment, inspector: format!("Assigned {}¢, activity {}¢, available {}¢. Derived by the budget calculation.", calculated.assigned.minor_units(), calculated.activity.minor_units(), calculated.available.minor_units()) }
+        }).collect::<Vec<_>>();
+        let revision = self
+            .connection
+            .query_row(
+                "SELECT COALESCE(MAX(id),0) FROM change_log WHERE budget_id=?1",
+                [&budget_key],
+                |r| r.get::<_, u64>(0),
+            )
+            .unwrap_or(0);
+        Ok(BudgetMonthView { version: ViewVersion { generation: 0, revision }, month: selected, calculation_revision: revision, ready_to_assign_cents: result.ready_to_assign.minor_units(), assigned_cents: rows.iter().map(|r| r.assigned_cents).sum(), activity_cents: rows.iter().map(|r| r.activity_cents).sum(), available_cents: rows.iter().map(|r| r.available_cents).sum(), overspending_cents: rows.iter().map(|r| r.overspending_cents).sum(), rows, inspector: vec!["Ready to Assign, activity, availability, overspending, underfunding, and rollover are reconstructed from canonical ledger facts.".into()] })
     }
 }
 
@@ -1466,6 +1595,58 @@ mod report_tests {
             assert!(metadata.is_empty);
             assert_eq!(metadata.row_count, 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod budget_projection_tests {
+    use super::*;
+
+    #[test]
+    fn persisted_canonical_ledger_reconstructs_the_same_projection_after_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("projection.sqlite3");
+        let budget = BudgetId::new();
+        let account = AccountId::new();
+        let tracking = AccountId::new();
+        let group = crate::domain::CategoryGroupId::new();
+        let category = crate::domain::CategoryId::new();
+        let connection = crate::storage::connection::open_primary(&path).unwrap();
+        connection.execute("INSERT INTO budgets(id,name,created_at,modified_at) VALUES(?1,'Projection','now','now')", [budget.to_string()]).unwrap();
+        connection.execute("INSERT INTO accounts(id,budget_id,name,account_type,sort_order,created_at,modified_at) VALUES(?1,?2,'Cash','checking',0,'now','now')", (account.to_string(),budget.to_string())).unwrap();
+        connection.execute("INSERT INTO accounts(id,budget_id,name,account_type,sort_order,created_at,modified_at) VALUES(?1,?2,'Tracking','asset',1,'now','now')", (tracking.to_string(),budget.to_string())).unwrap();
+        connection.execute("INSERT INTO category_groups(id,budget_id,name,sort_order) VALUES(?1,?2,'Living',0)", (group.to_string(),budget.to_string())).unwrap();
+        connection.execute("INSERT INTO categories(id,budget_id,group_id,name,sort_order) VALUES(?1,?2,?3,'Food',0)", (category.to_string(),budget.to_string(),group.to_string())).unwrap();
+        let insert = |id: crate::domain::TransactionId,
+                      account_id: AccountId,
+                      category_id: Option<String>,
+                      amount: i64| {
+            connection.execute("INSERT INTO transactions(id,budget_id,account_id,transaction_date,category_id,amount,cleared_state,approval_state,created_at,modified_at) VALUES(?1,?2,?3,'2026-01-10',?4,?5,'cleared','approved','now','now')", (id.to_string(),budget.to_string(),account_id.to_string(),category_id,amount)).unwrap();
+        };
+        insert(crate::domain::TransactionId::new(), account, None, 1_000);
+        insert(
+            crate::domain::TransactionId::new(),
+            account,
+            Some(category.to_string()),
+            -250,
+        );
+        insert(crate::domain::TransactionId::new(), tracking, None, 50_000);
+        connection.execute("INSERT INTO budget_assignments(id,budget_id,category_id,budget_month,amount,created_at,modified_at) VALUES(?1,?2,?3,'2026-01',600,'now','now')", (uuid::Uuid::new_v4().to_string(),budget.to_string(),category.to_string())).unwrap();
+        connection.execute("INSERT INTO budget_assignments(id,budget_id,category_id,budget_month,amount,created_at,modified_at) VALUES(?1,?2,?3,'2026-02',100,'now','now')", (uuid::Uuid::new_v4().to_string(),budget.to_string(),category.to_string())).unwrap();
+
+        let before = QueryStore::new(&connection)
+            .budget_month(budget, "2026-01")
+            .unwrap();
+        assert_eq!(before.ready_to_assign_cents, 300); // Future assignments reserve RTA.
+        assert_eq!(before.rows[0].activity_cents, -250);
+        assert_eq!(before.rows[0].available_cents, 350);
+        drop(connection);
+
+        let reopened = crate::storage::connection::open_primary(&path).unwrap();
+        let after = QueryStore::new(&reopened)
+            .budget_month(budget, "2026-01")
+            .unwrap();
+        assert_eq!(after, before);
     }
 }
 
