@@ -1,5 +1,6 @@
 //! Register layout and framework-independent interaction state.
 pub mod editor;
+pub mod split_dialog;
 pub mod table;
 pub mod toolbar;
 pub mod widgets;

@@ -56,7 +56,8 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
         let initiating = ctx.memory(egui::Memory::focused);
         state.palette.open(initiating);
     }
-    let modal = state.dialog.is_some();
+    let split_modal = crate::ui::register::split_dialog::is_open(state);
+    let modal = state.dialog.is_some() || split_modal;
     let search_owns_text = ctx.memory(|m| m.focused().is_some_and(|id| id == state.search_id));
     let transaction_id = match &state.editor {
         crate::app::state::EditorState::CreatingTransaction(editor)
@@ -77,7 +78,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
             text_editor: search_owns_text,
             transaction_text,
             command_enabled: true,
-            popup: false,
+            popup: split_modal,
             transaction_picker,
         },
         &mut keyboard_commands,
@@ -198,6 +199,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
     show_palette(ctx, state, actions);
     show_modal_editor(ctx, state, actions);
     show_budget_dialog(ctx, state, actions);
+    crate::ui::register::split_dialog::show(ctx, state);
 }
 
 #[cfg(test)]
