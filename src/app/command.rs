@@ -994,7 +994,7 @@ pub fn action_descriptor(ctx: CommandAvailabilityContext, action: AppCommand) ->
         FocusSearch => "Find",
         Undo => "Undo",
         Redo => "Redo",
-        Commit => "Commit edit",
+        Commit => "Save Current Edit",
         Cancel => "Cancel",
         Edit => "Edit selected item",
         Delete => "Delete selected item",
