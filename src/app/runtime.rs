@@ -1768,6 +1768,19 @@ impl ApplicationRuntime {
                 }) {
                     return;
                 }
+                // A first Escape/Cancel on a dirty form is a warning, never a silent discard.
+                // A deliberate second action confirms the discard without introducing a second
+                // dialog that could obscure the editor and its correlated failure state.
+                if let Some(metadata) = self.view.editor.metadata_mut()
+                    && metadata.dirty
+                {
+                    metadata.dirty = false;
+                    metadata.validation_errors = vec![
+                        "Unsaved changes were not discarded. Press Cancel again to discard them."
+                            .into(),
+                    ];
+                    return;
+                }
                 self.cancel_editor();
                 return;
             }

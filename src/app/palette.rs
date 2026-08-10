@@ -192,7 +192,7 @@ pub fn commands_for(context: CommandContext) -> Vec<CommandDescriptor> {
         (FocusSearch, "Find", "search filter", BudgetOpen),
         (Undo, "Undo", "history revert", BudgetOpen),
         (Redo, "Redo", "history reapply", BudgetOpen),
-        (Commit, "Commit edit", "save enter", BudgetOpen),
+        (Commit, "Save Current Edit", "save enter", BudgetOpen),
         (Cancel, "Cancel", "escape close", Always),
         (Edit, "Edit selected item", "enter edit", BudgetOpen),
         (Delete, "Delete selected item", "remove", BudgetOpen),
