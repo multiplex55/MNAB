@@ -27,10 +27,8 @@ pub fn show(
             account.account_type,
             account.working_balance,
             account.cleared_balance,
-            account.closed,
-            account.unreconciled,
         );
-        crate::ui::account_header::show(ui, &header, state.action_context(), commands);
+        crate::ui::account_header::show(ui, &header);
     } else {
         ui.heading("Account Transactions");
     }

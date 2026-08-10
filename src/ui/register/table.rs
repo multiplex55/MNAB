@@ -55,7 +55,28 @@ pub fn show(
     } else {
         RegisterScope::Account
     };
-    let columns = super::columns_for(scope);
+    let columns = super::columns_for(scope)
+        .iter()
+        .copied()
+        .filter(|column| {
+            let key = match column {
+                RegisterColumn::Selection => return true,
+                RegisterColumn::Date => "date",
+                RegisterColumn::PayeeTransfer => "payee",
+                RegisterColumn::Category => "category",
+                RegisterColumn::Memo => "memo",
+                RegisterColumn::Outflow => "outflow",
+                RegisterColumn::Inflow => "inflow",
+                RegisterColumn::Cleared => "cleared",
+                RegisterColumn::Approved => "approved",
+                RegisterColumn::Account => "account",
+                RegisterColumn::RunningBalance => "running_balance",
+            };
+            state
+                .register_columns
+                .visible_for_scope(key, scope == RegisterScope::AllTransactions)
+        })
+        .collect::<Vec<_>>();
     let editor_active = super::editor_visible(state.editor.surface());
     let editor_mode = super::transaction_editor_mode(&state.editor);
     let editor_id = match &state.editor {
@@ -94,7 +115,7 @@ pub fn show(
     if creating && !was_creating {
         table = table.scroll_to_row(0, Some(egui::Align::TOP));
     }
-    for c in columns {
+    for c in &columns {
         table = table.column(Column::initial(width(*c)).at_least(
             if *c == RegisterColumn::Selection {
                 28.0
@@ -105,7 +126,7 @@ pub fn show(
     }
     table
         .header(24.0, |mut header| {
-            for c in columns {
+            for c in &columns {
                 header.col(|ui| {
                     ui.strong(c.label());
                 });
@@ -134,7 +155,7 @@ pub fn show(
                         };
                         body.row(if expanded { 108.0 } else { 54.0 }, |mut row| {
                             // Editor rows deliberately have no row-level response handlers.
-                            for c in columns {
+                            for c in &columns {
                                 row.col(|ui| {
                                     super::editor::show_cell(
                                         ui, state, commands, scope, *c, missing,
@@ -149,7 +170,7 @@ pub fn show(
                             row.set_selected(
                                 state.register_selection.contains(model.transaction_id),
                             );
-                            for c in columns {
+                            for c in &columns {
                                 row.col(|ui| cell(ui, *c, model, state, commands));
                             }
                             let response = row.response();

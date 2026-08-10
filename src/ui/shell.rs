@@ -96,17 +96,6 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, actions: &mut ActionColle
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.strong(format!("MNAB · {}", state.budget_name));
-                if let Some(hint) = search_hint(state.navigation.workspace, &state.accounts) {
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut state.search)
-                            .hint_text(format!("{hint} (Cmd/Ctrl+F)"))
-                            .desired_width(210.0)
-                            .id(state.search_id),
-                    );
-                    if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
-                        response.request_focus();
-                    }
-                }
                 if ui
                     .button(format!("Inbox ({})", state.inbox_counts.total))
                     .clicked()

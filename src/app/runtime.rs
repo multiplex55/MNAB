@@ -105,6 +105,8 @@ impl ApplicationRuntime {
         if let Some(settings) = &settings {
             view.inspector_visible = settings.value().inspector_visible;
             view.palette_shortcut = settings.value().command_palette_shortcut.clone();
+            view.register_columns = settings.value().register_columns.clone();
+            view.display_density = settings.value().display_density;
         }
         if malformed_settings {
             view.notifications.push(Notification {
@@ -1541,6 +1543,14 @@ impl ApplicationRuntime {
             ResetRegisterColumns => {
                 if let Some(settings) = &mut self.settings {
                     settings.value_mut().register_columns.reset();
+                    self.view.register_columns = settings.value().register_columns.clone();
+                }
+                return;
+            }
+            PersistRegisterView => {
+                if let Some(settings) = &mut self.settings {
+                    settings.value_mut().register_columns = self.view.register_columns.clone();
+                    settings.value_mut().display_density = self.view.display_density;
                 }
                 return;
             }
