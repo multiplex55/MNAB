@@ -54,6 +54,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
     if editor.split_dialog.is_none() {
         return;
     }
+    editor.validate_split_dialog(|id| valid_ids.contains(&id));
 
     let escape = ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
     let enter = ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
@@ -207,5 +208,9 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
         editor.cancel_split_dialog();
     } else if save {
         editor.save_split_dialog(|id: CategoryId| valid_ids.contains(&id));
+    } else {
+        // Text edits are applied during this frame. Keep the stored, per-line
+        // diagnostics synchronized even when Save Splits is disabled.
+        editor.validate_split_dialog(|id| valid_ids.contains(&id));
     }
 }
