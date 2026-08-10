@@ -88,6 +88,34 @@ pub fn transaction_commit_available(e: &TransactionEditorState) -> bool {
         && e.build_transaction(crate::domain::BudgetId::new()).is_ok()
 }
 
+/// Case-insensitive filtering which retains the lookup projection's stable order and protects
+/// the picker from duplicate identities even if a malformed projection is supplied.
+pub fn matching_payees<'a>(
+    payees: &'a [crate::app::view_model::PayeeLookupItemView],
+    search: &str,
+) -> Vec<&'a crate::app::view_model::PayeeLookupItemView> {
+    let needle = search.trim().to_lowercase();
+    let mut seen = std::collections::BTreeSet::new();
+    payees
+        .iter()
+        .filter(|payee| {
+            seen.insert(payee.id)
+                && (needle.is_empty() || payee.name.to_lowercase().contains(&needle))
+        })
+        .collect()
+}
+
+fn move_payee_highlight(current: usize, count: usize, down: bool) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    if down {
+        (current + 1).min(count - 1)
+    } else {
+        current.saturating_sub(1)
+    }
+}
+
 pub fn show_cell(
     ui: &mut egui::Ui,
     state: &mut AppState,
@@ -101,17 +129,13 @@ pub fn show_cell(
         crate::app::state::EditorSurface::InlineRegister
     );
     let accounts = &state.accounts;
-    let payee_names = state
-        .register_query
+    let payees = state
+        .payee_lookup
         .last_successful
         .as_ref()
-        .map(|p| {
-            p.rows
-                .iter()
-                .map(|r| (r.payee_id, r.payee_name.clone()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        .map_or(&[][..], |lookup| lookup.payees.as_slice());
+    let payee_refreshing = state.payee_lookup.refresh_active;
+    let payee_failure = state.payee_lookup.safe_failure.clone();
     let category_names = state
         .category_catalog
         .last_successful
@@ -200,18 +224,45 @@ pub fn show_cell(
             super::RegisterColumn::PayeeTransfer => {
                     let payee = editor
                         .payee_id
-                        .and_then(|id| payee_names.iter().find(|p| p.0 == Some(id)))
-                        .map_or("Choose a payee", |p| p.1.as_str());
+                        .and_then(|id| payees.iter().find(|p| p.id == id))
+                        .map_or("Choose a payee", |p| p.name.as_str());
                     let r = egui::ComboBox::from_id_salt(field_id(identity, "payee"))
                         .selected_text(payee)
                         .show_ui(ui, |ui| {
-                            for (id, name) in &payee_names {
-                                if let Some(id) = id {
-                                    ui.selectable_value(&mut editor.payee_id, Some(*id), name);
+                            let search = ui.add(egui::TextEdit::singleline(&mut editor.payee_search)
+                                .hint_text("Search payees…"));
+                            if search.changed() { editor.payee_highlight = 0; }
+                            let matches = matching_payees(payees, &editor.payee_search);
+                            if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                                editor.payee_highlight = move_payee_highlight(editor.payee_highlight, matches.len(), true);
+                            }
+                            if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                                editor.payee_highlight = move_payee_highlight(editor.payee_highlight, matches.len(), false);
+                            }
+                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) { ui.close(); }
+                            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                if let Some(choice) = matches.get(editor.payee_highlight) {
+                                    editor.payee_id = Some(choice.id);
+                                    editor.payee_search.clear();
+                                    ui.close();
+                                }
+                            }
+                            if matches.is_empty() {
+                                ui.weak("No matching payees");
+                            }
+                            for (index, choice) in matches.into_iter().enumerate() {
+                                let selected = editor.payee_id == Some(choice.id);
+                                let label = if index == editor.payee_highlight { format!("› {}", choice.name) } else { choice.name.clone() };
+                                if ui.selectable_label(selected, label).clicked() {
+                                    editor.payee_id = Some(choice.id);
+                                    editor.payee_search.clear();
+                                    ui.close();
                                 }
                             }
                         });
                     focus_once(editor, crate::app::transaction_editor::TransactionEditorField::Payee, &r.response);
+                    if payee_refreshing { ui.spinner().on_hover_text("Refreshing payee choices"); }
+                    if let Some(error) = &payee_failure { ui.colored_label(ui.visuals().warn_fg_color, "⚠").on_hover_text(error); }
                     if let Some(error) = &editor.errors.payee { ui.colored_label(ui.visuals().error_fg_color, error); }
             }
             super::RegisterColumn::Category => {
@@ -313,4 +364,52 @@ pub fn show_cell(
             super::RegisterColumn::RunningBalance => { ui.label("—"); }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::view_model::PayeeLookupItemView;
+
+    fn payee(name: &str) -> PayeeLookupItemView {
+        PayeeLookupItemView {
+            id: crate::domain::PayeeId::new(),
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn matching_is_case_insensitive_stable_and_deduplicated() {
+        let alpha = payee("Alpha Market");
+        let beta = payee("beta shop");
+        let duplicate = PayeeLookupItemView {
+            id: alpha.id,
+            name: alpha.name.clone(),
+        };
+        let values = vec![alpha, beta, duplicate];
+        let matches = matching_payees(&values, "MARKET");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "Alpha Market");
+        assert_eq!(matching_payees(&values, "").len(), 2);
+    }
+
+    #[test]
+    fn keyboard_navigation_is_bounded_and_empty_results_are_safe() {
+        assert_eq!(move_payee_highlight(0, 3, true), 1);
+        assert_eq!(move_payee_highlight(2, 3, true), 2);
+        assert_eq!(move_payee_highlight(0, 3, false), 0);
+        assert_eq!(move_payee_highlight(4, 0, true), 0);
+        assert!(matching_payees(&[payee("Grocer")], "missing").is_empty());
+    }
+
+    #[test]
+    fn selecting_a_payee_changes_only_the_active_draft() {
+        let metadata = EditorMetadata::new(egui::Id::new("draft"));
+        let mut active = TransactionEditorState::new(None, metadata.clone());
+        let inactive = TransactionEditorState::new(None, metadata);
+        let choice = payee("Choice");
+        active.payee_id = Some(choice.id);
+        assert_eq!(active.payee_id, Some(choice.id));
+        assert_eq!(inactive.payee_id, None);
+    }
 }

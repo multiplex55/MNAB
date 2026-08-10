@@ -28,6 +28,7 @@ pub enum WorkerOperation {
     Register(RegisterPageOperation),
     RegisterView(RegisterViewOperation),
     Category(CategoryViewOperation),
+    Lookup(LookupViewOperation),
     Account(AccountViewOperation),
     Budget(BudgetViewOperation),
     Inbox(InboxViewOperation),
@@ -36,6 +37,10 @@ pub enum WorkerOperation {
     Diagnostics(DiagnosticsOperation),
     Report(ReportOperation),
     Occurrences(OccurrenceOperation),
+}
+#[derive(Debug)]
+pub enum LookupViewOperation {
+    Payees { budget_id: crate::domain::BudgetId },
 }
 #[derive(Debug)]
 pub enum AccountViewOperation {
@@ -133,6 +138,7 @@ pub enum TypedResult {
     Report(crate::app::view_model::ReportView),
     RegisterPage(crate::app::view_model::RegisterPageView),
     CategoryCatalog(crate::app::view_model::CategoryCatalogView),
+    PayeeLookup(crate::app::view_model::PayeeLookupView),
     AccountTree(Vec<crate::storage::query_store::AccountTreeGroup>),
     BudgetMonth(crate::app::view_model::BudgetMonthView),
     InboxSummary(crate::app::view_model::InboxSummaryView),
@@ -532,6 +538,12 @@ fn execute_operation(
                     .map(TypedResult::CategoryDetail),
             }
             .map_err(|e| WorkerError::Repository(e.to_string()))
+        }
+        WorkerOperation::Lookup(LookupViewOperation::Payees { budget_id }) => {
+            crate::storage::query_store::QueryStore::new(c)
+                .payee_lookup(*budget_id)
+                .map(TypedResult::PayeeLookup)
+                .map_err(|e| WorkerError::Repository(e.to_string()))
         }
         WorkerOperation::Account(AccountViewOperation::Tree { budget_id }) => {
             crate::storage::query_store::QueryStore::new(c)

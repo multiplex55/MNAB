@@ -24,6 +24,60 @@ use time::OffsetDateTime;
 pub const MAX_REGISTER_PAGE_SIZE: usize = 200;
 
 impl QueryStore<'_> {
+    /// Returns every eligible editor choice independently of register pagination or filters.
+    pub fn payee_lookup(
+        &self,
+        budget_id: BudgetId,
+    ) -> Result<crate::app::view_model::PayeeLookupView, RepositoryError> {
+        use crate::app::view_model::{
+            PayeeLookupItemView, PayeeLookupView, TransferLookupItemView,
+        };
+        let mut payees = self
+            .connection
+            .prepare(
+                "SELECT id,name FROM payees WHERE budget_id=?1 AND archived=0 AND hidden=0 \
+             ORDER BY name COLLATE NOCASE,id",
+            )
+            .map_err(repo)?;
+        let payees = payees
+            .query_map([budget_id.to_string()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(repo)?
+            .map(|row| {
+                let (id, name) = row.map_err(repo)?;
+                Ok(PayeeLookupItemView {
+                    id: id.parse().map_err(|_| category_error("invalid payee id"))?,
+                    name,
+                })
+            })
+            .collect::<Result<Vec<_>, RepositoryError>>()?;
+        let mut transfers = self.connection.prepare(
+            "SELECT id,name,closed FROM accounts WHERE budget_id=?1 ORDER BY name COLLATE NOCASE,id",
+        ).map_err(repo)?;
+        let transfers = transfers
+            .query_map([budget_id.to_string()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })
+            .map_err(repo)?
+            .map(|row| {
+                let (id, name, closed) = row.map_err(repo)?;
+                Ok(TransferLookupItemView {
+                    account_id: id
+                        .parse()
+                        .map_err(|_| category_error("invalid account id"))?,
+                    name,
+                    closed,
+                })
+            })
+            .collect::<Result<Vec<_>, RepositoryError>>()?;
+        Ok(PayeeLookupView { payees, transfers })
+    }
+
     pub fn category_catalog(
         &self,
         budget_id: BudgetId,
@@ -1732,6 +1786,56 @@ mod report_tests {
             assert!(metadata.is_empty);
             assert_eq!(metadata.row_count, 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod payee_lookup_tests {
+    use super::*;
+
+    #[test]
+    fn lookup_is_complete_deduplicated_and_deterministically_ordered() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection =
+            crate::storage::connection::open_primary(&directory.path().join("lookup.sqlite3"))
+                .unwrap();
+        let budget = BudgetId::new();
+        connection.execute("INSERT INTO budgets(id,name,created_at,modified_at,archived) VALUES(?1,'Budget',datetime('now'),datetime('now'),0)", [budget.to_string()]).unwrap();
+        let alpha = crate::domain::PayeeId::new();
+        let beta = crate::domain::PayeeId::new();
+        let hidden = crate::domain::PayeeId::new();
+        for (id, name, archived, is_hidden) in [
+            (beta, "beta", 0, 0),
+            (alpha, "Alpha", 0, 0),
+            (hidden, "Hidden", 0, 1),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO payees(id,budget_id,name,archived,hidden) VALUES(?1,?2,?3,?4,?5)",
+                    (
+                        id.to_string(),
+                        budget.to_string(),
+                        name,
+                        archived,
+                        is_hidden,
+                    ),
+                )
+                .unwrap();
+        }
+        // Repeated appearances are irrelevant: choices are sourced from payees, not rows.
+        let lookup = QueryStore::new(&connection).payee_lookup(budget).unwrap();
+        assert_eq!(
+            lookup.payees.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![alpha, beta]
+        );
+        assert_eq!(
+            lookup
+                .payees
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Alpha", "beta"]
+        );
     }
 }
 

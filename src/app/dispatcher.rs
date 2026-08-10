@@ -353,12 +353,20 @@ mod tests {
             V::Inbox,
             V::Search,
             V::Inspectors,
+            V::LookupData,
         ] {
             assert!(
                 values.iter().any(|value| value == &expected),
                 "missing {expected:?}"
             );
         }
+    }
+
+    #[test]
+    fn payee_mutations_invalidate_lookup_data() {
+        let payee = crate::domain::Payee::new(crate::domain::BudgetId::new(), "Renamed");
+        let values = invalidations_for(&FinancialCommand::Payee(PayeeCommand::Update(payee)));
+        assert!(values.iter().any(|value| value == &V::LookupData));
     }
 
     #[test]

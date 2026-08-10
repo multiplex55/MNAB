@@ -552,6 +552,7 @@ pub struct AppState {
     pub inbox_summary: ViewQueryState<crate::app::view_model::InboxSummaryView>,
     pub register_query: RegisterQueryState,
     pub category_catalog: ViewQueryState<crate::app::view_model::CategoryCatalogView>,
+    pub payee_lookup: ViewQueryState<crate::app::view_model::PayeeLookupView>,
     pub category_detail: ViewQueryState<crate::app::view_model::CategoryDetailView>,
     pub selected_category: Option<CategoryId>,
     pub show_archived_categories: bool,
@@ -608,6 +609,7 @@ impl Default for AppState {
             inbox_summary: ViewQueryState::default(),
             register_query: RegisterQueryState::default(),
             category_catalog: ViewQueryState::default(),
+            payee_lookup: ViewQueryState::default(),
             category_detail: ViewQueryState::default(),
             selected_category: None,
             show_archived_categories: false,
@@ -748,6 +750,7 @@ impl AppState {
         self.latest_by_purpose.clear();
         self.purpose_by_request.clear();
         self.register_query = RegisterQueryState::default();
+        self.payee_lookup = ViewQueryState::default();
         self.inspector_context = InspectorContext::AccountSummary(None);
     }
 
