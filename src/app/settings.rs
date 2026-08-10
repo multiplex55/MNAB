@@ -67,21 +67,40 @@ impl Default for RegisterColumns {
     fn default() -> Self {
         Self {
             order: vec![
-                "date", "payee", "category", "memo", "outflow", "inflow", "cleared", "approved",
+                "date",
+                "payee",
+                "category",
+                "memo",
+                "outflow",
+                "inflow",
+                "cleared",
+                "approved",
                 "account",
+                "running_balance",
             ]
             .into_iter()
             .map(str::to_owned)
             .collect(),
-            widths: vec![90.0, 180.0, 180.0, 200.0, 100.0, 100.0, 80.0, 90.0, 160.0],
+            widths: vec![
+                90.0, 180.0, 180.0, 200.0, 100.0, 100.0, 80.0, 90.0, 160.0, 110.0,
+            ],
             hidden: vec!["account".into()],
         }
     }
 }
 
 impl RegisterColumns {
-    pub const KNOWN: [&'static str; 9] = [
-        "date", "payee", "category", "memo", "outflow", "inflow", "cleared", "approved", "account",
+    pub const KNOWN: [&'static str; 10] = [
+        "date",
+        "payee",
+        "category",
+        "memo",
+        "outflow",
+        "inflow",
+        "cleared",
+        "approved",
+        "account",
+        "running_balance",
     ];
 
     #[must_use]
@@ -92,6 +111,7 @@ impl RegisterColumns {
             "memo" => 120.0,
             "outflow" | "inflow" => 80.0,
             "cleared" | "approved" => 68.0,
+            "running_balance" => 90.0,
             _ => 40.0,
         }
     }
@@ -148,6 +168,10 @@ impl RegisterColumns {
 
     pub fn set_visible(&mut self, column: &str, visible: bool) -> bool {
         if !Self::KNOWN.contains(&column) {
+            return false;
+        }
+        // Core entry fields may never be hidden: doing so would make inline editing unsafe.
+        if !visible && matches!(column, "date" | "payee" | "category" | "outflow" | "inflow") {
             return false;
         }
         self.hidden.retain(|value| value != column);
