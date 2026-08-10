@@ -271,18 +271,7 @@ impl TransactionEditorState {
         let Some(mut dialog) = self.split_dialog.take() else {
             return false;
         };
-        dialog.line_errors = vec![None; dialog.lines.len()];
-        for (index, line) in dialog.lines.iter().enumerate() {
-            dialog.line_errors[index] = if line.category_id.is_none() {
-                Some("Category is required".into())
-            } else if !category_exists(line.category_id.unwrap()) {
-                Some("Category is unavailable".into())
-            } else {
-                parse_split_currency_field(&line.amount_text)
-                    .err()
-                    .map(str::to_owned)
-            };
-        }
+        dialog.line_errors = validate_split_lines(&dialog.lines, &category_exists);
         dialog.form_error = if dialog.lines.len() < 2 {
             Some("A split requires at least two lines".into())
         } else if self.split_dialog_remaining_for(&dialog.lines) != Ok(Money::ZERO) {
@@ -310,6 +299,15 @@ impl TransactionEditorState {
                     && parse_split_currency_field(&line.amount_text).is_ok()
             })
             && self.split_dialog_remaining() == Ok(Money::ZERO)
+    }
+
+    /// Refreshes the presentation errors while the user edits. This is separate from
+    /// saving so a disabled Save button never hides the reason it is disabled.
+    pub fn validate_split_dialog(&mut self, category_exists: impl Fn(CategoryId) -> bool) {
+        let Some(dialog) = self.split_dialog.as_mut() else {
+            return;
+        };
+        dialog.line_errors = validate_split_lines(&dialog.lines, category_exists);
     }
 
     pub fn distribute_split_dialog_remaining(&mut self) -> bool {
@@ -551,6 +549,22 @@ impl TransactionEditorState {
         Ok(result)
     }
 }
+
+fn validate_split_lines(
+    lines: &[SplitLineForm],
+    category_exists: impl Fn(CategoryId) -> bool,
+) -> Vec<Option<String>> {
+    lines
+        .iter()
+        .map(|line| match line.category_id {
+            None => Some("Category is required".into()),
+            Some(id) if !category_exists(id) => Some("Category is unavailable".into()),
+            Some(_) => parse_split_currency_field(&line.amount_text)
+                .err()
+                .map(str::to_owned),
+        })
+        .collect()
+}
 fn trimmed(s: &str) -> Option<String> {
     (!s.trim().is_empty()).then(|| s.trim().to_owned())
 }
@@ -719,6 +733,27 @@ mod tests {
         assert!(!e.can_save_split_dialog(|_| true));
         e.split_dialog.as_mut().unwrap().lines[1].amount_text = "0".into();
         assert!(!e.can_save_split_dialog(|_| false)); // unavailable category
+    }
+
+    #[test]
+    fn split_dialog_validation_is_available_before_save() {
+        let mut e = editor();
+        e.outflow_text = "1.00".into();
+        e.open_split_dialog();
+        e.validate_split_dialog(|_| true);
+        assert_eq!(
+            e.split_dialog.as_ref().unwrap().line_errors,
+            vec![None, Some("Category is required".into())]
+        );
+
+        let line = &mut e.split_dialog.as_mut().unwrap().lines[1];
+        line.category_id = Some(CategoryId::new());
+        line.amount_text = "not money".into();
+        e.validate_split_dialog(|_| true);
+        assert_eq!(
+            e.split_dialog.as_ref().unwrap().line_errors[1].as_deref(),
+            Some("Invalid amount")
+        );
     }
     #[test]
     fn amount_signs_and_required_fields_are_structured() {
