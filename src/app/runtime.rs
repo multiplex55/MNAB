@@ -709,6 +709,7 @@ impl ApplicationRuntime {
             .inbox_summary
             .begin(inbox_id, self.generation, None);
         self.request_category_catalog(None);
+        self.request_payee_lookup(None);
 
         let requests = [
             crate::storage::worker::StorageRequest {
@@ -837,6 +838,7 @@ impl ApplicationRuntime {
         let mut inbox = false;
         let mut register = false;
         let mut report = false;
+        let mut lookup = false;
         let workspace = self.view.navigation.workspace;
         for invalidation in pending.iter() {
             match invalidation {
@@ -848,6 +850,7 @@ impl ApplicationRuntime {
                 }
                 V::Inbox => inbox = true,
                 V::Reports => report = true,
+                V::LookupData => lookup = true,
                 V::AllAccountRegisters => {
                     register |= matches!(workspace, Workspace::Account(_));
                 }
@@ -889,6 +892,9 @@ impl ApplicationRuntime {
             if let Some(request) = self.view.report_query.current_request.clone() {
                 self.request_report(request);
             }
+        }
+        if lookup {
+            self.request_payee_lookup(self.view.register_focus);
         }
     }
 
@@ -1920,6 +1926,28 @@ impl ApplicationRuntime {
         }
     }
 
+    fn request_payee_lookup(&mut self, focus: Option<egui::Id>) {
+        let Some(budget_id) = self.view.active_budget else {
+            return;
+        };
+        let id = self.allocate_request();
+        self.view.payee_lookup.begin(id, self.generation, focus);
+        let request = crate::storage::worker::StorageRequest {
+            id,
+            generation: self.generation,
+            operation: crate::storage::worker::WorkerOperation::Lookup(
+                crate::storage::worker::LookupViewOperation::Payees { budget_id },
+            ),
+        };
+        if !self.submit_view_request(request) {
+            let _ = self.view.payee_lookup.fail(
+                id,
+                self.generation,
+                "Payee choices could not be refreshed.",
+            );
+        }
+    }
+
     fn dispatch_report(&mut self, action: crate::app::command::ReportAction) {
         match action {
             crate::app::command::ReportAction::Refresh(request)
@@ -2077,6 +2105,9 @@ impl ApplicationRuntime {
                         crate::app::state::InspectorContext::BudgetCategory(None);
                 }
             }
+            Ok(crate::storage::worker::TypedResult::PayeeLookup(value)) => {
+                let _ = self.view.payee_lookup.accept(id, generation, value);
+            }
             Ok(crate::storage::worker::TypedResult::CategoryDetail(value)) => {
                 let _ = self.view.category_detail.accept(id, generation, value);
             }
@@ -2125,6 +2156,11 @@ impl ApplicationRuntime {
                 let _ = self.view.account_tree.fail(id, generation, message.clone());
                 let _ = self.view.budget_month.fail(id, generation, message.clone());
                 let _ = self.view.inbox_summary.fail(id, generation, message);
+                let _ = self.view.payee_lookup.fail(
+                    id,
+                    generation,
+                    "Payee choices could not be refreshed.",
+                );
             }
             _ => self.view.complete_request(id),
         }

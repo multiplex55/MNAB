@@ -148,6 +148,9 @@ pub struct TransactionEditorState {
     pub outflow_text: String,
     pub inflow_text: String,
     pub payee_id: Option<PayeeId>,
+    /// Type-ahead text and highlighted result belong to this draft, not to the register.
+    pub payee_search: String,
+    pub payee_highlight: usize,
     pub category_id: Option<CategoryId>,
     pub memo: String,
     pub clearance: Clearance,
@@ -176,6 +179,8 @@ impl TransactionEditorState {
             outflow_text: String::new(),
             inflow_text: String::new(),
             payee_id: None,
+            payee_search: String::new(),
+            payee_highlight: 0,
             category_id: None,
             memo: String::new(),
             clearance: Clearance::Uncleared,

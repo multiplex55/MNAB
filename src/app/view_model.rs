@@ -224,6 +224,27 @@ pub struct CategoryDetailView {
     pub recent_transaction_count: u64,
 }
 
+/// Complete, budget-scoped choices for transaction entry. Ordinary payees and
+/// transfer destinations are deliberately separate because transfers are persisted as pairs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PayeeLookupView {
+    pub payees: Vec<PayeeLookupItemView>,
+    pub transfers: Vec<TransferLookupItemView>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PayeeLookupItemView {
+    pub id: PayeeId,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferLookupItemView {
+    pub account_id: AccountId,
+    pub name: String,
+    pub closed: bool,
+}
+
 /// The identity of a register.  This is the only register scope used by the
 /// application, worker protocol, storage query, and widgets.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
