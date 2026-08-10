@@ -222,6 +222,11 @@ pub fn show_cell(
                     let category_response = egui::ComboBox::from_id_salt(field_id(identity, "category"))
                         .selected_text(category)
                         .show_ui(ui, |ui| {
+                            if ui.selectable_label(false, "Split transaction…").clicked() {
+                                editor.open_split_dialog();
+                                ui.close();
+                            }
+                            ui.separator();
                             let mut shown_group: Option<&str> = None;
                             for (id, name, group) in &category_names {
                                 if shown_group != Some(group) {
@@ -236,16 +241,7 @@ pub fn show_cell(
                         });
                     focus_once(editor, crate::app::transaction_editor::TransactionEditorField::Category, &category_response.response);
                     if let Some(error) = &editor.errors.category { ui.colored_label(ui.visuals().error_fg_color, error); }
-                    for (i, split) in editor.splits.iter_mut().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("Split {}", i + 1));
-                            let name = split.category_id.and_then(|id| category_names.iter().find(|c| c.0 == id)).map_or("Choose", |c| c.1.as_str());
-                            egui::ComboBox::from_id_salt(("split-category", i)).selected_text(name).show_ui(ui, |ui| {
-                                for (id, name, group) in &category_names { ui.selectable_value(&mut split.category_id, Some(*id), format!("{group} / {name}")); }
-                            });
-                            if let Some(Some(error)) = editor.errors.split_lines.get(i) { ui.colored_label(ui.visuals().error_fg_color, error); }
-                        });
-                    }
+                    if !editor.splits.is_empty() { ui.label(format!("Split ({} lines)", editor.splits.len())); }
             }
             super::RegisterColumn::Memo => {
                     let memo = ui.add(egui::TextEdit::singleline(&mut editor.memo).id(field_id(identity, "memo")));

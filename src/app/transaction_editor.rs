@@ -28,6 +28,19 @@ pub struct SplitLineForm {
     pub memo: String,
 }
 
+/// Ephemeral split editor.  The parent fields are retained so cancellation can be
+/// lossless even if a future view accidentally changes them while the modal is open.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SplitDialogState {
+    pub lines: Vec<SplitLineForm>,
+    pub line_errors: Vec<Option<String>>,
+    pub form_error: Option<String>,
+    pub focused_control: usize,
+    pub category_picker: Option<usize>,
+    original_category_id: Option<CategoryId>,
+    original_splits: Vec<SplitLineForm>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionEditorField {
     Account,
@@ -140,6 +153,7 @@ pub struct TransactionEditorState {
     pub clearance: Clearance,
     pub approved: bool,
     pub splits: Vec<SplitLineForm>,
+    pub split_dialog: Option<SplitDialogState>,
     /// Complete source record; properties outside this form are copied from it on save.
     pub original: Option<Transaction>,
     pub reconciled: bool,
@@ -167,6 +181,7 @@ impl TransactionEditorState {
             clearance: Clearance::Uncleared,
             approved: false,
             splits: vec![],
+            split_dialog: None,
             original: None,
             reconciled: false,
             closed_account: false,
@@ -183,8 +198,153 @@ impl TransactionEditorState {
         }
     }
     pub fn cancel_protected_confirmations(&mut self) {
+        self.split_dialog = None;
         self.protected_edit_confirmed = false;
         self.closed_account_confirmed = false;
+    }
+
+    /// Opens a detached working copy; no transaction-draft field is changed.
+    pub fn open_split_dialog(&mut self) {
+        let mut lines = self.splits.clone();
+        if lines.is_empty() {
+            if let (Some(category_id), Ok(amount)) = (self.category_id, self.transaction_amount())
+                && amount != Money::ZERO
+            {
+                lines.push(SplitLineForm {
+                    category_id: Some(category_id),
+                    amount_text: amount.to_string(),
+                    memo: String::new(),
+                });
+                lines.push(SplitLineForm::default());
+            }
+        }
+        self.split_dialog = Some(SplitDialogState {
+            line_errors: vec![None; lines.len()],
+            lines,
+            form_error: None,
+            focused_control: 0,
+            category_picker: None,
+            original_category_id: self.category_id,
+            original_splits: self.splits.clone(),
+        });
+    }
+
+    pub fn cancel_split_dialog(&mut self) {
+        if let Some(dialog) = self.split_dialog.take() {
+            self.category_id = dialog.original_category_id;
+            self.splits = dialog.original_splits;
+        }
+    }
+
+    fn transaction_amount(&self) -> Result<Money, &'static str> {
+        let out = parse_currency_field(&self.outflow_text)?;
+        let input = parse_currency_field(&self.inflow_text)?;
+        if out != Money::ZERO && input != Money::ZERO {
+            return Err("Enter either an outflow or an inflow, not both");
+        }
+        input
+            .checked_add(out.checked_neg().map_err(|_| "Amount overflowed")?)
+            .map_err(|_| "Amount overflowed")
+    }
+
+    pub fn split_dialog_remaining(&self) -> Result<Money, &'static str> {
+        let total = self.transaction_amount()?;
+        let dialog = self.split_dialog.as_ref().ok_or("Split dialog is closed")?;
+        let mut allocated = Money::ZERO;
+        for line in &dialog.lines {
+            allocated = allocated
+                .checked_add(parse_split_currency_field(&line.amount_text)?)
+                .map_err(|_| "Split total overflowed")?;
+        }
+        total
+            .checked_add(
+                allocated
+                    .checked_neg()
+                    .map_err(|_| "Split total overflowed")?,
+            )
+            .map_err(|_| "Split total overflowed")
+    }
+
+    /// Validates and applies the working copy to the draft only.  Persistence remains
+    /// exclusively the responsibility of the parent editor's Commit command.
+    pub fn save_split_dialog(&mut self, category_exists: impl Fn(CategoryId) -> bool) -> bool {
+        let Some(mut dialog) = self.split_dialog.take() else {
+            return false;
+        };
+        dialog.line_errors = vec![None; dialog.lines.len()];
+        for (index, line) in dialog.lines.iter().enumerate() {
+            dialog.line_errors[index] = if line.category_id.is_none() {
+                Some("Category is required".into())
+            } else if !category_exists(line.category_id.unwrap()) {
+                Some("Category is unavailable".into())
+            } else {
+                parse_split_currency_field(&line.amount_text)
+                    .err()
+                    .map(str::to_owned)
+            };
+        }
+        dialog.form_error = if dialog.lines.len() < 2 {
+            Some("A split requires at least two lines".into())
+        } else if self.split_dialog_remaining_for(&dialog.lines) != Ok(Money::ZERO) {
+            Some("The remaining amount must be exactly zero".into())
+        } else {
+            None
+        };
+        if dialog.line_errors.iter().any(Option::is_some) || dialog.form_error.is_some() {
+            self.split_dialog = Some(dialog);
+            return false;
+        }
+        self.splits = dialog.lines;
+        self.category_id = None;
+        true
+    }
+
+    #[must_use]
+    pub fn can_save_split_dialog(&self, category_exists: impl Fn(CategoryId) -> bool) -> bool {
+        let Some(dialog) = &self.split_dialog else {
+            return false;
+        };
+        dialog.lines.len() >= 2
+            && dialog.lines.iter().all(|line| {
+                line.category_id.is_some_and(&category_exists)
+                    && parse_split_currency_field(&line.amount_text).is_ok()
+            })
+            && self.split_dialog_remaining() == Ok(Money::ZERO)
+    }
+
+    pub fn distribute_split_dialog_remaining(&mut self) -> bool {
+        let Ok(remainder) = self.split_dialog_remaining() else {
+            return false;
+        };
+        let Some(last) = self
+            .split_dialog
+            .as_mut()
+            .and_then(|dialog| dialog.lines.last_mut())
+        else {
+            return false;
+        };
+        let Ok(current) = parse_split_currency_field(&last.amount_text) else {
+            return false;
+        };
+        let Ok(value) = current.checked_add(remainder) else {
+            return false;
+        };
+        last.amount_text = value.to_string();
+        true
+    }
+
+    fn split_dialog_remaining_for(&self, lines: &[SplitLineForm]) -> Result<Money, &'static str> {
+        let mut remaining = self.transaction_amount()?;
+        for line in lines {
+            remaining = remaining
+                .checked_add(
+                    parse_split_currency_field(&line.amount_text)?
+                        .checked_neg()
+                        .map_err(|_| "Split total overflowed")?,
+                )
+                .map_err(|_| "Split total overflowed")?;
+        }
+        Ok(remaining)
     }
     pub fn move_focus(&mut self, backwards: bool) {
         self.focus_field = traverse_field(self.focus_field, backwards, self.account_id.is_none());
@@ -480,6 +640,85 @@ mod tests {
             i64::MAX
         );
         assert!(parse_currency_field("92233720368547758.08").is_err());
+    }
+
+    #[test]
+    fn split_dialog_open_cancel_and_save_are_draft_local() {
+        let mut e = editor();
+        let category = e.category_id.unwrap();
+        e.outflow_text = "10.01".into();
+        e.open_split_dialog();
+        let dialog = e.split_dialog.as_ref().unwrap();
+        assert_eq!(e.category_id, Some(category));
+        assert!(e.splits.is_empty());
+        assert_eq!(dialog.lines.len(), 2);
+        assert_eq!(dialog.lines[0].category_id, Some(category));
+        assert_eq!(dialog.lines[0].amount_text, "-$10.01");
+
+        e.split_dialog.as_mut().unwrap().lines[0].memo = "temporary".into();
+        e.cancel_split_dialog();
+        assert_eq!(e.category_id, Some(category));
+        assert!(e.splits.is_empty());
+
+        e.open_split_dialog();
+        let second = CategoryId::new();
+        let lines = &mut e.split_dialog.as_mut().unwrap().lines;
+        lines[0].amount_text = "-6.00".into();
+        lines[1].category_id = Some(second);
+        lines[1].amount_text = "-4.01".into();
+        assert_eq!(e.split_dialog_remaining(), Ok(Money::ZERO));
+        assert!(e.save_split_dialog(|id| id == category || id == second));
+        assert_eq!(e.category_id, None);
+        assert_eq!(e.splits.len(), 2);
+        // Applying splits only modifies the form; persistence still requires build/Commit.
+        assert_eq!(
+            e.metadata.commit_state,
+            crate::app::state::CommitState::Editing
+        );
+        assert!(e.build_transaction(BudgetId::new()).is_ok());
+    }
+
+    #[test]
+    fn existing_splits_are_copied_and_validation_is_exact() {
+        let mut e = editor();
+        e.inflow_text = "0.03".into();
+        e.splits = ["0.01", "0.02"]
+            .map(|amount| SplitLineForm {
+                category_id: Some(CategoryId::new()),
+                amount_text: amount.into(),
+                memo: String::new(),
+            })
+            .into();
+        let original = e.splits.clone();
+        e.open_split_dialog();
+        e.split_dialog.as_mut().unwrap().lines[0].amount_text = "0.02".into();
+        assert_eq!(
+            e.splits, original,
+            "the working copy must not alias its parent"
+        );
+        assert_eq!(e.split_dialog_remaining(), Ok(Money::from_minor_units(-1)));
+        assert!(!e.can_save_split_dialog(|_| true));
+        e.cancel_protected_confirmations();
+        assert!(
+            e.split_dialog.is_none(),
+            "closing the parent clears its modal"
+        );
+    }
+
+    #[test]
+    fn invalid_split_category_amount_and_remainder_disable_save() {
+        let mut e = editor();
+        e.outflow_text = "1.00".into();
+        e.open_split_dialog();
+        assert!(!e.can_save_split_dialog(|_| true)); // blank category and remainder
+        let category = e.category_id.unwrap();
+        let lines = &mut e.split_dialog.as_mut().unwrap().lines;
+        lines[1].category_id = Some(category);
+        lines[1].amount_text = "not money".into();
+        let _ = lines;
+        assert!(!e.can_save_split_dialog(|_| true));
+        e.split_dialog.as_mut().unwrap().lines[1].amount_text = "0".into();
+        assert!(!e.can_save_split_dialog(|_| false)); // unavailable category
     }
     #[test]
     fn amount_signs_and_required_fields_are_structured() {
